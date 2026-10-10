@@ -86,7 +86,7 @@ class FakeParam(FakeObj):
     def __init__(self, name, value=0.0, min=0.0, max=1.0, display=None, items=None):
         super(FakeParam, self).__init__(name=name, value=value, min=min, max=max,
                                         is_quantized=items is not None,
-                                        value_items=items or [])
+                                        value_items=items or [], automation_state=0)
         object.__setattr__(self, "_display", display)
 
     def str_for_value(self, value):
@@ -226,8 +226,17 @@ def _compressor():
     ], available_input_routing_types=routing, input_routing_type=routing[-1])
 
 
+def _drum_rack():
+    pads = [FakeObj(note=n, name="", mute=False, solo=False, chains=[]) for n in range(128)]
+    rack = FakeDevice("Drum Rack", "DrumGroupDevice", drum_pads=pads, chains=[],
+                      view=FakeObj(selected_drum_pad=None))
+    object.__setattr__(rack, "can_have_chains", True)
+    return rack
+
+
 # What Track.insert_device builds (Live 12.3+), by browser name
 INSERTABLE = {
+    "Drum Rack": _drum_rack,
     "Compressor": _compressor,
     "Utility": lambda: FakeDevice("Utility", "StereoGain", [
         FakeParam("Bass Mono", 0, 0, 1, items=["Off", "On"]),
@@ -319,3 +328,53 @@ class FakeSong(FakeObj):
 
     def stop_playing(self):
         self.is_playing = False
+
+
+class FakeBrowserItem(FakeObj):
+    def __init__(self, name, children=(), source="Core Library"):
+        folder = bool(children) or "." not in name
+        super(FakeBrowserItem, self).__init__(
+            name=name, children=list(children), is_folder=folder, is_loadable=not folder,
+            is_device=False, source=source, uri="query:" + name.replace(" ", "%20"))
+
+
+class FakeBrowser(FakeObj):
+    """Live's browser: roots of items; load_item drops onto the selected track,
+    or onto the selected pad of its Drum Rack."""
+
+    def __init__(self, song):
+        item = FakeBrowserItem
+        drum_hits = item("Drum Hits", [
+            item("Kick", [item("Kick 808 Long.wav"), item("Kick Acoustic.wav")]),
+            item("Snare", [item("Snare Tight.wav")]),
+            item("Hihat", [item("Hihat Closed 1.wav"), item("Hihat Open 1.wav")])])
+        roots = dict(
+            sounds=item("Sounds", [item("Pad", [item("Warm Pad.adg"), item("Glass Pad.adg")])]),
+            drums=item("Drums", [drum_hits, item("808 Core Kit.adg")]),
+            samples=item("Samples", [item("Kick 808 Long.wav"), item("Vocal Chop.wav")]))
+        for name in ("instruments", "audio_effects", "midi_effects", "max_for_live", "plugins",
+                     "clips", "packs", "user_library", "current_project"):
+            roots[name] = item(name.title(), [])
+        super(FakeBrowser, self).__init__(**roots)
+        object.__setattr__(self, "song", song)
+        object.__setattr__(self, "loaded", [])
+        object.__setattr__(self, "previewing", None)
+
+    def load_item(self, item):
+        track = self.song.view.selected_track
+        rack = next((d for d in track.devices if d.class_name == "DrumGroupDevice"), None)
+        pad = rack.view.selected_drum_pad if rack is not None else None
+        stem = item.name.rsplit(".", 1)[0]
+        if pad is not None:
+            pad.chains = [FakeObj(name=stem)]
+            pad.name = stem
+            self.loaded.append((track.name, pad.note, item.name))
+        else:
+            track.devices.append(FakeDevice(stem, "OriginalSimpler"))
+            self.loaded.append((track.name, None, item.name))
+
+    def preview_item(self, item):
+        object.__setattr__(self, "previewing", item.name)
+
+    def stop_preview(self):
+        object.__setattr__(self, "previewing", None)

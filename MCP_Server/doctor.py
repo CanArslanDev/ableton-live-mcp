@@ -217,11 +217,11 @@ def check_connection(host: str, port: int) -> tuple[list[dict], dict | None]:
 
 
 def newest_log() -> Path | None:
-    for pref in _live_preference_dirs():
-        for candidate in (pref / "Log.txt", pref / "Preferences" / "Log.txt"):
-            if candidate.is_file():
-                return candidate
-    return None
+    """The Log.txt Live wrote to last (several Live versions may be installed)."""
+    logs = [candidate for pref in _live_preference_dirs()
+            for candidate in (pref / "Log.txt", pref / "Preferences" / "Log.txt")
+            if candidate.is_file()]
+    return max(logs, key=lambda p: p.stat().st_mtime, default=None)
 
 
 def check_live_log(log: Path | None = None) -> dict:

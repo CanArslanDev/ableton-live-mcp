@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import music
+from .connection import AbletonCommandError
 from .telemetry_decorator import telemetry_tool
 from .tooling import register_tool
 
@@ -46,9 +47,37 @@ VIEWS = {"session": "Session", "arrangement": "Arranger", "arranger": "Arranger"
          "clip": "Detail/Clip", "device": "Detail/DeviceChain", "browser": "Browser",
          "detail": "Detail"}
 
+# Browser categories → the roots Live's browser shows in its sidebar. "all"
+# leaves out user_library and packs: their items also appear under the others.
+BROWSER_CATEGORIES = {
+    "all": ["sounds", "drums", "instruments", "audio_effects", "midi_effects", "max_for_live",
+            "plugins", "clips", "samples"],
+    "sounds": ["sounds"], "drums": ["drums"], "instruments": ["instruments"],
+    "audio_effects": ["audio_effects"], "effects": ["audio_effects"],
+    "midi_effects": ["midi_effects"], "max_for_live": ["max_for_live"],
+    "plugins": ["plugins"], "clips": ["clips"], "samples": ["samples"],
+    "user_library": ["user_library"], "packs": ["packs"], "current_project": ["current_project"],
+}
+
+# Drum kit roles → (folder in Drums › Drum Hits, words that pick the right
+# kind inside it). The pad is the role's General MIDI note (music.GM_DRUMS).
+DRUM_KIT_ROLES = {
+    "kick": ("Kick", []), "snare": ("Snare", []), "snare2": ("Snare", []),
+    "clap": ("Clap", []), "rim": ("Rim", []),
+    "closed_hat": ("Hihat", ["closed", "chh", "closed hat"]),
+    "open_hat": ("Hihat", ["open", "ohh"]), "pedal_hat": ("Hihat", ["pedal", "foot"]),
+    "low_tom": ("Tom", ["low", "floor"]), "mid_tom": ("Tom", ["mid"]),
+    "high_tom": ("Tom", ["high", "hi"]), "crash": ("Cymbal", ["crash"]),
+    "ride": ("Ride", []), "shaker": ("Shaker", []), "cowbell": ("Bell", ["cowbell", "cow"]),
+    "perc": ("Misc Percussion", []),
+}
+DEFAULT_KIT = ["kick", "snare", "clap", "closed_hat", "open_hat", "rim", "perc", "shaker",
+               "crash", "low_tom", "high_tom"]
+
 _NEW_COMMANDS = {"lom_get", "lom_set", "lom_call", "batch", "observe", "unobserve",
                  "list_observers", "poll_events", "clip_get_notes", "clip_write_notes",
-                 "clip_write_envelope", "param_set_display", "get_session_overview"}
+                 "clip_write_envelope", "param_set_display", "get_session_overview",
+                 "browser_search"}
 
 
 # ── Plumbing ─────────────────────────────────────────────────────────────────
@@ -1483,6 +1512,371 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                    "name": p["name"], "mute": p["mute"], "solo": p["solo"]}
                   for p in pads if p.get("chains")]
         return to_json({"pads": filled, "auto_mapping": drum_mapping_from_rack(track)})
+
+    # ── Browser ──────────────────────────────────────────────────────────────
+
+    def search_browser(query: str, category: str = "all", max_results: int = 25,
+                       time_limit: float = 20.0, within: list[str] | None = None) -> dict:
+        roots = BROWSER_CATEGORIES.get(category.strip().lower().replace(" ", "_"))
+        if roots is None:
+            raise ValueError(f"Unknown category {category!r}. Known: "
+                             f"{', '.join(BROWSER_CATEGORIES)}")
+        words = query.lower().split()
+
+        def rank(entry: dict) -> int:
+            """0: every word in the name and one in its folders ("kick" in
+            Drum Hits/Kick), 1: every word in the name, 2: matched via folders."""
+            name = entry["name"].lower()
+            if not all(w in name for w in words):
+                return 2
+            folders = entry["path"].lower().rsplit("/", 1)[0] if "/" in entry["path"] else ""
+            return 0 if any(w in folders for w in words) else 1
+
+        found: list[dict] = []
+        walk_id, done, visited = None, False, 0
+        deadline = time.monotonic() + time_limit
+        while True:
+            params: dict[str, Any] = ({"walk_id": walk_id} if walk_id is not None
+                                      else {"query": query, "roots": roots,
+                                            "within": within or []})
+            # ~120 ms of Live's main thread per call, then Live gets a breath
+            params.update(slice_ms=120, max_results=500)
+            reply = send("browser_search", params)
+            walk_id, done, visited = reply["walk_id"], reply["done"], reply["visited"]
+            found += reply["results"]
+            if done or sum(rank(e) == 0 for e in found) >= max_results \
+                    or time.monotonic() > deadline:
+                break
+        if not done:
+            try:
+                send("browser_search", {"walk_id": walk_id, "cancel": True})
+            except Exception:
+                pass
+        ranked = sorted(found, key=rank)
+        return {"query": query, "category": category, "complete": done, "searched": visited,
+                "matches": len(found),
+                "results": [{"id": e["$id"], "name": e["name"], "kind": e["kind"],
+                             "path": f"{e['root']}/{e['path']}", "source": e["source"],
+                             "uri": e["uri"]} for e in ranked[:max_results]]}
+
+    def browser_item_id(item: int | str, category: str) -> tuple[int, str]:
+        """(id, name) for a browser_search id or a search query."""
+        if isinstance(item, int) or re.fullmatch(r"\d+", str(item).strip()):
+            name = lom_get(f"id {int(item)}", ["name"]).get("name")
+            return int(item), name if isinstance(name, str) else str(item)
+        hits = search_browser(str(item), category, max_results=1)["results"]
+        if not hits:
+            raise ValueError(f"Nothing in the browser ({category}) matches {item!r}")
+        return hits[0]["id"], hits[0]["path"]
+
+    def drum_rack_path(track: int | str) -> str | None:
+        devices = lom_get(f"{track_path(track)} devices", ["class_name"])["items"]
+        index = next((i for i, d in enumerate(devices)
+                      if d.get("class_name") == "DrumGroupDevice"), None)
+        return None if index is None else f"{track_path(track)} devices {index}"
+
+    def pad_note(pad: int | str) -> int:
+        text = str(pad).strip().lower().replace(" ", "_")
+        if text in music.GM_DRUMS:
+            return music.GM_DRUMS[text]
+        note = music.parse_note(pad)
+        if not 0 <= note <= 127:
+            raise ValueError(f"Pad note {note} is outside 0-127")
+        return note
+
+    def selected_track_ref() -> dict | None:
+        selected = lom_get("live_set view", ["selected_track"]).get("selected_track")
+        return ref(f"id {selected['$id']}") if isinstance(selected, dict) \
+            and "$id" in selected else None
+
+    def load_items(track: int | str, loads: list[tuple[int | None, int]]) -> dict:
+        """Load browser items (by id) onto a track, or onto Drum Rack pads
+        (note), keeping the user's track selection."""
+        tp = track_path(track)
+        previous = selected_track_ref()
+        ops = [op_set("live_set view", "selected_track", ref(tp))]
+        rack = None
+        for note, item_id in loads:
+            if note is not None:
+                rack = rack or drum_rack_path(track)
+                if rack is None:
+                    raise ValueError("No Drum Rack on this track for drum_pad")
+                ops.append(op_set(f"{rack} view", "selected_drum_pad",
+                                  ref(f"{rack} drum_pads {note}")))
+            ops.append(op_call("live_app browser", "load_item", ref(f"id {item_id}")))
+        result = batch_summary(batch(ops, stop_on_error=False))
+        if previous:
+            try:
+                send("lom_set", {"path": "live_set view", "property": "selected_track",
+                                 "value": previous})
+            except Exception:
+                pass
+        return result
+
+    @tool(read_only=True)
+    def browser_search(query: str, category: str = "all", max_results: int = 25) -> str:
+        """Search Live's browser by name: presets, instruments, effects,
+        plug-ins, Max devices, clips and samples (yours included).
+
+        Every word must appear in the item's name or the folders above it, so
+        "kick 808" finds 808 kicks and "pad warm" warm pads. category: all |
+        sounds | drums (kits and one-shots in Drum Hits) | instruments |
+        audio_effects | midi_effects | max_for_live | plugins | clips |
+        samples | user_library | packs | current_project.
+        Results carry an id for browser_load and browser_preview (valid until
+        Live restarts) and the uri for load_instrument_or_effect.
+        """
+        return to_json(search_browser(query, category, max(1, min(int(max_results), 200))))
+
+    @tool
+    def browser_load(track: int | str, item: int | str, drum_pad: int | str | None = None,
+                     category: str | None = None) -> str:
+        """Load a browser item onto a track, as if double-clicked in Live's
+        browser: an instrument, effect, preset, plug-in or a sample (which
+        becomes a Simpler). item: an id from browser_search, or a search
+        query (the best match is loaded). drum_pad: put a sample on that pad
+        of the track's Drum Rack — MIDI note (36), note name ("C1") or role
+        ("kick", "snare", "closed_hat"…). An instrument replaces the track's
+        instrument, as in Live.
+        """
+        note = pad_note(drum_pad) if drum_pad is not None else None
+        item_id, label = browser_item_id(
+            item, category or ("drums" if note is not None else "all"))
+        result = load_items(track, [(note, item_id)])
+        if not result["ok"]:
+            raise RuntimeError(f"Live could not load {label}: {result['steps']}")
+        devices = lom_get(f"{track_path(track)} devices", ["name", "class_name"])["items"]
+        return to_json({"loaded": label, "track": track, "drum_pad": note,
+                        "devices": [d["name"] for d in devices]})
+
+    @tool(read_only=True)
+    def browser_preview(item: int | str | None = None, stop: bool = False,
+                        category: str = "samples") -> str:
+        """Let the user hear a sample (or a preset's preview) through Live's
+        browser preview, without loading it. item: an id from browser_search
+        or a search query. stop=True (or no item) stops the preview. Live's
+        preview switch in the browser must be on.
+        """
+        if stop or item is None:
+            send("lom_call", {"path": "live_app browser", "method": "stop_preview"})
+            return to_json({"preview": "stopped"})
+        item_id, label = browser_item_id(item, category)
+        send("lom_call", {"path": "live_app browser", "method": "preview_item",
+                          "args": [ref(f"id {item_id}")]})
+        return to_json({"previewing": label})
+
+    def drum_sample_score(hit: dict, folder: str, style: str, source: str) -> float:
+        """Prefer clean one-shots named after their kind, then the asked source."""
+        name = hit["name"].lower()
+        score = 0.0
+        if folder.split()[0].lower().rstrip("s") in name or (folder == "Hihat" and "hat" in name):
+            score += 3
+        if style and style.lower() in name:
+            score += 2
+        if re.search(r"\bbpm\b|\d+\s*bpm|loop|\bfill|\broll|build|reverse|\brev\b", name):
+            score -= 6
+        origin = (hit.get("source") or "").lower()
+        if source == "core":
+            score += 2 if "core" in origin else -4
+        elif source == "user":
+            score += 2 if "user" in origin else -4
+        elif "core" in origin:
+            score += 0.5
+        return score
+
+    @tool
+    def build_drum_kit(track: int | str, roles: list[str] | None = None,
+                       sounds: dict[str, int | str] | None = None, style: str = "",
+                       source: str = "any", seed: int | None = None,
+                       replace: bool = False) -> str:
+        """Build a Drum Rack from single samples: for each role a one-shot from
+        Live's Drums › Drum Hits (your own samples included) goes onto its
+        General MIDI pad, so generate_drum_pattern plays it right away.
+
+        - roles: default kick, snare, clap, closed_hat, open_hat, rim, perc,
+          shaker, crash, low_tom, high_tom (also: pedal_hat, mid_tom, ride, cowbell)
+        - sounds: per-role override, a browser_search id or a query:
+          {"kick": "808 long", "snare": 12345}
+        - style: a word added to every search ("808", "909", "acoustic", "lofi");
+          roles with no match fall back to any sample of that kind
+        - source: any | core (Ableton's Core Library) | user (your own samples)
+        - seed: picks among the best dozen matches for variety (default: the best)
+        - replace: also refill pads that already hold a sound
+        Adds a Drum Rack to the track if it has none (Live 12.3+).
+        """
+        import random
+
+        roles = roles or DEFAULT_KIT
+        if source not in ("any", "core", "user"):
+            raise ValueError("source must be any, core or user")
+        unknown = [r for r in roles if r not in DRUM_KIT_ROLES]
+        if unknown:
+            raise ValueError(f"Unknown roles {unknown}. Known: {', '.join(DRUM_KIT_ROLES)}")
+        rack = drum_rack_path(track)
+        if rack is None:
+            inserted_device_ids(track_path(track), [["Drum Rack"]])
+            rack = drum_rack_path(track)
+        pads = lom_get(f"{rack} drum_pads", ["note", "chains"])["items"]
+        filled = {p["note"] for p in pads if p.get("chains")}
+        rng = random.Random(seed)
+        plan, report, missing = [], [], []
+        for role in roles:
+            note = music.GM_DRUMS[role]
+            if note in filled and not replace:
+                report.append({"role": role, "note": note, "kept": "pad already filled"})
+                continue
+            override = (sounds or {}).get(role)
+            if override is not None:
+                item_id, label = browser_item_id(override, "drums")
+                choice = {"id": item_id, "path": label}
+            else:
+                folder, words = DRUM_KIT_ROLES[role]
+                queries = ([f"{style} {w}" for w in words] + [style] if style else []) \
+                    + words + [""]
+                choice = None
+                for query in queries:
+                    try:
+                        found = search_browser(query, "drums", max_results=400,
+                                               within=["Drum Hits", folder])["results"]
+                    except AbletonCommandError:  # no such folder in this Live
+                        break
+                    hits = sorted((h for h in found if h["kind"] == "sample"),
+                                  key=lambda h: -drum_sample_score(h, folder, style, source))
+                    if hits:
+                        choice = hits[0] if seed is None else rng.choice(hits[:12])
+                        break
+            if choice is None:
+                missing.append(role)
+                continue
+            plan.append((note, choice["id"]))
+            report.append({"role": role, "note": note, "pad": music.note_name(note),
+                           "sample": choice["path"]})
+        loaded = load_items(track, plan) if plan else {"ok": True, "steps": []}
+        result = {"track": track, "pads": report, "ok": loaded["ok"]}
+        if missing:
+            result["no_match"] = missing
+        if not loaded["ok"]:
+            result["errors"] = [s for s in loaded["steps"] if isinstance(s, dict) and "error" in s]
+        return to_json(result)
+
+    # ── Snapshots (A/B) ──────────────────────────────────────────────────────
+
+    def run_steps(steps: list[dict]) -> list[dict]:
+        return batch(steps, stop_on_error=False)["results"] if steps else []
+
+    def current_track_paths(names: list[str | None] | None = None,
+                            fallback: list[str] | None = None) -> list[str]:
+        """Every track, return and the master; or, given saved track names,
+        where those tracks are now (by unique name, else their saved path)."""
+        listing = run_steps([
+            {"type": "lom_get", "params": {"path": "live_set tracks", "properties": ["name"],
+                                           "ids": False}},
+            {"type": "lom_get", "params": {"path": "live_set return_tracks",
+                                           "properties": ["name"], "ids": False}}])
+        paths, labels = [], []
+        for collection, step in zip(("live_set tracks", "live_set return_tracks"), listing):
+            for index, item in enumerate((step.get("result") or {}).get("items", [])):
+                paths.append(f"{collection} {index}")
+                labels.append(item.get("name"))
+        paths.append("live_set master_track")
+        labels.append(None)
+        if names is None:
+            return paths
+        located = []
+        for name, saved_path in zip(names, fallback or [None] * len(names)):
+            if name and labels.count(name) == 1:
+                located.append(paths[labels.index(name)])
+            elif saved_path:
+                located.append(saved_path)
+        return located
+
+    def with_displays(changes: list[dict], limit: int = 60) -> list[dict]:
+        shown = changes[:limit]
+        lookups = []
+        for change in shown:
+            if change["property"] == "value":
+                for key in ("saved", "now"):
+                    lookups.append(op_call(change["path"], "str_for_value", change[key]))
+        results = iter(run_steps(lookups))
+        rows = []
+        for change in shown:
+            row = {"track": change["track"], "where": change["where"],
+                   "parameter": change["parameter"]}
+            if change["property"] == "value":
+                for key in ("saved", "now"):
+                    step = next(results)
+                    text = ((step.get("result") or {}).get("result")
+                            if step.get("status") == "success" else None)
+                    row[key] = text if isinstance(text, str) else round(change[key], 4)
+            else:
+                row["saved"], row["now"] = change["saved"], change["now"]
+            rows.append(row)
+        return rows
+
+    @tool
+    def snapshot(action: str = "save", name: str = "", tracks: list[int | str] | None = None,
+                 compare_to: str = "") -> str:
+        """Save and restore how the set sounds: mixer (volume, pan, sends,
+        mute) and every device parameter, devices inside racks included.
+
+        action:
+        - save: capture `tracks` (default: all tracks, returns and the master)
+          under `name` (default: a timestamp)
+        - restore: put the saved values back, as one undo step. Automated
+          parameters are left alone (setting one would switch its automation off)
+        - diff: what changed since the snapshot, with values as Live shows
+          them; with compare_to, the difference between two snapshots
+        - list | delete
+        Use it to try ideas safely and to A/B: save "A", make changes, save
+        "B", then restore "A" or "B" while the user listens. Tracks are matched
+        by name, so snapshots survive adding or moving tracks.
+        """
+        from . import snapshots
+
+        action = action.lower()
+        if action == "list":
+            return to_json({"snapshots": snapshots.list_all(),
+                            "folder": str(snapshots.snapshot_dir())})
+        if action == "delete":
+            return to_json({"deleted": snapshots.delete(name), "name": name})
+        if action == "save":
+            name = name or time.strftime("snapshot %Y-%m-%d %H.%M.%S")
+            paths = [track_path(t) for t in tracks] if tracks else current_track_paths()
+            captured = snapshots.capture(run_steps, paths)
+            snapshots.save(name, captured)
+            return to_json({"saved": name, "tracks": [t["name"] for t in captured],
+                            "parameters": sum(snapshots.count_parameters(t) for t in captured)})
+        if action not in ("restore", "diff"):
+            raise ValueError(f"Unknown action {action!r} (save, restore, diff, list, delete)")
+        saved = snapshots.load(name)["tracks"]
+        if tracks:
+            wanted = {lom_get(track_path(t), ["name"])["name"] for t in tracks}
+            saved = [t for t in saved if t.get("name") in wanted]
+        if compare_to:
+            if action == "restore":
+                raise ValueError("compare_to only works with diff")
+            current = snapshots.load(compare_to)["tracks"]
+        else:
+            current = snapshots.capture(run_steps, current_track_paths(
+                [t.get("name") for t in saved], [t["path"] for t in saved]))
+        report = snapshots.compare(saved, current)
+        result: dict[str, Any] = {"snapshot": name, "changed": len(report["changes"])}
+        if action == "diff":
+            result["compared_to"] = compare_to or "the set now"
+            result["changes"] = with_displays(report["changes"])
+        else:
+            applied = batch_summary(batch(snapshots.restore_ops(report["changes"]),
+                                          stop_on_error=False)) if report["changes"] \
+                else {"ok": True, "steps": []}
+            result["restored"] = len(report["changes"]) - sum(
+                1 for s in applied["steps"] if isinstance(s, dict) and "error" in s)
+            result["errors"] = [s for s in applied["steps"] if isinstance(s, dict) and "error" in s]
+        if report["automated"]:
+            result["automated_not_restored" if action == "restore" else "automated"] = [
+                f"{c['track']} / {c['where']} / {c['parameter']}" for c in report["automated"]]
+        if report["missing"]:
+            result["missing_now"] = report["missing"]
+        return to_json(result)
 
     # ── Song, transport, view ────────────────────────────────────────────────
 

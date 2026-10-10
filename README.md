@@ -32,6 +32,8 @@ while testing against Live 12.3.
 - *"What chords are in the Keys clip? Write a walking bass that follows them."*
 - *"Play the drop and tell me which tracks are too hot."*
 - *"Put a vocal chain on the Vox track and duck the bass from the kick."*
+- *"Build me an 808 kit from my own samples and write a trap beat on it."*
+- *"Save a snapshot, make the mix brighter, then let me A/B the two."*
 
 ## Features
 
@@ -50,12 +52,15 @@ while testing against Live 12.3.
 | **Harmony** | `analyze_harmony` names the chords in a clip (key, roman numerals, changes) and returns a progression the generators accept, so new parts follow existing ones |
 | **MIDI files** | `import_midi_file` (whole file, one track or one channel), `export_clip_to_midi` (with the set's tempo and meter) |
 | **Device chains** | `add_device` inserts any of Live's own devices by name with settings; `apply_device_chain` adds ready-made chains (vocal, drum bus, bass, pad, master, sidechain duck) — Live 12.3+ |
+| **Browser** | `browser_search` finds presets, devices, plug-ins, clips and samples by name (yours too; ~12,000 samples in about 0.1 s), `browser_load` puts one on a track or a Drum Rack pad, `browser_preview` plays it in Live's preview |
+| **Drum kits** | `build_drum_kit` fills a Drum Rack's General MIDI pads with one-shots from Drums › Drum Hits — by style ("808", "909"), from the Core Library or your own samples |
+| **Snapshots & A/B** | `snapshot` saves the mixer and every device parameter (racks included), shows what changed in Live's own units, and restores it in one undo step; automated parameters are left alone |
 | **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a section through Resampling and measures it; `analyze_audio_file`, `analyze_clip_audio` |
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview`, `ableton://events` |
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-50 tools in the default profile (72 with `ABLETON_MCP_PROFILE=full`), plus
+55 tools in the default profile (77 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`.
 
@@ -232,7 +237,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 160 tests, no Live required
+uv run --with pytest pytest -q        # 185 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the

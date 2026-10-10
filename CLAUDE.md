@@ -27,6 +27,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
+| `MCP_Server/snapshots.py` | Capture / compare / restore mixer and device parameters (A/B), stored in `~/.ableton-mcp/snapshots`. |
 | `MCP_Server/music.py` | Pure music theory + generators + note transforms over note dicts. No Live access. |
 | `MCP_Server/audio_analysis.py` | numpy/scipy/soundfile analysis (BS.1770 LUFS, spectrum, stereo, tempo, key). |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
@@ -124,6 +125,15 @@ Measured on Live 12.3.8:
   `lom_get` for `$display` to get the text ("-6.0 dB").
 - Glue Compressor's stepped controls display without units (".6", "A" for
   Auto); `parse_display_number` accepts the leading-dot form.
+- **Browser:** the roots are Live 12's sidebar labels. `samples` is one flat
+  list (~12,000 items on this machine, walked in ~0.1 s), `drums` holds kits
+  and `Drum Hits/<Kick, Snare, Hihat, …>` (user samples included).
+  `BrowserItem` has no `_live_ptr`; `browser_search` registers results by
+  `id(obj)` so `{"$ref": "id N"}` reaches them. Selecting a pad
+  (`rack.view.selected_drum_pad`) and then `browser.load_item(sample)` puts
+  the sample on that pad as a Simpler (~100 ms each).
+- Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
+  script 2.0 and the timer transport work the same there.
 
 ## Server-side conventions
 

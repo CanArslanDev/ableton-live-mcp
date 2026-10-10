@@ -57,7 +57,8 @@ def script():
     surface._passive_lock = __import__("threading").Lock()
     surface._lom_init()
     surface.schedule_message = lambda delay, fn: fn()
-    surface.application = lambda: fake_live.FakeObj(view=fake_live.FakeObj())
+    browser = fake_live.FakeBrowser(surface._song)
+    surface.application = lambda: fake_live.FakeObj(view=fake_live.FakeObj(), browser=browser)
     surface.module = module
     return surface
 
@@ -744,3 +745,132 @@ def test_get_live_events_waits_on_the_script(live_server):
     finally:
         timer.join()
     assert [e["value"] for e in events["events"]] == [99.0]
+
+
+def test_snapshots_save_diff_and_restore(live_server, tmp_path, monkeypatch):
+    monkeypatch.setenv("ABLETON_MCP_SNAPSHOT_DIR", str(tmp_path / "snaps"))
+    script, call = live_server
+    song = script._song
+    bass = song.tracks[1]
+    saved = call("snapshot", action="save", name="A")
+    assert saved["tracks"][:3] == ["Drums", "Bass", "Vox"] and saved["parameters"] > 0
+
+    bass.mixer_device.volume.value = 0.5
+    bass.devices[0].parameters[1].value = 0.9          # Operator filter
+    song.tracks[0].mute = True
+    vox_pan = song.tracks[2].mixer_device.panning
+    vox_pan.value = 0.4
+    vox_pan.automation_state = 1                       # automated: never restored
+    # A new track at the top shifts every index; matching is by name
+    song.tracks.insert(0, fake_live.FakeTrack("New"))
+
+    diff = call("snapshot", action="diff", name="A")
+    rows = {(r["track"], r["parameter"]): r for r in diff["changes"]}
+    assert rows[("Bass", "volume")]["saved"] == "0.0 dB"
+    assert rows[("Bass", "volume")]["now"] == "-9.2 dB"
+    assert ("Bass", "Filter Freq") in rows and ("Drums", "mute") in rows
+    assert diff["automated"] == ["Vox / mixer / pan"]
+
+    restored = call("snapshot", action="restore", name="A")
+    assert restored["restored"] == 3 and not restored["errors"]
+    assert bass.mixer_device.volume.value == 0.85
+    assert bass.devices[0].parameters[1].value == 0.5
+    assert song.tracks[1].mute is False
+    assert vox_pan.value == 0.4                         # automation left alone
+    assert call("snapshot", action="diff", name="A")["changed"] == 0
+
+    call("snapshot", action="save", name="B", tracks=["Bass"])
+    bass.mixer_device.volume.value = 0.7
+    between = call("snapshot", action="diff", name="B", compare_to="A")
+    assert between["changed"] == 0
+    listed = call("snapshot", action="list")["snapshots"]
+    assert {s["name"] for s in listed} == {"A", "B"}
+    assert call("snapshot", action="delete", name="B")["deleted"] is True
+
+
+def test_snapshots_reach_devices_inside_racks(script):
+    from MCP_Server import snapshots
+
+    inner = fake_live.FakeDevice("Saturator", "Saturator", [fake_live.FakeParam("Drive", 0.3)])
+    chain = fake_live.FakeObj(name="Chain 1", devices=[inner], mixer_device=fake_live.FakeObj(
+        volume=fake_live.FakeParam("Chain Volume", 0.85), panning=fake_live.FakeParam("Pan", 0.0)))
+    rack = fake_live.FakeDevice("FX Rack", "AudioEffectGroupDevice",
+                                [fake_live.FakeParam("Macro 1", 0.0)])
+    object.__setattr__(rack, "can_have_chains", True)
+    object.__setattr__(rack, "chains", [chain])
+    script._song.tracks[2].devices.append(rack)
+
+    def run_steps(steps):
+        return script._process_command({"type": "batch", "params": {
+            "commands": steps, "stop_on_error": False}})["result"]["results"]
+
+    before = snapshots.capture(run_steps, ["live_set tracks 2"])
+    saturator = before[0]["devices"][0]["chains"][0]["devices"][0]
+    assert saturator["name"] == "Saturator"
+    assert [p["name"] for p in saturator["parameters"]] == ["Device On", "Drive"]
+    inner.parameters[1].value = 0.8
+    chain.mixer_device.volume.value = 0.5
+    report = snapshots.compare(before, snapshots.capture(run_steps, ["live_set tracks 2"]))
+    changed = {(c["where"], c["parameter"]) for c in report["changes"]}
+    assert changed == {("Saturator", "Drive"), ("FX Rack / Chain 1", "volume")}
+    run_steps(snapshots.restore_ops(report["changes"]))
+    assert inner.parameters[1].value == 0.3 and chain.mixer_device.volume.value == 0.85
+
+
+def test_browser_search_walks_in_slices_and_returns_loadable_ids(script):
+    first = run(script, "browser_search", query="kick", roots=["drums", "samples"],
+                slice_ms=0.001, max_results=1)
+    found, walk = list(first["results"]), first["walk_id"]
+    while not first["done"]:
+        first = run(script, "browser_search", walk_id=walk, slice_ms=0.001)
+        found += first["results"]
+    # Breadth first across the roots: shallow items come first
+    paths = [r["path"] for r in found]
+    assert paths == ["Kick 808 Long.wav", "Drum Hits/Kick/Kick 808 Long.wav",
+                     "Drum Hits/Kick/Kick Acoustic.wav"]
+    assert {r["kind"] for r in found} == {"sample"} and all("$id" in r for r in found)
+    within = run(script, "browser_search", query="", roots=["drums"],
+                 within=["Drum Hits", "hihat"])
+    assert [r["name"] for r in within["results"]] == ["Hihat Closed 1.wav", "Hihat Open 1.wav"]
+    assert "No folder" in run_error(script, "browser_search", query="", roots=["drums"],
+                                    within=["Drum Hits", "Cowbell"])
+
+
+def test_browser_tools_search_load_and_preview(live_server):
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    found = call("browser_search", query="pad warm", category="sounds")
+    assert [r["path"] for r in found["results"]] == ["Sounds/Pad/Warm Pad.adg"]
+    assert found["results"][0]["kind"] == "preset"
+
+    song.view.selected_track = song.tracks[0]
+    loaded = call("browser_load", track="Vox", item=found["results"][0]["id"])
+    assert loaded["devices"][-1] == "Warm Pad"
+    assert song.view.selected_track is song.tracks[0]      # selection put back
+
+    call("browser_preview", item="vocal chop")
+    assert browser.previewing == "Vocal Chop.wav"
+    call("browser_preview", stop=True)
+    assert browser.previewing is None
+
+
+def test_build_drum_kit_fills_general_midi_pads(live_server):
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    song.tracks.append(fake_live.FakeTrack("Beat"))
+    kit = call("build_drum_kit", track="Beat", roles=["kick", "snare", "closed_hat",
+                                                      "open_hat", "clap"], style="808")
+    pads = {p["role"]: p for p in kit["pads"]}
+    assert pads["kick"]["sample"].endswith("Kick 808 Long.wav")       # style word won
+    assert pads["closed_hat"]["sample"].endswith("Hihat Closed 1.wav")
+    assert pads["open_hat"]["sample"].endswith("Hihat Open 1.wav")
+    assert kit["no_match"] == ["clap"]                                 # no Clap folder here
+    rack = song.tracks[-1].devices[0]
+    assert rack.class_name == "DrumGroupDevice"
+    assert {n for _t, n, _i in browser.loaded} == {36, 38, 42, 46}
+    assert rack.drum_pads[36].name == "Kick 808 Long"
+
+    again = call("build_drum_kit", track="Beat", roles=["kick"])
+    assert again["pads"] == [{"role": "kick", "note": 36, "kept": "pad already filled"}]

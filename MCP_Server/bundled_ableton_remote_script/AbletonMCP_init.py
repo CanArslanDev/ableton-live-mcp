@@ -3,6 +3,7 @@ from __future__ import absolute_import, print_function, unicode_literals
 
 from _Framework.ControlSurface import ControlSurface
 import binascii
+import collections
 import errno
 import hmac
 import os
@@ -96,6 +97,7 @@ SCRIPT_CAPABILITIES = [
     "clip_write_envelope",
     "param_set_display",
     "get_session_overview",
+    "browser_search",
 ]
 
 # ── Generic Live Object Model bridge ──────────────────────────────────────────
@@ -228,13 +230,14 @@ class LomMixin(object):
     """Generic LOM access, batching, observers and note/envelope editing."""
 
     def _lom_init(self):
-        import collections
         self._lom_registry = collections.OrderedDict()
         self._observers = {}
         self._observer_seq = 0
         self._events = []
         self._event_seq = 0
         self._events_lock = threading.Lock()
+        self._browser_walks = collections.OrderedDict()
+        self._browser_walk_seq = 0
 
     def _lom_command_handlers(self):
         return {
@@ -251,6 +254,7 @@ class LomMixin(object):
             "clip_write_envelope": self._cmd_clip_write_envelope,
             "param_set_display": self._cmd_param_set_display,
             "get_session_overview": self._cmd_get_session_overview,
+            "browser_search": self._cmd_browser_search,
         }
 
     # ── Path resolution ───────────────────────────────────────────────────────
@@ -442,7 +446,7 @@ class LomMixin(object):
         info["methods"] = methods
         return info
 
-    def _lom_pick(self, obj, properties):
+    def _lom_pick(self, obj, properties, register=True):
         picked = {}
         for prop in properties:
             if prop == "$display":
@@ -457,7 +461,7 @@ class LomMixin(object):
                 picked[name] = self._lom_value(getattr(obj, name))
             except Exception as e:
                 picked[name] = {"$error": str(e)[:160]}
-        if lom_is_live_object(obj):
+        if register and lom_is_live_object(obj):
             picked["$id"] = self._lom_register(obj)
         return picked
 
@@ -466,14 +470,17 @@ class LomMixin(object):
     def _cmd_lom_get(self, params):
         target = self._lom_resolve(params.get("path"))
         properties = params.get("properties")
+        # "ids": false leaves "$id" out, so a bulk read (every parameter of a
+        # set) does not push other objects out of the id registry
+        register = params.get("ids", True) is not False
         if lom_is_sequence(target):
             if properties:
-                return {"items": [self._lom_pick(item, properties) for item in
+                return {"items": [self._lom_pick(item, properties, register) for item in
                                   list(target)[:LOM_MAX_LIST_ITEMS]],
                         "length": len(target)}
             return {"items": self._lom_value(target), "length": len(target)}
         if properties:
-            return self._lom_pick(target, properties)
+            return self._lom_pick(target, properties, register)
         if lom_is_live_object(target) or lom_is_value_object(target):
             return self._lom_describe(target)
         return {"value": self._lom_value(target)}
@@ -836,6 +843,123 @@ class LomMixin(object):
                 "new": param.str_for_value(param.value), "raw_value": float(param.value)}
 
     # ── Compact session overview ──────────────────────────────────────────────
+
+    # ── Browser search ───────────────────────────────────────────────────────
+
+    BROWSER_ROOTS = ("sounds", "drums", "instruments", "audio_effects", "midi_effects",
+                     "max_for_live", "plugins", "clips", "samples", "packs",
+                     "user_library", "current_project")
+    SAMPLE_EXTENSIONS = ("wav", "aif", "aiff", "flac", "mp3", "ogg", "m4a")
+    PRESET_EXTENSIONS = ("adg", "adv", "amxd", "agr", "alc", "als")
+
+    def _cmd_browser_search(self, params):
+        """Find browser items whose name, or the folders above it, contain every
+        word of the query. Walks in slices (slice_ms) so Live's UI keeps up;
+        while "done" is false, call again with the returned walk_id."""
+        walks = self._browser_walks
+        if params.get("walk_id") is not None:
+            walk = walks.get(int(params["walk_id"]))
+            if walk is None:
+                raise LomError("Unknown or finished browser walk %s" % params["walk_id"])
+            if params.get("cancel"):
+                walks.pop(walk["id"], None)
+                return {"walk_id": walk["id"], "results": [], "visited": walk["visited"],
+                        "done": True}
+        else:
+            words = [w for w in str(params.get("query") or "").lower().split() if w]
+            # Folder names to step into first, e.g. ["Drum Hits", "Kick"]
+            within = [str(w).lower() for w in params.get("within") or []]
+            if not words and not within:
+                raise LomError("browser_search needs a query")
+            browser = self.application().browser
+            walk = {"words": words, "queue": collections.deque(), "current": None,
+                    "visited": 0,
+                    "max_depth": min(int(params.get("max_depth") or 6), 20),
+                    "loadable_only": params.get("loadable_only", True) is not False}
+            roots = params.get("roots") or ("sounds", "drums", "instruments", "audio_effects",
+                                            "midi_effects", "max_for_live", "plugins",
+                                            "samples")
+            for root in roots:
+                if root not in self.BROWSER_ROOTS:
+                    raise LomError("Unknown browser root '%s' (use %s)"
+                                   % (root, ", ".join(self.BROWSER_ROOTS)))
+                item = getattr(browser, root)
+                trail = [item.name]
+                for folder in within:
+                    item = next((c for c in item.children if c.name.lower() == folder), None)
+                    if item is None:
+                        break
+                    trail.append(item.name)
+                if item is not None:
+                    walk["queue"].append((item, trail, 0))
+            if not walk["queue"]:
+                raise LomError("No folder '%s' in %s" % ("/".join(within), ", ".join(roots)))
+            self._browser_walk_seq += 1
+            walk["id"] = self._browser_walk_seq
+            walks[walk["id"]] = walk
+            while len(walks) > 4:
+                walks.popitem(last=False)
+        deadline = time.time() + min(float(params.get("slice_ms") or 100), 2000) / 1000.0
+        limit = min(int(params.get("max_results") or 100), 500)
+        results = []
+        visited_before = walk["visited"]
+        # Always make some progress, however short the slice
+        while len(results) < limit and (time.time() < deadline
+                                        or walk["visited"] == visited_before):
+            if walk["current"] is None:
+                if not walk["queue"]:
+                    break
+                folder, trail, depth = walk["queue"].popleft()
+                try:
+                    children = list(folder.children)
+                except Exception:
+                    continue
+                walk["current"] = [children, 0, trail, depth]
+            children, position, trail, depth = walk["current"]
+            while (position < len(children) and len(results) < limit
+                   and (time.time() < deadline or walk["visited"] == visited_before)):
+                child = children[position]
+                position += 1
+                walk["visited"] += 1
+                try:
+                    name = child.name
+                    is_folder = child.is_folder
+                    loadable = child.is_loadable
+                except Exception:
+                    continue
+                if is_folder and depth + 1 < walk["max_depth"]:
+                    walk["queue"].append((child, trail + [name], depth + 1))
+                if walk["loadable_only"] and not loadable:
+                    continue
+                text = (" ".join(trail[1:]) + " " + name).lower()
+                if all(word in text for word in walk["words"]):
+                    results.append(self._browser_entry(child, trail))
+            walk["current"] = None if position >= len(children) else [
+                children, position, trail, depth]
+        done = walk["current"] is None and not walk["queue"]
+        if done:
+            walks.pop(walk["id"], None)
+        return {"walk_id": walk["id"], "results": results, "visited": walk["visited"],
+                "done": done}
+
+    def _browser_entry(self, item, trail):
+        name = item.name
+        extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if item.is_folder:
+            kind = "folder"
+        elif item.is_device:
+            kind = "device"
+        elif extension in self.SAMPLE_EXTENSIONS:
+            kind = "sample"
+        elif extension == "alc":
+            kind = "clip"
+        elif extension in self.PRESET_EXTENSIONS:
+            kind = "preset"
+        else:
+            kind = "item"
+        return {"name": name, "root": trail[0], "path": "/".join(trail[1:] + [name]),
+                "kind": kind, "source": getattr(item, "source", ""),
+                "uri": getattr(item, "uri", ""), "$id": self._lom_register(item)}
 
     def _overview_track(self, track, kind, index):
         mixer = track.mixer_device
@@ -1330,7 +1454,7 @@ class AbletonMCP(LomMixin, ControlSurface):
         "get_browser_items_at_path", "get_arrangement_clips", "get_clip_notes",
         "get_device_parameters", "get_session_snapshot", "inspect_rack", "lom_get",
         "clip_get_notes", "get_session_overview", "list_observers", "observe", "unobserve",
-        "hello", "get_script_info", "drain_passive_events", "poll_events",
+        "hello", "get_script_info", "drain_passive_events", "poll_events", "browser_search",
     ])
 
     def _command_handlers(self):
