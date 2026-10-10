@@ -1,5 +1,6 @@
 # ableton_mcp_server.py
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.mcpserver import MCPServer, Context
+from mcp.server.subscriptions import InMemorySubscriptionBus
 import socket
 import json
 import logging
@@ -13,6 +14,7 @@ from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
 from .dataset import dataset_enabled, get_recorder
 from .dataset.trajectory_decorator import trajectory_tool
 from .tooling import register_tool
+from .ui import ui_extension
 from .connection import AbletonCommandError, AbletonConnection  # noqa: F401  (re-exported)
 
 ABLETON_HOST = os.environ.get("ABLETON_HOST", "localhost")
@@ -24,7 +26,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("AbletonMCPServer")
 
 @asynccontextmanager
-async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
+async def server_lifespan(server: MCPServer) -> AsyncIterator[Dict[str, Any]]:
     """Manage server startup and shutdown lifecycle"""
     try:
         logger.info("AbletonMCP server starting up")
@@ -108,9 +110,24 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             logger.debug(f"Failed to end dataset session: {e}")
         logger.info("AbletonMCP server shut down")
 
+def _package_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("ableton-live-mcp")
+    except Exception:
+        return ""
+
+
+# Live's changes go out to listening clients through this bus (live_updates)
+_updates_bus = InMemorySubscriptionBus()
+
 # Create the MCP server with lifespan support
-mcp = FastMCP(
+mcp = MCPServer(
     "AbletonMCP",
+    title="Ableton Live",
+    version=_package_version(),
+    extensions=[ui_extension()],
+    subscriptions=_updates_bus,
     instructions=(
         "Controls Ableton Live. Start with get_session_overview to see tracks, "
         "devices, clips and scenes. Tracks are addressed by index, exact name, "
@@ -1401,6 +1418,11 @@ from .prompts import register_prompts as _register_prompts
 
 _register_extended_tools(mcp, get_ableton_connection)
 _register_prompts(mcp)
+
+from . import live_updates as _live_updates  # noqa: E402
+from .extended_tools import asend as _asend  # noqa: E402
+
+live_updates = _live_updates.install(mcp, _updates_bus, _asend)
 
 
 # Main execution

@@ -4,8 +4,8 @@ import asyncio
 import importlib
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from MCP_Server import tooling
 
@@ -51,7 +51,7 @@ def test_dataset_tools_need_recording_to_be_possible(monkeypatch):
 def test_no_tool_asks_for_the_user_prompt(monkeypatch):
     tools = _server_tools(monkeypatch, "full")
     for tool in tools.values():
-        assert "user_prompt" not in tool.inputSchema.get("properties", {}), tool.name
+        assert "user_prompt" not in tool.input_schema.get("properties", {}), tool.name
 
 
 def test_every_tool_is_annotated(monkeypatch):
@@ -59,24 +59,24 @@ def test_every_tool_is_annotated(monkeypatch):
     for tool in tools.values():
         hints = tool.annotations
         assert hints is not None, tool.name
-        assert hints.openWorldHint is False
-        if hints.readOnlyHint:
-            assert hints.destructiveHint is False
-    assert tools["lom_get_object"].annotations.readOnlyHint is True
-    assert tools["get_session_overview"].annotations.readOnlyHint is True
-    assert tools["manage_track"].annotations.destructiveHint is True
+        assert hints.open_world_hint is False
+        if hints.read_only_hint:
+            assert hints.destructive_hint is False
+    assert tools["lom_get_object"].annotations.read_only_hint is True
+    assert tools["get_session_overview"].annotations.read_only_hint is True
+    assert tools["manage_track"].annotations.destructive_hint is True
     mixer = tools["set_track_mixer"].annotations
-    assert (mixer.readOnlyHint, mixer.destructiveHint, mixer.idempotentHint) == (
+    assert (mixer.read_only_hint, mixer.destructive_hint, mixer.idempotent_hint) == (
         False, False, True)
 
 
 def test_results_are_not_wrapped_in_an_output_schema(monkeypatch):
     tools = _server_tools(monkeypatch, "core")
-    assert all(t.outputSchema is None for t in tools.values())
+    assert all(t.output_schema is None for t in tools.values())
 
 
 def test_sync_tools_run_off_the_event_loop():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     loop_threads = []
 
     def slow(x: int) -> str:
@@ -85,8 +85,6 @@ def test_sync_tools_run_off_the_event_loop():
         return str(x)
 
     tooling.register_tool(mcp, slow, read_only=True)
-    tool = mcp._tool_manager.get_tool("slow")
-    assert tool.is_async
 
     async def main():
         import threading
@@ -98,7 +96,7 @@ def test_sync_tools_run_off_the_event_loop():
 
 
 def test_legacy_failure_text_becomes_a_tool_error():
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
 
     def legacy() -> str:
         return "Error getting clip notes: boom"
@@ -122,3 +120,30 @@ def test_workflow_prompts_are_listed_and_render(monkeypatch):
     rendered = asyncio.run(server.mcp.get_prompt("release_check", {"platform": "apple_music"}))
     text = rendered.messages[0].content.text
     assert "-16 LUFS" in text and "render_and_analyze" in text
+
+
+def test_any_failure_reaches_the_model_with_its_message():
+    """mcp 2.x shows only "Error executing tool <name>" for an exception that is
+    not a ToolError; the message is what tells the model how to fix the call."""
+    mcp = MCPServer("t")
+
+    def picky(track: str) -> str:
+        raise ValueError(f"No item named {track!r}. Available: Drums, Bass")
+
+    async def coro() -> str:
+        raise RuntimeError("Live is busy")
+
+    coro.__name__ = "busy"
+    tooling.register_tool(mcp, picky)
+    tooling.register_tool(mcp, coro)
+    with pytest.raises(ToolError, match="Error executing tool picky: No item named 'Nope'. "
+                                        "Available: Drums, Bass"):
+        asyncio.run(mcp.call_tool("picky", {"track": "Nope"}))
+    with pytest.raises(ToolError, match="busy: Live is busy"):
+        asyncio.run(mcp.call_tool("busy", {}))
+
+
+def test_ui_tools_point_at_their_panel(monkeypatch):
+    tools = _server_tools(monkeypatch, "core")
+    panels = {t.name: (t.meta or {}).get("ui", {}).get("resourceUri") for t in tools.values()}
+    assert panels["get_session_overview"] is None or panels["get_session_overview"].startswith("ui://")

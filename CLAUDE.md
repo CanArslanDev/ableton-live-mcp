@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repository.
 
 ## What this is
 
-An MCP server (`MCP_Server/`, Python 3.10+, FastMCP) that controls Ableton Live
+An MCP server (`MCP_Server/`, Python 3.10+, MCP Python SDK 2.x `MCPServer`) that controls Ableton Live
 through a MIDI Remote Script (`AbletonMCP_Remote_Script/__init__.py`) running
 inside Live's embedded Python. They talk JSON over TCP on `127.0.0.1:9877`,
 protocol 2: one JSON object per line each way, requests carry an `id` the reply
@@ -22,7 +22,9 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/server.py` | The shared connection and the original tools; registers `extended_tools` at the bottom. |
 | `MCP_Server/connection.py` | `AbletonConnection`: hello + token, line framing, reply ids, fallback to protocol 1 for scripts before 2.0. |
 | `MCP_Server/extended_tools.py` | All newer tools, written in terms of the generic commands (`lom_get/set/call`, `batch`, …). |
-| `MCP_Server/tooling.py` | `register_tool`: annotations, profiles (`ABLETON_MCP_PROFILE`), sync tools off the event loop, errors as MCP tool errors. |
+| `MCP_Server/tooling.py` | `register_tool`: annotations, profiles (`ABLETON_MCP_PROFILE`), errors as MCP tool errors with their message, the MCP Apps panel a tool shows. |
+| `MCP_Server/live_updates.py` | Pushes `ableton://events` / `ableton://session/overview` updates: `resources/subscribe` (2025-11-25) and `subscriptions/listen` (2026-07-28). |
+| `MCP_Server/ui/` | MCP Apps panels (`ui://` HTML resources) registered through the SDK's `Apps` extension. |
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
 | `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
@@ -162,10 +164,16 @@ Measured on Live 12.3.8:
 
 - New tools go in `extended_tools.register()` with the local `@tool` decorator;
   `@tool(read_only=True)`, `@tool(destructive=True)` (deletes or replaces
-  content) or `@tool(idempotent=True)` set the MCP annotations. Registration
-  goes through `tooling.register_tool`: sync tools run on a worker thread and
-  exceptions become MCP tool errors, so raise on failure instead of returning
-  error text. The original tools in `server.py` use `@legacy_tool("core" |
+  content) or `@tool(idempotent=True)` set the MCP annotations, `ui="ui://…"`
+  the panel. Registration goes through `tooling.register_tool`: sync tools run
+  on the SDK's worker threads, and any exception becomes a `ToolError` carrying
+  its message (mcp 2.x would otherwise show only "Error executing tool …"), so
+  raise on failure instead of returning error text. Long `async` tools take
+  `ctx: Context | None = None` and call `report_progress(ctx, …)`.
+- mcp 2.x: `from mcp.server.mcpserver import MCPServer, Context`; types use
+  snake_case attributes (`input_schema`, `read_only_hint`); `call_tool()`
+  returns a `CallToolResult`. Clients negotiate 2025-11-25 (`mode="legacy"`) or
+  2026-07-28; push updates and tests cover both. The original tools in `server.py` use `@legacy_tool("core" |
   "full")`; "full" ones only appear with `ABLETON_MCP_PROFILE=full`.
 - Generators read the set's meter and Key & Scale through `song_context()` /
   `resolve_key()`; explicit arguments win.

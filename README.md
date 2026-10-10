@@ -62,7 +62,7 @@ while testing against Live 12.3.
 | **Snapshots & A/B** | `snapshot` saves the mixer and every device parameter (racks included), shows what changed in Live's own units, and restores it in one undo step; automated parameters are left alone |
 | **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a Session scene, the clips playing or an Arrangement section and measures it; `analyze_audio_file`, `analyze_clip_audio` |
 | **Mix diagnosis** | `mix_doctor` records every track and the master in one pass and reports masking (which parts fight in which band, how often, what to do), stray low end, phase, overs and the master against a streaming target; `capture_stems` returns the stem files; `compare_to_reference` compares tonal balance, loudness, dynamics and width with a reference track and returns EQ Eight settings that move the mix towards it |
-| **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview`, `ableton://events` |
+| **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview` and `ableton://events`, pushed to clients that subscribe (both MCP protocol versions) |
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
@@ -83,8 +83,10 @@ key estimates — plus plain-language observations such as *"Heavy low-mids
 
 Every tool carries MCP annotations (read-only, destructive, idempotent), so
 clients can run reads without asking and confirm deletions. Failures come back
-as MCP tool errors. Tool calls run off the event loop, so a long Live
-operation does not stall the server.
+as MCP tool errors with the reason, so the assistant can correct its next
+call. Tool calls run off the event loop, so a long Live operation does not
+stall the server, and the recording tools report progress. Built on the MCP
+Python SDK 2.x; clients on the 2025-11-25 and 2026-07-28 protocols both work.
 
 The original upstream tools that newer ones replace (`set_tempo`,
 `fire_clip`, `get_clip_notes`, `create_midi_track`, …) are left out by
@@ -244,7 +246,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 220 tests, no Live required
+uv run --with pytest pytest -q        # 225 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the

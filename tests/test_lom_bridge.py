@@ -317,14 +317,14 @@ def live_server(script, tmp_path, monkeypatch):
     from MCP_Server.server import AbletonConnection
     connection = AbletonConnection(host="127.0.0.1", port=port)
 
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from MCP_Server import extended_tools
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     extended_tools.register(mcp, lambda: connection)
 
     def call(_tool, **arguments):
         content = asyncio.run(mcp.call_tool(_tool, arguments))
-        blocks = content[0] if isinstance(content, tuple) else content
+        blocks = content.content
         text = blocks[0].text
         assert not text.startswith("Error"), text
         try:
@@ -448,13 +448,13 @@ def test_tools_watch_and_events(live_server):
 
 
 def test_tool_errors_are_reported_as_tool_errors(live_server):
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     script, call = live_server
     result = call("set_track_mixer", track="Nope", mute=True)
     assert result["ok"] is False
     assert "No item named 'Nope'" in result["steps"][0]["error"]
-    # FastMCP turns the exception into a result with isError=true
+    # The SDK turns the ToolError into a result with isError=true
     with pytest.raises(ToolError, match="manage_scene: Unknown action 'explode'"):
         call("manage_scene", action="explode", scene=0)
 
@@ -1017,3 +1017,99 @@ def test_parameter_names_from_another_live_version_still_work(live_server):
     from MCP_Server.extended_tools import parameter_aliases
     assert parameter_aliases("2 Resonance A") == ["2 Q A"]
     assert parameter_aliases("Output") == ["Output Gain", "Makeup", "Gain", "Master Output"]
+
+
+def _updates_server():
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.subscriptions import InMemorySubscriptionBus
+
+    from MCP_Server import extended_tools, live_updates
+
+    bus = InMemorySubscriptionBus()
+    server = MCPServer("t", subscriptions=bus)
+    extended_tools.register(server, extended_tools._get_connection)
+    live_updates.install(server, bus, extended_tools.asend)
+    return server
+
+
+def test_live_changes_reach_2025_era_subscribers(live_server):
+    import threading
+    import warnings
+
+    import anyio
+    from mcp.client import Client
+    from mcp.types import ResourceUpdatedNotification
+
+    script, _call = live_server
+    server = _updates_server()
+    updates = []
+
+    async def on_message(message):
+        if isinstance(message, ResourceUpdatedNotification):
+            updates.append(message.params.uri)
+
+    async def main():
+        async with Client(server, mode="legacy", message_handler=on_message) as client:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                await client.subscribe_resource("ableton://events")
+            await client.call_tool("watch_live", {"path": "live_set", "property": "tempo"})
+            await anyio.sleep(0.5)
+            threading.Timer(0.2, lambda: setattr(script._song, "tempo", 98.0)).start()
+            with anyio.fail_after(8):
+                while "ableton://events" not in updates:
+                    await anyio.sleep(0.05)
+            # Adding a track touches the overview
+            threading.Timer(0.1, lambda: script._song.tracks.append(
+                fake_live.FakeTrack("Late"))).start()
+            await anyio.sleep(0.6)
+
+    anyio.run(main)
+    assert "ableton://events" in updates
+
+
+def test_live_changes_reach_2026_era_listen_streams(live_server):
+    import threading
+
+    import anyio
+    from mcp.client import Client
+
+    script, _call = live_server
+    server = _updates_server()
+    seen = []
+
+    async def main():
+        async with Client(server) as client:
+            await client.call_tool("watch_live", {"path": "live_set", "property": "tempo"})
+            async with client.listen(resource_subscriptions=["ableton://events"]) as stream:
+                threading.Timer(0.6, lambda: setattr(script._song, "tempo", 97.0)).start()
+                with anyio.fail_after(8):
+                    async for event in stream:
+                        seen.append(getattr(event, "uri", None))
+                        break
+
+    anyio.run(main)
+    assert seen == ["ableton://events"]
+
+
+def test_long_tools_report_progress(live_server):
+    import anyio
+    from mcp.client import Client
+
+    script, _call = live_server
+    server = _updates_server()
+    steps = []
+
+    async def on_progress(progress, total, message):
+        steps.append((progress, total, message))
+
+    async def main():
+        script._song.continue_playing = lambda: setattr(script._song, "is_playing", True)
+        async with Client(server) as client:
+            result = await client.call_tool("measure_levels", {"seconds": 1, "tracks": ["Bass"]},
+                                            progress_callback=on_progress)
+            assert not result.is_error
+
+    anyio.run(main)
+    assert steps and steps[-1][1] == 1.0
+    assert all(message.startswith("Metering") for _p, _t, message in steps)

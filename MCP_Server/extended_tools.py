@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from mcp.server.mcpserver import Context
+
 from . import music
 from .connection import AbletonCommandError
 from .telemetry_decorator import telemetry_tool
@@ -101,6 +103,17 @@ def send(command: str, params: dict | None = None, timeout: float | None = None)
 async def asend(command: str, params: dict | None = None,
                 timeout: float | None = None) -> Any:
     return await asyncio.to_thread(send, command, params, timeout)
+
+
+async def report_progress(ctx: Context | None, done: float, total: float | None,
+                          message: str) -> None:
+    """Progress for the client, when it asked for it (a no-op otherwise)."""
+    if ctx is None:
+        return
+    try:
+        await ctx.report_progress(done, total, message)
+    except Exception as e:  # called outside a request (tests, direct calls)
+        logger.debug("No progress channel: %s", e)
 
 
 def lom_get(path: str, properties: list[str] | None = None) -> Any:
@@ -2584,7 +2597,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     async def record_section(sources: list[tuple[str, str]], start_beat: float | None,
                              length_beats: float, keep_tracks: bool = False,
-                             scene: int | str | None = None) -> dict:
+                             scene: int | str | None = None,
+                             ctx: Context | None = None) -> dict:
         """Record several inputs at once, in one real-time pass.
 
         sources: (label, input) pairs, where input is "Resampling" (the master)
@@ -2691,10 +2705,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     raise RuntimeError("Could not start recording: "
                                        + to_json(batch_summary(started)))
                 # Session recordings wait for the next launch boundary (≤ 8 bars)
-                deadline = time.monotonic() + seconds + (32 * 60.0 / float(song["tempo"])
-                                                         if session else 0) + 30.0
+                began = time.monotonic()
+                deadline = began + seconds + (32 * 60.0 / float(song["tempo"])
+                                              if session else 0) + 30.0
+                label = f"Recording {len(sources)} part{'s' if len(sources) > 1 else ''}"
                 while time.monotonic() < deadline:
                     await asyncio.sleep(0.2)
+                    elapsed = time.monotonic() - began
+                    await report_progress(ctx, min(elapsed, seconds), seconds,
+                                          f"{label}: {elapsed:.0f} of {seconds:.0f} s")
                     if session:
                         polled = await asend("batch", {"commands": [
                             {"type": "lom_get", "params": {
@@ -2777,7 +2796,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     async def render_and_analyze(start_beat: float | None = None,
                                  length_beats: float = 16.0, source: str = "master",
                                  keep_track: bool = False,
-                                 scene: int | str | None = None) -> str:
+                                 scene: int | str | None = None,
+                                 ctx: Context | None = None) -> str:
         """Listen to the set: record a section in real time and analyze it.
 
         Records `length_beats` of the master output ("master", via Resampling)
@@ -2794,7 +2814,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         input_name = "Resampling" if source.lower() == "master" else source
         recorded = await record_section([(source, input_name)], start_beat, length_beats,
-                                        keep_track, scene)
+                                        keep_track, scene, ctx)
         analysis = await asyncio.to_thread(analyze, recorded["files"][source])
         analysis["render"] = dict(recorded["section"], source=source, track_kept=keep_track)
         return to_json(analysis)
@@ -2803,7 +2823,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     async def capture_stems(tracks: list[int | str] | None = None,
                             start_beat: float | None = None, length_beats: float = 16.0,
                             include_master: bool = True,
-                            scene: int | str | None = None) -> str:
+                            scene: int | str | None = None,
+                            ctx: Context | None = None) -> str:
         """Record several tracks at once — one real-time pass of the section,
         each on its own temporary audio track fed from that track's output
         (after its devices, fader and pan) — and summarise each stem:
@@ -2819,7 +2840,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         from .mix_analysis import stem_summary
 
         sources = await stem_sources(tracks, include_master)
-        recorded = await record_section(sources, start_beat, length_beats, scene=scene)
+        recorded = await record_section(sources, start_beat, length_beats, scene=scene,
+                                        ctx=ctx)
 
         def summarise() -> dict:
             return {label: dict(stem_summary(*load_audio(path)), file=path)
@@ -2832,7 +2854,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     async def mix_doctor(start_beat: float | None = None, length_beats: float = 16.0,
                          tracks: list[int | str] | None = None,
                          platform: str = "spotify",
-                         scene: int | str | None = None) -> str:
+                         scene: int | str | None = None,
+                         ctx: Context | None = None) -> str:
         """Diagnose the mix of a section, the way an engineer listening to
         solos would. Records every track and the master in one real-time pass
         (see capture_stems; start_beat / scene choose what plays), then reports:
@@ -2849,7 +2872,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         from .prompts import LOUDNESS_TARGETS
 
         sources = await stem_sources(tracks, include_master=True)
-        recorded = await record_section(sources, start_beat, length_beats, scene=scene)
+        recorded = await record_section(sources, start_beat, length_beats, scene=scene,
+                                        ctx=ctx)
         files = recorded["files"]
 
         def diagnose() -> dict:
@@ -2891,7 +2915,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                    start_beat: float | None = None,
                                    length_beats: float = 16.0,
                                    whole_reference: bool = False,
-                                   scene: int | str | None = None) -> str:
+                                   scene: int | str | None = None,
+                                   ctx: Context | None = None) -> str:
         """Compare the mix with a reference track: loudness, true peak,
         dynamics (crest factor, loudness range), stereo width and tonal balance
         per 1/3 octave after matching levels — plus EQ Eight settings that move
@@ -2912,7 +2937,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         section = None
         if mix_path is None:
             recorded = await record_section([("Master", "Resampling")], start_beat,
-                                            length_beats, scene=scene)
+                                            length_beats, scene=scene, ctx=ctx)
             mix_path = recorded["files"]["Master"]
             section = recorded["section"]
 
@@ -2927,7 +2952,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     @tool
     async def measure_levels(seconds: float = 8.0, tracks: list[int | str] | None = None,
-                             start_beat: float | None = None, play: bool = True) -> str:
+                             start_beat: float | None = None, play: bool = True,
+                             ctx: Context | None = None) -> str:
         """Gain staging: meter the set while it plays and report the peak and
         average level of every track, return and the master in dBFS, read
         from Live's own meters. Nothing is recorded or written, so it is much
@@ -2968,6 +2994,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             deadline = time.monotonic() + seconds
             while True:
                 await asyncio.sleep(0.25)
+                left = max(0.0, deadline - time.monotonic())
+                await report_progress(ctx, seconds - left, seconds,
+                                      f"Metering: {seconds - left:.0f} of {seconds:.0f} s")
                 polled = await asend("poll_events", {"since": since, "limit": 2000})
                 missed = missed or polled.get("missed", False)
                 for event in polled["events"]:

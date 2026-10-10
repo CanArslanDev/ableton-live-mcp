@@ -10,7 +10,7 @@ import json
 import numpy as np
 import pytest
 import soundfile as sf
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from MCP_Server import extended_tools
 
@@ -82,10 +82,10 @@ class ScriptedLive:
 
 
 def _render(live, **arguments):
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     extended_tools.register(mcp, lambda: live)
     content = asyncio.run(mcp.call_tool("render_and_analyze", arguments))
-    blocks = content[0] if isinstance(content, tuple) else content
+    blocks = content.content
     return json.loads(blocks[0].text)
 
 
@@ -121,7 +121,7 @@ def test_arm_states_are_restored_by_id(wav):
 
 
 def test_failed_setup_still_removes_the_temporary_track(wav):
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     live = ScriptedLive(wav, setup_fails=True)
     with pytest.raises(ToolError, match="Render setup failed"):
@@ -130,7 +130,7 @@ def test_failed_setup_still_removes_the_temporary_track(wav):
 
 
 def test_unreadable_recording_still_removes_the_temporary_track(tmp_path):
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     broken = tmp_path / "broken.wav"
     broken.write_bytes(b"not audio at all")
@@ -236,10 +236,10 @@ class MultiLive:
 
 
 def _call(live, tool, **arguments):
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     extended_tools.register(mcp, lambda: live)
     content = asyncio.run(mcp.call_tool(tool, arguments))
-    blocks = content[0] if isinstance(content, tuple) else content
+    blocks = content.content
     return json.loads(blocks[0].text)
 
 

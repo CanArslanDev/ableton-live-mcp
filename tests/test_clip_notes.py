@@ -24,7 +24,7 @@ def call(tool, *args, **kwargs):
     """Invoke a tool function whichever shape it has.
 
     @trajectory_tool returns a coroutine even around a sync tool body: the
-    dataset consent dialog is awaited, and FastMCP runs a sync tool directly
+    dataset consent dialog is awaited, and the SDK runs a sync tool directly
     on the event loop where that is impossible. Tools without that decorator
     stay plain functions.
     """
