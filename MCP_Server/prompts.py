@@ -114,15 +114,16 @@ structure (lengths in bars): {structure}.
 1. get_session_overview: list the clips per track and decide which tracks
    play in which section (intro and outro sparse, drops full, breaks
    without drums or bass). Show the plan as a table and wait for approval.
-2. For each section, duplicate_to_arrangement the chosen clips at the
-   section's start beat (bars × beats per bar), repeating loops as needed.
-3. create_locator at every section start, named after the section.
-4. Add movement at transitions: draw filter or volume ramps with
+2. build_arrangement with one entry per section: a scene plus "except" for
+   the tracks that sit out, or explicit "clips" per track. It repeats loops to
+   fill each section, cuts MIDI clips exactly and puts a named locator at
+   every section start.
+3. Add movement at transitions: draw filter or volume ramps with
    write_clip_automation on a Session copy of the clip that leads into a
-   drop, then duplicate that clip to the Arrangement (envelopes can only be
-   written on Session clips; the copy keeps them). Add a fill before each new
-   section (generate_drum_pattern with fill=True).
-5. Switch to the Arrangement (select_in_live view="arrangement") and
+   drop, then duplicate_to_arrangement that copy over the transition
+   (envelopes can only be written on Session clips; the copy keeps them).
+   Add a fill before each new section (generate_drum_pattern with fill=True).
+4. Switch to the Arrangement (select_in_live view="arrangement") and
    summarise the layout."""
 
     @mcp.prompt(name="release_check", title="Release check")

@@ -1173,15 +1173,12 @@ def create_locator(
         missing = require_capability("create_locator")
         if missing:
             return missing
-        ableton = get_ableton_connection()
-        result = ableton.send_command(
-            "create_locator",
-            {"name": name, "time": time}
-        )
-        return (
-            f"Locator '{result.get('name', name)}' set at beat "
-            f"{result.get('time', time)}"
-        )
+        from .extended_tools import place_locators
+
+        result = place_locators([(name, float(time))])[0]
+        if "error" in result:
+            return f"Error creating locator: {result['error']}"
+        return f"Locator '{result['name']}' set at beat {result['time']}"
     except Exception as e:
         logger.error(f"Error creating locator: {str(e)}")
         return f"Error creating locator: {str(e)}"

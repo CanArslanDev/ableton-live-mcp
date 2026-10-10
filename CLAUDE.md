@@ -140,6 +140,11 @@ Measured on Live 12.3.8:
   devices, fader and pan. `ClipSlot.fire(length)` (positional) on an armed
   empty slot records a fixed-length Session clip from the next launch
   boundary; firing a scene and those slots in one batch starts them together.
+- **Deferred state:** a playhead moved by `current_song_time` is not in effect
+  until the callback returns — `set_or_delete_cue()` in the same call toggles
+  a cue at the *old* position (and would delete a cue there). Move the
+  playhead in one call, toggle in the next (`place_locators`); the script's
+  `create_locator` toggles on the next update via `schedule_message`.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
 

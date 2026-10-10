@@ -874,3 +874,49 @@ def test_build_drum_kit_fills_general_midi_pads(live_server):
 
     again = call("build_drum_kit", track="Beat", roles=["kick"])
     assert again["pads"] == [{"role": "kick", "note": 36, "kept": "pad already filled"}]
+
+
+def test_build_arrangement_lays_out_sections_with_locators(live_server):
+    script, call = live_server
+    song = script._song
+    drums, bass, vox = song.tracks
+    drums.clip_slots[0].clip = fake_live.FakeClip(name="Beat", length=4.0)
+    drums.clip_slots[0].has_clip = True
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    riff = fake_live.FakeClip(name="Bass B", length=3.0)
+    riff.add_new_notes([fake_live.MidiNoteSpecification(pitch=40, start_time=t, duration=1.5,
+                                                        velocity=100, mute=False)
+                        for t in (0.0, 2.0)])
+    bass.clip_slots[1].clip, bass.clip_slots[1].has_clip = riff, True
+    vox.clip_slots[0].clip = fake_live.FakeClip(name="Chop", length=6.0, midi=False)
+    vox.clip_slots[0].has_clip = True
+
+    result = call("build_arrangement", sections=[
+        {"name": "Intro", "bars": 2, "scene": 0, "except": ["Drums"]},
+        {"name": "Drop", "bars": 4, "scene": "Intro"},
+        {"name": "Outro", "bars": 1, "clips": {"Bass": "Bass B"}}])
+    assert result["ok"] and result["end_bar"] == 8
+    assert [s["bar"] for s in result["sections"]] == [1, 3, 7]
+    starts = lambda track: [(c.start_time, c.name) for c in track.arrangement_clips]
+    assert starts(drums) == [(8.0, "Beat"), (12.0, "Beat"), (16.0, "Beat"), (20.0, "Beat")]
+    assert starts(bass)[:3] == [(0.0, "Bass A"), (8.0, "Bass A"), (16.0, "Bass A")]
+    # Outro: 4 beats of a 3-beat MIDI clip → one copy plus an exact 1-beat cut
+    assert starts(bass)[3] == (24.0, "Bass B") and bass.arrangement_clips[4].length == 1.0
+    cut = bass.arrangement_clips[4]._notes
+    assert [(n.start_time, n.duration) for n in cut] == [(0.0, 1.0)]
+    assert any("Chop" in w or "Vox" in w for w in result["warnings"])
+    assert [(c.name, c.time) for c in song.cue_points] == [("Intro", 0.0), ("Drop", 8.0),
+                                                          ("Outro", 24.0)]
+
+
+def test_create_locator_toggles_after_the_playhead_moved(script):
+    """Live applies a moved playhead after the callback, so the script toggles
+    the cue on the next update (here schedule_message runs at once)."""
+    song = script._song
+    song.current_song_time = 4.0
+    run(script, "create_locator", name="Drop", time=16.0)
+    assert [(c.name, c.time) for c in song.cue_points] == [("Drop", 16.0)]
+    assert song.current_song_time == 4.0
+    run(script, "create_locator", name="Big Drop", time=16.0)   # renames, never toggles off
+    assert [(c.name, c.time) for c in song.cue_points] == [("Big Drop", 16.0)]

@@ -2232,56 +2232,46 @@ class AbletonMCP(LomMixin, ControlSurface):
     def _create_locator(self, name, time_val):
         """Create (or rename) a named locator at the given beat position.
 
-        Uses Live's Song.set_or_delete_cue(), which toggles a cue at the
-        current_song_time. We temporarily move the playhead, toggle, then
-        restore. If a cue already exists at that time we just rename it
-        instead of toggling (which would delete it).
+        Live only has Song.set_or_delete_cue(), which toggles a cue at the
+        playhead — and a playhead moved in this same callback is not in effect
+        yet (measured on Live 12.4: the cue lands at the old position, or an
+        existing cue there is deleted). So the playhead moves now and the
+        toggle and rename run on the next update; the reply says so.
         """
-        try:
-            song = self._song
-            target_time = float(time_val)
-            tolerance = 1e-3
+        song = self._song
+        target_time = float(time_val)
+        tolerance = 1e-3
 
-            # See if a cue already exists at (or near) the target time
-            existing = None
+        def cue_at():
             for cue in song.cue_points:
                 if abs(cue.time - target_time) < tolerance:
-                    existing = cue
-                    break
+                    return cue
+            return None
 
-            original_time = song.current_song_time
-
-            if existing is None:
-                # Move playhead, toggle to create, then locate the new cue
-                song.current_song_time = target_time
-                song.set_or_delete_cue()
-                for cue in song.cue_points:
-                    if abs(cue.time - target_time) < tolerance:
-                        existing = cue
-                        break
-                # Restore playhead
-                try:
-                    song.current_song_time = original_time
-                except Exception:
-                    pass
-
-            if existing is None:
-                raise Exception("Failed to create cue at time " + str(target_time))
-
+        existing = cue_at()
+        if existing is not None:
             if name:
-                try:
-                    existing.name = str(name)
-                except Exception as e:
-                    self.log_message("Could not rename locator: " + str(e))
+                existing.name = str(name)
+            return {"success": True, "time": existing.time, "name": existing.name}
 
-            return {
-                "success": True,
-                "time": existing.time,
-                "name": existing.name,
-            }
-        except Exception as e:
-            self.log_message("Error creating locator: " + str(e))
-            raise
+        original_time = song.current_song_time
+        song.current_song_time = target_time
+
+        def finish():
+            try:
+                if cue_at() is None:
+                    song.set_or_delete_cue()
+                cue = cue_at()
+                if cue is None:
+                    self.log_message("No locator appeared at beat " + str(target_time))
+                elif name:
+                    cue.name = str(name)
+                song.current_song_time = original_time
+            except Exception as e:
+                self.log_message("Error creating locator: " + str(e))
+
+        self.schedule_message(1, finish)
+        return {"success": True, "scheduled": True, "time": target_time, "name": name}
 
     # ── Browser implementations ───────────────────────────────────────────────
 

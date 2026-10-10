@@ -46,6 +46,7 @@ while testing against Live 12.3.
 | **Mixer & tracks** | `set_track_mixer` (dB, pan, sends, mute/solo/arm, monitoring), `manage_track`, `set_track_routing` |
 | **Scenes & clips** | `manage_scene`, `set_clip_properties` (loop, markers, warp, gain, pitch, launch), `manage_clip` (duplicate, crop, quantize, Arrangement clips) |
 | **Notes** | `read_clip_notes`, `edit_clip_notes` (probability, velocity deviation, release velocity, edit by note id), `transform_clip_notes` (transpose, snap to scale, quantize, humanize, reverse, invert, legato, …) |
+| **Song structure** | `build_arrangement` lays Session clips out as sections (scene minus some tracks, or clips per track), repeats loops, cuts MIDI exactly and names a locator at each section |
 | **Automation** | `write_clip_automation` draws envelopes for any device or mixer parameter, from points or shapes |
 | **Devices & racks** | `set_device_parameter_by_name` accepts what Live displays (`"800 Hz"`, `"-6 dB"`, `"25L"`, `"Lowpass"`), `manage_device`, `rack_control` (macros, variations), `get_drum_pads` |
 | **Song & transport** | `set_song_properties` (time signature, swing, loop, Live 12 key/scale, quantization), `transport` (undo/redo, capture MIDI, cues), `select_in_live` |
@@ -62,7 +63,7 @@ while testing against Live 12.3.
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-58 tools in the default profile (80 with `ABLETON_MCP_PROFILE=full`), plus
+59 tools in the default profile (81 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -240,7 +241,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 195 tests, no Live required
+uv run --with pytest pytest -q        # 197 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the

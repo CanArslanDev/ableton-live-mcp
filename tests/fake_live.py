@@ -263,6 +263,20 @@ class FakeTrack(FakeObj):
     def delete_device(self, index):
         del self.devices[index]
 
+    def duplicate_clip_to_arrangement(self, clip, time):
+        copy = FakeClip(name=clip.name, length=clip.length, midi=clip.is_midi_clip)
+        object.__setattr__(copy, "start_time", float(time))
+        object.__setattr__(copy, "end_time", float(time) + clip.length)
+        self.arrangement_clips.append(copy)
+        return copy
+
+    def create_midi_clip(self, start, length):
+        clip = FakeClip(length=length)
+        object.__setattr__(clip, "start_time", float(start))
+        object.__setattr__(clip, "end_time", float(start) + length)
+        self.arrangement_clips.append(clip)
+        return clip
+
     def insert_device(self, name, index=-1):
         if name not in INSERTABLE:
             raise RuntimeError("Unknown device name: %s" % name)
@@ -308,6 +322,13 @@ class FakeSong(FakeObj):
 
     def end_undo_step(self):
         self.undo_log.append("end")
+
+    def set_or_delete_cue(self):
+        here = [c for c in self.cue_points if c.time == self.current_song_time]
+        if here:
+            self.cue_points.remove(here[0])
+        else:
+            self.cue_points.append(FakeObj(name="", time=self.current_song_time))
 
     def create_midi_track(self, index):
         track = FakeTrack("%d-MIDI" % (len(self.tracks) + 1))

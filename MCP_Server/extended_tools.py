@@ -382,6 +382,39 @@ DRUM_KEYWORDS = [
 ]
 
 
+def place_locators(cues: list[tuple[str, float]]) -> list[dict]:
+    """Create or rename named locators at beat positions.
+
+    Song.set_or_delete_cue() toggles a cue at the playhead, and a playhead
+    moved in the same call is not in effect yet (Live 12.4), so each cue
+    takes two calls: move, then toggle. Existing cues are only renamed, and
+    the playhead goes back where it was.
+    """
+    def current() -> list[dict]:
+        return lom_get("live_set cue_points", ["name", "time"])["items"]
+
+    original = lom_get("live_set", ["current_song_time"])["current_song_time"]
+    have = [c["time"] for c in current()]
+    for _name, at in cues:
+        if any(abs(t - at) < 1e-3 for t in have):
+            continue
+        send("lom_set", {"path": "live_set", "property": "current_song_time", "value": at})
+        time.sleep(0.05)
+        send("lom_call", {"path": "live_set", "method": "set_or_delete_cue"})
+        have.append(at)
+    placed = current()
+    renames, result = [], []
+    for name, at in cues:
+        cue = next((c for c in placed if abs(c["time"] - at) < 1e-3), None)
+        if cue is None:
+            result.append({"name": name, "time": at, "error": "Live did not create it"})
+            continue
+        renames.append(op_set(f"id {cue['$id']}", "name", name))
+        result.append({"name": name, "time": at})
+    batch(renames + [op_set("live_set", "current_song_time", original)], stop_on_error=False)
+    return result
+
+
 def drum_mapping_from_rack(track: int | str) -> dict[str, int]:
     devices = lom_get(f"{track_path(track)} devices", ["class_name"])["items"]
     rack_index = next((i for i, d in enumerate(devices)
@@ -1876,6 +1909,156 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 f"{c['track']} / {c['where']} / {c['parameter']}" for c in report["automated"]]
         if report["missing"]:
             result["missing_now"] = report["missing"]
+        return to_json(result)
+
+    # ── Song structure ───────────────────────────────────────────────────────
+
+    def session_clips() -> tuple[list[str], list[dict[int, dict]], list[str]]:
+        """Track names, each track's Session clips by slot, and scene names."""
+        listing = run_steps([
+            {"type": "lom_get", "params": {"path": "live_set tracks", "properties": ["name"],
+                                           "ids": False}},
+            {"type": "lom_get", "params": {"path": "live_set scenes", "properties": ["name"],
+                                           "ids": False}}])
+        names = [t.get("name") for t in listing[0]["result"]["items"]]
+        scenes = [s.get("name") for s in listing[1]["result"]["items"]]
+        slots = run_steps([{"type": "lom_get", "params": {
+            "path": f"live_set tracks {i} clip_slots", "properties": ["has_clip"], "ids": False}}
+            for i in range(len(names))])
+        wanted = [(i, k) for i, step in enumerate(slots)
+                  for k, slot in enumerate((step.get("result") or {}).get("items", []))
+                  if slot.get("has_clip")]
+        details = run_steps([{"type": "lom_get", "params": {
+            "path": f"live_set tracks {i} clip_slots {k} clip", "ids": False,
+            "properties": ["name", "length", "loop_start", "is_midi_clip"]}}
+            for i, k in wanted])
+        clips: list[dict[int, dict]] = [{} for _ in names]
+        for (i, k), step in zip(wanted, details):
+            if step.get("status") == "success":
+                clips[i][k] = step["result"]
+        return names, clips, scenes
+
+    @tool(destructive=True)
+    def build_arrangement(sections: list[dict], start_bar: int = 1,
+                          locators: bool = True) -> str:
+        """Lay Session clips out in the Arrangement as a song, in one call.
+
+        sections, in order: {"name": "Intro", "bars": 8, ...} plus what plays —
+        - "scene": index or name: every track plays its clip from that scene;
+          "except": ["Drums", "Bass"] leaves tracks out (breakdowns, intros)
+        - "clips": {"Drums": 0, "Bass": "Bass B"}: per track a Session slot
+          index or clip name; tracks not listed are silent
+        A clip shorter than its section repeats. MIDI clips are cut exactly at
+        the section end; an audio clip that does not fit a whole number of
+        times runs over (the next section's clip on that track cuts it).
+        locators: a named locator at each section start. Whatever was in the
+        Arrangement in those bars is overwritten (one undo step).
+        Example: [{"name": "Intro", "bars": 8, "scene": 0, "except": ["Drums"]},
+        {"name": "Drop", "bars": 16, "scene": 1}, {"name": "Outro", "bars": 8,
+        "clips": {"Pad": 0}}]
+        """
+        bar = song_context()["beats_per_bar"]
+        names, clips, scenes = session_clips()
+
+        def track_index(track: int | str) -> int:
+            if isinstance(track, int) or re.fullmatch(r"-?\d+", str(track).strip()):
+                index = int(track)
+                return index + len(names) if index < 0 else index
+            if track in names:
+                return names.index(track)
+            lowered = [str(n).lower() for n in names]
+            if str(track).lower() in lowered:
+                return lowered.index(str(track).lower())
+            raise ValueError(f"No track named {track!r}. Tracks: {', '.join(map(str, names))}")
+
+        def slot_of(index: int, clip: int | str) -> int:
+            if isinstance(clip, int) or re.fullmatch(r"\d+", str(clip).strip()):
+                if int(clip) not in clips[index]:
+                    raise ValueError(f"Track {names[index]!r} has no clip in slot {clip}")
+                return int(clip)
+            for slot, info in clips[index].items():
+                if info.get("name") == clip:
+                    return slot
+            raise ValueError(f"Track {names[index]!r} has no clip named {clip!r}")
+
+        place, partial, report, warnings, cues = [], [], [], [], []
+        position = (int(start_bar) - 1) * bar
+        for number, section in enumerate(sections, start=1):
+            label = str(section.get("name") or f"Section {number}")
+            length = float(section.get("bars", 8)) * bar
+            plays: dict[int, int] = {}
+            if section.get("scene") is not None:
+                row = section["scene"]
+                row = int(row) if re.fullmatch(r"\d+", str(row).strip()) else (
+                    scenes.index(row) if row in scenes else None)
+                if row is None:
+                    raise ValueError(f"{label}: no scene {section['scene']!r}")
+                left_out = {track_index(t) for t in section.get("except") or []}
+                plays = {i: row for i in range(len(names)) if row in clips[i]
+                         and i not in left_out}
+            for track, clip in (section.get("clips") or {}).items():
+                if clip is None:
+                    plays.pop(track_index(track), None)
+                else:
+                    plays[track_index(track)] = slot_of(track_index(track), clip)
+            for i, slot in sorted(plays.items()):
+                info = clips[i][slot]
+                clip_length = float(info["length"]) or length
+                repeats = int(length // clip_length + 1e-9)
+                source = f"live_set tracks {i} clip_slots {slot} clip"
+                for k in range(repeats):
+                    place.append(op_call(f"live_set tracks {i}", "duplicate_clip_to_arrangement",
+                                         ref(source), position + k * clip_length))
+                rest = length - repeats * clip_length
+                if rest > 1e-6:
+                    at = position + repeats * clip_length
+                    if info.get("is_midi_clip"):
+                        partial.append((i, slot, at, rest, float(info.get("loop_start", 0.0))))
+                    else:
+                        place.append(op_call(f"live_set tracks {i}",
+                                             "duplicate_clip_to_arrangement", ref(source), at))
+                        warnings.append(f"{label}: {names[i]}'s audio clip runs "
+                                        f"{clip_length - rest:g} beats past the section end")
+            if locators:
+                cues.append((label, position))
+            report.append({"section": label, "bar": int(position // bar) + 1,
+                           "bars": length / bar,
+                           "tracks": {names[i]: clips[i][s].get("name") for i, s in
+                                      sorted(plays.items())}})
+            position += length
+        placed = batch(place, stop_on_error=False) if place else {"results": []}
+        errors = [s.get("message") for s in placed["results"] if s.get("status") == "error"]
+        if cues:
+            errors += [f"locator {c['name']!r}: {c['error']}" for c in place_locators(cues)
+                       if "error" in c]
+        if partial:
+            created = run_steps([op_call(f"live_set tracks {i}", "create_midi_clip", at, rest)
+                                 for i, _slot, at, rest, _start in partial])
+            writes = []
+            for (i, slot, at, rest, loop_start), step in zip(partial, created):
+                new_clip = ((step.get("result") or {}).get("result") or {}).get("$id")
+                if step.get("status") != "success" or new_clip is None:
+                    errors.append(f"{names[i]} at beat {at:g}: {step.get('message')}")
+                    continue
+                notes = []
+                for note in read_notes(f"live_set tracks {i} clip_slots {slot} clip").get(
+                        "notes", []):
+                    offset = note["start_time"] - loop_start
+                    if 0 <= offset < rest:
+                        notes.append(dict({k: v for k, v in note.items() if k != "note_id"},
+                                          start_time=offset,
+                                          duration=min(note["duration"], rest - offset)))
+                writes.append({"type": "clip_write_notes", "params": {
+                    "clip_path": f"id {new_clip}", "notes": notes, "mode": "replace"}})
+                writes.append(op_set(f"id {new_clip}", "name", clips[i][slot].get("name") or ""))
+            errors += [s.get("message") for s in run_steps(writes) if s.get("status") == "error"]
+        result: dict[str, Any] = {"ok": not errors, "sections": report,
+                                  "end_bar": int(position // bar) + 1,
+                                  "time_signature": song_context()["time_signature"]}
+        if warnings:
+            result["warnings"] = warnings
+        if errors:
+            result["errors"] = errors[:20]
         return to_json(result)
 
     # ── Song, transport, view ────────────────────────────────────────────────
