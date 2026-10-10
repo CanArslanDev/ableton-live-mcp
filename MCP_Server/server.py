@@ -61,10 +61,10 @@ class AbletonConnection:
                 finally:
                     self.sock = None
 
-    def receive_full_response(self, sock, buffer_size=8192):
+    def receive_full_response(self, sock, buffer_size=8192, timeout=15.0):
         """Receive the complete response, potentially in multiple chunks"""
         chunks = []
-        sock.settimeout(15.0)  # Increased timeout for operations that might take longer
+        sock.settimeout(timeout)
         
         try:
             while True:
@@ -128,25 +128,22 @@ class AbletonConnection:
             "params": params or {}
         }
         
-        # Check if this is a state-modifying command
-        is_modifying_command = command_type in [
-            "create_midi_track", "create_audio_track", "set_track_name",
-            "create_clip", "create_audio_clip", "add_notes_to_clip", "set_clip_name",
-            "delete_clip",
-            "clear_notes_from_clip",
-            "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
-            "start_playback", "stop_playback", "load_instrument_or_effect",
-            # Arrangement view commands
-            "switch_to_arrangement_view", "set_current_song_time",
-            "duplicate_session_clip_to_arrangement",
-            "create_locator"
-        ]
-
         # Commands whose work on Live's main thread can take noticeably longer
         # than the default modifying-command budget (e.g. importing/decoding a
         # large audio file). Give them a wider socket timeout so we don't time
         # out before the Remote Script's own queue does.
-        long_running_commands = {"create_audio_clip": 65.0}
+        # Keep each value above the Remote Script's own main-thread budget
+        # (LONG_RUNNING_COMMANDS there) so its error reply arrives first.
+        long_running_commands = {
+            "create_audio_clip": 65.0,
+            "batch": 125.0,
+            "get_browser_tree": 35.0,
+            "get_browser_items_at_path": 35.0,
+            "get_browser_item": 35.0,
+            "get_session_snapshot": 35.0,
+            "load_browser_item": 35.0,
+            "load_instrument_or_effect": 35.0,
+        }
         
         try:
             logger.info(f"Sending command: {command_type} with params: {params}")
@@ -155,15 +152,16 @@ class AbletonConnection:
             self.sock.sendall(json.dumps(command).encode('utf-8'))
             logger.info(f"Command sent, waiting for response...")
             
-            # Set timeout based on command type
+            # Set timeout based on command type. Everything now runs on Live's
+            # main thread (10 s budget there), so reads need the same headroom.
             if command_type in long_running_commands:
                 timeout = long_running_commands[command_type]
             else:
-                timeout = 15.0 if is_modifying_command else 10.0
+                timeout = 15.0
             self.sock.settimeout(timeout)
 
             # Receive the response
-            response_data = self.receive_full_response(self.sock)
+            response_data = self.receive_full_response(self.sock, timeout=timeout)
             logger.info(f"Received {len(response_data)} bytes of data")
 
             # Parse the response
@@ -282,6 +280,17 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 # Create the MCP server with lifespan support
 mcp = FastMCP(
     "AbletonMCP",
+    instructions=(
+        "Controls Ableton Live. Start with get_session_overview to see tracks, "
+        "devices, clips and scenes. Tracks are addressed by index, exact name, "
+        "'master' or 'return A'; devices by index or name. Dedicated tools cover "
+        "mixer, routing, scenes, clips, notes, automation, racks, song settings, "
+        "transport, generators (chords, drums, bass, arpeggio, melody) and audio "
+        "analysis. For anything else, explore the Live Object Model with "
+        "lom_get_object and change it with lom_set_property / lom_call_method; "
+        "group multi-step edits with run_batch so they undo as one step. "
+        "Use render_and_analyze to listen to the result."
+    ),
     lifespan=server_lifespan
 )
 
@@ -1555,6 +1564,11 @@ def record_audition(
         logger.error(f"Error recording audition: {str(e)}")
         return f"Error recording audition: {str(e)}"
 
+
+
+from .extended_tools import register as _register_extended_tools
+
+_register_extended_tools(mcp, get_ableton_connection)
 
 
 # Main execution
