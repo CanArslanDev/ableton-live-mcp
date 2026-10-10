@@ -194,6 +194,15 @@ def may_ask_now() -> bool:
     """
     if not needs_prompt():
         return False
+    # Never ask for data that cannot be collected: without the (unshipped)
+    # telemetry config, or with telemetry disabled, a "yes" would do nothing.
+    try:
+        from ..telemetry import is_telemetry_enabled
+
+        if not is_telemetry_enabled():
+            return False
+    except Exception:
+        return False
     with _lock:
         last = _read_state().get("last_prompted_at") or 0
     return (time.time() - last) >= _ASK_COOLDOWN_SEC

@@ -13,7 +13,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "ableton-mcp"
+name = "ableton-live-mcp"
 version = "1.5.0"
 source = { editable = "." }
 dependencies = [
