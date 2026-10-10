@@ -288,7 +288,8 @@ mcp = FastMCP(
         "transport, generators (chords, drums, bass, arpeggio, melody) and audio "
         "analysis. For anything else, explore the Live Object Model with "
         "lom_get_object and change it with lom_set_property / lom_call_method; "
-        "group multi-step edits with run_batch so they undo as one step. "
+        "group multi-step edits with run_batch to apply them in one round-trip. "
+        "Each tool call is its own undo history entry. "
         "Use render_and_analyze to listen to the result."
     ),
     lifespan=server_lifespan

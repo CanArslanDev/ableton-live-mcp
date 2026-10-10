@@ -79,11 +79,8 @@ def lom_get(path: str, properties: list[str] | None = None) -> Any:
     return send("lom_get", params)
 
 
-def batch(commands: list[dict], undo_as_one_step: bool = True,
-          stop_on_error: bool = True) -> dict:
-    result = send("batch", {"commands": commands, "undo_as_one_step": undo_as_one_step,
-                            "stop_on_error": stop_on_error})
-    return result
+def batch(commands: list[dict], stop_on_error: bool = True) -> dict:
+    return send("batch", {"commands": commands, "stop_on_error": stop_on_error})
 
 
 def op_set(path: str, prop: str, value: Any) -> dict:
@@ -216,7 +213,7 @@ def batch_summary(result: dict) -> dict:
             else:
                 steps.append(inner)
     return {"ok": result.get("failed", 0) == 0, "completed": result.get("completed"),
-            "total": result.get("total"), "undo_grouped": result.get("undo_grouped"),
+            "total": result.get("total"),
             "steps": steps}
 
 
@@ -425,10 +422,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                          "args": args or [], "kwargs": kwargs or {}}))
 
     @tool
-    def run_batch(commands: list[dict], undo_as_one_step: bool = True,
-                  stop_on_error: bool = True) -> str:
+    def run_batch(commands: list[dict], stop_on_error: bool = True) -> str:
         """Run several Remote Script commands in one round-trip, on Live's main
-        thread, as a single undo step (Cmd+Z reverts the whole batch).
+        thread. Each command call is its own undo history entry; Live keeps
+        parameter changes (volume, tempo, mute, device values) as a separate
+        step from structural edits (names, colors, new tracks/clips/notes), so
+        undoing a mixed batch can take two Cmd+Z.
 
         Each command is {"type": <command>, "params": {...}}. Useful types:
         lom_get, lom_set, lom_call, param_set_display, clip_write_notes,
@@ -438,7 +437,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         "method": "create_midi_track", "args": [-1]}}, {"type": "lom_set",
         "params": {"path": "live_set tracks -1", "property": "name", "value": "Pad"}}]
         """
-        return to_json(batch(commands, undo_as_one_step, stop_on_error))
+        return to_json(batch(commands, stop_on_error))
 
     @tool
     def get_session_overview() -> str:
@@ -463,7 +462,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - pan: -1.0 (left) .. 1.0 (right), or Live text like "25L", "C", "40R"
         - sends_db: {"A": -12, "B": -6} (letters or 0-based indexes)
         - monitoring: "in", "auto" or "off"
-        All changes are applied as one undo step.
+        Applied in one round-trip; undoing it takes one Cmd+Z (two if a name
+        or color change is mixed in — Live files those separately).
         """
         tp = track_path(track)
         ops = []
@@ -1216,7 +1216,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                             session_record: bool | None = None,
                             arrangement_overdub: bool | None = None,
                             session_automation_record: bool | None = None) -> str:
-        """Set global song settings in one undo step.
+        """Set global song settings in one round-trip.
 
         - time_signature: "7/8"; swing: 0..1 (global swing amount)
         - loop/loop_start/loop_length: Arrangement loop, in beats
@@ -1437,7 +1437,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                   op_set("live_set", "current_song_time", start),
                   op_set("live_set", "record_mode", True),
                   op_call("live_set", "continue_playing")]
-        result = await asend("batch", {"commands": setup, "undo_as_one_step": False})
+        result = await asend("batch", {"commands": setup})
         render_index = len(tracks)
         error = None
         file_path = None
@@ -1463,7 +1463,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         op_set("live_set", "metronome", song["metronome"]),
                         op_set("live_set", "current_song_time",
                                float(song["current_song_time"]))]
-            await asend("batch", {"commands": restore, "undo_as_one_step": False,
+            await asend("batch", {"commands": restore,
                                   "stop_on_error": False})
         if error:
             raise RuntimeError(error)

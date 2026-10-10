@@ -163,20 +163,20 @@ def test_batch_runs_in_one_undo_step_and_stops_on_error(script):
         {"type": "lom_get", "params": {"path": "live_set tracks 99"}},
         {"type": "lom_set", "params": {"path": "live_set", "property": "tempo", "value": 90}},
     ])
-    assert script._song.undo_log == ["begin", "end"]
-    assert result["completed"] == 2 and result["failed"] == 1 and result["undo_grouped"]
+    assert script._song.undo_log == ["end"]  # the whole batch is one undo step
+    assert result["completed"] == 2 and result["failed"] == 1
     assert script._song.tracks[-1].name == "Pad"
     assert script._song.tempo == 120.0  # never reached
 
 
 def test_batch_can_continue_past_errors_and_rejects_nesting(script):
-    result = run(script, "batch", stop_on_error=False, undo_as_one_step=False, commands=[
+    result = run(script, "batch", stop_on_error=False, commands=[
         {"type": "batch", "params": {}},
         {"type": "lom_set", "params": {"path": "live_set", "property": "tempo", "value": 90}},
     ])
     assert result["results"][0]["status"] == "error"
     assert script._song.tempo == 90.0
-    assert script._song.undo_log == []
+    assert script._song.undo_log == ["end"]
 
 
 # ── Observers ───────────────────────────────────────────────────────────────
@@ -322,7 +322,7 @@ def test_tools_mixer_tracks_and_scenes(live_server):
     song = script._song
     result = call("set_track_mixer", track="Bass", volume_db=-6, pan="30R", mute=True,
                   sends_db={"A": -12})
-    assert result["ok"] and result["undo_grouped"]
+    assert result["ok"]
     bass = song.tracks[1]
     assert bass.mixer_device.volume.str_for_value(bass.mixer_device.volume.value) == "-6.0 dB"
     assert bass.mixer_device.panning.str_for_value(bass.mixer_device.panning.value) == "30R"
@@ -446,3 +446,29 @@ def test_live_vector_types_are_treated_as_lists(script):
     script._song.vector = Vector([fake_live.FakeObj(name="x"), fake_live.FakeObj(name="y")])
     assert script.module.lom_is_sequence(script._song.vector)
     assert run(script, "lom_get", path="live_set vector 1", properties=["name"])["name"] == "y"
+
+
+def test_value_objects_outside_the_live_module_become_references(script):
+    class RoutingType(object):  # Live 12 reports module "Track", no _live_ptr
+        __module__ = "Track"
+
+        def __init__(self, display_name):
+            self.display_name = display_name
+
+    script._song.tracks[2].available_input_routing_types = [RoutingType("Ext. In"),
+                                                            RoutingType("Resampling")]
+    items = run(script, "lom_get", path="live_set tracks 2",
+                properties=["available_input_routing_types"])["available_input_routing_types"]
+    assert [i["display_name"] for i in items] == ["Ext. In", "Resampling"]
+    assert all("$id" in i for i in items)
+
+
+def test_each_modifying_command_closes_its_undo_step(script):
+    run(script, "lom_get", path="live_set", properties=["tempo"])
+    assert script._song.undo_log == []
+    run(script, "lom_set", path="live_set", property="tempo", value=99)
+    run(script, "batch", commands=[
+        {"type": "lom_set", "params": {"path": "live_set", "property": "tempo", "value": 98}},
+        {"type": "lom_set", "params": {"path": "live_set", "property": "swing_amount",
+                                       "value": 0.1}}])
+    assert script._song.undo_log == ["end", "end"]

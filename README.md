@@ -125,7 +125,7 @@ of commands:
 | Area | Tools |
 |---|---|
 | **Any LOM object** | `lom_get_object`, `lom_set_property`, `lom_call_method` address objects by path (`'live_set tracks "Bass" devices 0 parameters 3'`, negative indexes, `id N`) |
-| **Atomic edits** | `run_batch` runs many commands in one round-trip as a single undo step |
+| **Batching** | `run_batch` runs many commands in one round-trip on Live's main thread |
 | **Orientation** | `get_session_overview`: tracks, groups, mixer, sends, devices, clips, scenes, cue points, key/scale |
 | **Mixer & tracks** | `set_track_mixer` (dB, pan, sends, mute/solo/arm, monitoring), `manage_track`, `set_track_routing` |
 | **Scenes & clips** | `manage_scene`, `set_clip_properties` (loop, markers, warp, gain, pitch, launch), `manage_clip` (duplicate, crop, quantize, Arrangement clips) |
@@ -138,7 +138,10 @@ of commands:
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview`, `ableton://events` |
 
 Every Live call now runs on Live's main thread (the LOM is not thread-safe,
-reads included). The generic commands need Remote Script 1.8.0+: run
+reads included). Each modifying command closes its own undo step: without
+this, Live keeps appending script changes to one open step, so a single Cmd+Z
+would revert every agent edit since the user last touched Live. (Live still
+files parameter changes and structural edits as separate steps.) The generic commands need Remote Script 1.8.0+: run
 `ableton-mcp-install-script` and restart Live after updating.
 
 ## Components

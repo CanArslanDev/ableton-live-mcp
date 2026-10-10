@@ -372,6 +372,10 @@ class LomMixin(object):
                     break
                 items.append(self._lom_value(item, depth + 1))
             return items
+        # Value objects Live defines outside the "Live" module (e.g.
+        # Track.RoutingType) are still needed as references for lom_set.
+        if getattr(type(value), "__module__", "builtins") not in ("builtins", "__builtin__"):
+            return self._lom_ref(value)
         return str(value)
 
     def _lom_describe(self, obj):
@@ -461,38 +465,34 @@ class LomMixin(object):
         commands = params.get("commands") or []
         stop_on_error = params.get("stop_on_error", True)
         handlers = self._command_handlers()
-        song = self._song
-        grouped = False
-        if params.get("undo_as_one_step", True) and hasattr(song, "begin_undo_step"):
-            song.begin_undo_step()
-            grouped = True
+        # The whole batch runs inside one main-thread callback and the
+        # dispatcher closes the undo step afterwards. Live 12.3 still files
+        # parameter changes (volume, tempo, mute) as a separate step from
+        # structural ones (names, colors, new tracks/clips), so a mixed batch
+        # takes two Cmd+Z; begin_undo_step/end_undo_step does not merge them.
         results = []
-        try:
-            for index, command in enumerate(commands):
-                command_type = command.get("type", "")
-                handler = handlers.get(command_type)
-                if handler is None or command_type in ("batch",) \
-                        or command_type in self.OFF_THREAD_COMMANDS:
-                    outcome = {"index": index, "type": command_type, "status": "error",
-                               "message": "Command not allowed in a batch: " + command_type}
-                else:
-                    try:
-                        outcome = {"index": index, "type": command_type, "status": "success",
-                                   "result": handler(command.get("params") or {})}
-                    except Exception as e:
-                        self.log_message("Batch step %d (%s) failed: %s"
-                                         % (index, command_type, e))
-                        outcome = {"index": index, "type": command_type,
-                                   "status": "error", "message": str(e)}
-                results.append(outcome)
-                if outcome["status"] == "error" and stop_on_error:
-                    break
-        finally:
-            if grouped:
-                song.end_undo_step()
+        for index, command in enumerate(commands):
+            command_type = command.get("type", "")
+            handler = handlers.get(command_type)
+            if handler is None or command_type in ("batch",) \
+                    or command_type in self.OFF_THREAD_COMMANDS:
+                outcome = {"index": index, "type": command_type, "status": "error",
+                           "message": "Command not allowed in a batch: " + command_type}
+            else:
+                try:
+                    outcome = {"index": index, "type": command_type, "status": "success",
+                               "result": handler(command.get("params") or {})}
+                except Exception as e:
+                    self.log_message("Batch step %d (%s) failed: %s"
+                                     % (index, command_type, e))
+                    outcome = {"index": index, "type": command_type,
+                               "status": "error", "message": str(e)}
+            results.append(outcome)
+            if outcome["status"] == "error" and stop_on_error:
+                break
         failed = [r for r in results if r["status"] == "error"]
         return {"results": results, "completed": len(results) - len(failed),
-                "failed": len(failed), "total": len(commands), "undo_grouped": grouped}
+                "failed": len(failed), "total": len(commands)}
 
     # ── Observers ─────────────────────────────────────────────────────────────
 
@@ -1075,6 +1075,14 @@ class AbletonMCP(LomMixin, ControlSurface):
 
     DEFAULT_MAIN_THREAD_TIMEOUT = 10.0
 
+    # Commands that never change the set; everything else closes its undo step.
+    READ_ONLY_COMMANDS = frozenset([
+        "get_session_info", "get_track_info", "get_browser_item", "get_browser_tree",
+        "get_browser_items_at_path", "get_arrangement_clips", "get_clip_notes",
+        "get_device_parameters", "get_session_snapshot", "inspect_rack", "lom_get",
+        "clip_get_notes", "get_session_overview", "list_observers", "observe", "unobserve",
+    ])
+
     # Main-thread budget for commands that legitimately take longer. The MCP
     # server's socket timeout for these must stay above the value here.
     LONG_RUNNING_COMMANDS = {
@@ -1175,7 +1183,23 @@ class AbletonMCP(LomMixin, ControlSurface):
 
         timeout = self.LONG_RUNNING_COMMANDS.get(
             command_type, self.DEFAULT_MAIN_THREAD_TIMEOUT)
-        return self._invoke_on_main_thread(handler, params, timeout)
+        closes_undo_step = command_type not in self.READ_ONLY_COMMANDS
+        return self._invoke_on_main_thread(handler, params, timeout, closes_undo_step)
+
+    def _close_undo_step(self):
+        """Seal this command's changes as their own undo step.
+
+        Live otherwise keeps appending every script-made change to one open
+        undo step until the user does something, so a single Cmd+Z would wipe
+        all agent edits since then. Measured on Live 12.3: end_undo_step()
+        after each command keeps every command in its own undo step(s).
+        """
+        try:
+            end = getattr(self._song, "end_undo_step", None)
+            if end is not None:
+                end()
+        except Exception as e:
+            self.log_message("end_undo_step failed: " + str(e))
 
     def _invoke_handler(self, handler, params):
         try:
@@ -1185,11 +1209,14 @@ class AbletonMCP(LomMixin, ControlSurface):
             self.log_message(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
-    def _invoke_on_main_thread(self, handler, params, timeout):
+    def _invoke_on_main_thread(self, handler, params, timeout, closes_undo_step=False):
         response_queue = queue.Queue()
 
         def main_thread_task():
-            response_queue.put(self._invoke_handler(handler, params))
+            response = self._invoke_handler(handler, params)
+            if closes_undo_step:
+                self._close_undo_step()
+            response_queue.put(response)
 
         try:
             self.schedule_message(0, main_thread_task)
