@@ -63,6 +63,7 @@ while testing against Live 12.3.
 | **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a Session scene, the clips playing or an Arrangement section and measures it; `analyze_audio_file`, `analyze_clip_audio` |
 | **Mix diagnosis** | `mix_doctor` records every track and the master in one pass and reports masking (which parts fight in which band, how often, what to do), stray low end, phase, overs and the master against a streaming target; `capture_stems` returns the stem files; `compare_to_reference` compares tonal balance, loudness, dynamics and width with a reference track and returns EQ Eight settings that move the mix towards it |
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview` and `ableton://events`, pushed to clients that subscribe (both MCP protocol versions) |
+| **Panels** | In clients that support MCP Apps (Claude Desktop, claude.ai), 22 tools show an interactive panel with their result: mixer and Session grid with scene launch, level meters, the mix doctor's masking heat map, the reference curve with a one-click EQ, snapshot A/B buttons, a piano roll of generated clips, a Drum Rack pad grid with sample swapping, and a makam keyboard. Other clients get the same results as text |
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
@@ -246,7 +247,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 225 tests, no Live required
+uv run --with pytest pytest -q        # 229 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the

@@ -186,6 +186,20 @@ Measured on Live 12.3.8:
 - Put pure logic in `music.py` / `audio_analysis.py` with unit tests; keep tools
   thin.
 
+## Panels (MCP Apps)
+
+- A panel is one self-contained HTML document (`ui/panels.py`, shared bridge
+  and theme in `ui/base.py`): no external URLs, no `innerHTML` (names come
+  from the user's set), host theme variables with light/dark fallbacks. It
+  speaks the ext-apps protocol by hand: `ui/initialize` (protocol
+  `2026-01-26`) → `ui/notifications/initialized`, then `tool-input` /
+  `tool-result`; buttons call tools with `tools/call` only when the host
+  offers `serverTools`, otherwise they are disabled.
+- Wire a tool with `@tool(..., ui=ui.<PANEL>)`; its text result must stay
+  complete for clients without Apps. `tests/test_ui.py` checks serving,
+  wiring and (with node) that every panel's script parses; check the look in
+  a real or mock host (headless Chrome) after changing a panel.
+
 ## Testing
 
 - `tests/test_lom_bridge.py` drives the script's handlers directly and, in the

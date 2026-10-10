@@ -26,6 +26,7 @@ from mcp.server.mcpserver import Context
 
 from . import music
 from .connection import AbletonCommandError
+from .ui import panels as ui
 from .telemetry_decorator import telemetry_tool
 from .tooling import register_tool
 
@@ -680,7 +681,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """
         return to_json(batch(commands, stop_on_error))
 
-    @tool(read_only=True)
+    @tool(read_only=True, ui=ui.SESSION)
     def get_session_overview() -> str:
         """Compact map of the whole set: every track (type, group, mute/solo/arm,
         volume, pan, sends, devices, Session clips), returns, master, scenes,
@@ -1028,7 +1029,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Notes ────────────────────────────────────────────────────────────────
 
-    @tool(read_only=True)
+    @tool(read_only=True, ui=ui.NOTES)
     def read_clip_notes(track: int | str, clip_index: int | None = None,
                         arrangement_clip_index: int | None = None,
                         from_time: float | None = None, time_span: float | None = None,
@@ -1086,7 +1087,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return to_json(write_notes(clip_path(track, clip_index, arrangement_clip_index),
                                    prepared, mode, **extra))
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def transform_clip_notes(track: int | str, operation: str,
                              clip_index: int | None = None,
                              arrangement_clip_index: int | None = None,
@@ -1168,7 +1169,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         "arpeggiate": (music.arpeggiate, {"style", "rate", "gate", "octaves", "seed"}),
     }
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def apply_midi_tool(track: int | str, tool: str, clip_index: int | None = None,
                         arrangement_clip_index: int | None = None,
                         settings: dict[str, Any] | None = None,
@@ -1256,7 +1257,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                      for c, v in zip(chords, voiced)]
         return to_json(result)
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def generate_chord_progression(track: int | str, progression: str | None = None,
                                    key: str | None = None, scale: str | None = None,
                                    clip_index: int | None = 0,
@@ -1294,7 +1295,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "chords": [{"chord": c["symbol"], "notes": [music.note_name(p) for p in v]}
                        for c, v in zip(chords, voiced)], "length_beats": length}))
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def generate_drum_pattern(track: int | str, style: str = "house", bars: int = 2,
                               clip_index: int | None = 0,
                               arrangement_time: float | None = None,
@@ -1332,7 +1333,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "pads_used": [music.note_name(p) for p in used],
             "time_signature": context["time_signature"], "length_beats": bars * bar})
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def generate_euclidean(track: int | str, voices: list[dict], bars: int = 2,
                            step: float | str = "1/16", clip_index: int | None = 0,
                            arrangement_time: float | None = None, replace: bool = True,
@@ -1374,7 +1375,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 for v in resolved],
             "time_signature": context["time_signature"], "length_beats": total})
 
-    @tool(idempotent=True)
+    @tool(idempotent=True, ui=ui.MAKAM)
     def turkish_makam(name: str | None = None, tonic: str | None = None,
                       tuning_file: bool = False) -> str:
         """Turkish makams (Arel-Ezgi-Uzdilek system, 53 commas per octave) and
@@ -1420,7 +1421,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                "tunings itself.")
         return to_json(info)
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def generate_usul(track: int | str, usul: str = "aksak", cycles: int = 4,
                       clip_index: int | None = 0, arrangement_time: float | None = None,
                       mapping: dict[str, int | str] | None = None, velocity: int = 110,
@@ -1465,7 +1466,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "pads": {stroke: music.note_name(note) for stroke, note in pads.items()},
             "length_beats": length, "meter_set": set_meter})
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def generate_bassline(track: int | str, progression: str | None = None,
                           key: str | None = None, scale: str | None = None,
                           clip_index: int | None = 0,
@@ -1499,7 +1500,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return generated_result(path, notes, written, dict(
             musical_context(key, scale, context), progression=progression, length_beats=length))
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def generate_arpeggio(track: int | str, progression: str | None = None,
                           key: str | None = None, scale: str | None = None,
                           clip_index: int | None = 0, arrangement_time: float | None = None,
@@ -1530,7 +1531,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return generated_result(path, notes, written, dict(
             musical_context(key, scale, context), progression=progression, length_beats=length))
 
-    @tool(destructive=True)
+    @tool(destructive=True, ui=ui.NOTES)
     def generate_melody(track: int | str, key: str | None = None, scale: str | None = None,
                         bars: int = 4, progression: str | None = None,
                         bars_per_chord: float = 1.0, clip_index: int | None = 0,
@@ -1841,7 +1842,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             return to_json(send("lom_call", {"path": dp, "method": action}))
         raise ValueError(f"Unknown action {action!r}")
 
-    @tool(read_only=True)
+    @tool(read_only=True, ui=ui.DRUMS)
     def get_drum_pads(track: int | str, device: int | str | None = None) -> str:
         """List the filled pads of a Drum Rack: MIDI note, note name, pad name,
         mute/solo. Without `device`, the first Drum Rack on the track is used.
@@ -2030,7 +2031,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             score += 0.5
         return score
 
-    @tool
+    @tool(ui=ui.DRUMS)
     def build_drum_kit(track: int | str, roles: list[str] | None = None,
                        sounds: dict[str, int | str] | None = None, style: str = "",
                        source: str = "any", seed: int | None = None,
@@ -2159,7 +2160,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             rows.append(row)
         return rows
 
-    @tool
+    @tool(ui=ui.SNAPSHOTS)
     def snapshot(action: str = "save", name: str = "", tracks: list[int | str] | None = None,
                  compare_to: str = "") -> str:
         """Save and restore how the set sounds: mixer (volume, pan, sends,
@@ -2571,7 +2572,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Audio analysis ───────────────────────────────────────────────────────
 
-    @tool(read_only=True)
+    @tool(read_only=True, ui=ui.ANALYSIS)
     async def analyze_audio_file(path: str, max_seconds: float = 600.0) -> str:
         """Analyze an audio file (wav, aiff, flac, mp3, ogg): integrated LUFS,
         true peak, loudness range, crest factor, clipping, tonal balance by
@@ -2581,7 +2582,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         from .audio_analysis import analyze
         return to_json(await asyncio.to_thread(analyze, path, max_seconds))
 
-    @tool(read_only=True)
+    @tool(read_only=True, ui=ui.ANALYSIS)
     async def analyze_clip_audio(track: int | str, clip_index: int | None = None,
                                  arrangement_clip_index: int | None = None) -> str:
         """Analyze the audio file behind an audio clip (see analyze_audio_file)."""
@@ -2792,7 +2793,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              "to choose up to 24")
         return sources
 
-    @tool
+    @tool(ui=ui.ANALYSIS)
     async def render_and_analyze(start_beat: float | None = None,
                                  length_beats: float = 16.0, source: str = "master",
                                  keep_track: bool = False,
@@ -2819,7 +2820,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         analysis["render"] = dict(recorded["section"], source=source, track_kept=keep_track)
         return to_json(analysis)
 
-    @tool
+    @tool(ui=ui.MIX)
     async def capture_stems(tracks: list[int | str] | None = None,
                             start_beat: float | None = None, length_beats: float = 16.0,
                             include_master: bool = True,
@@ -2850,7 +2851,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         stems = await asyncio.to_thread(summarise)
         return to_json({"section": recorded["section"], "stems": stems})
 
-    @tool
+    @tool(ui=ui.MIX)
     async def mix_doctor(start_beat: float | None = None, length_beats: float = 16.0,
                          tracks: list[int | str] | None = None,
                          platform: str = "spotify",
@@ -2910,7 +2911,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                       for label, s in found["stems"].items()},
         })
 
-    @tool
+    @tool(ui=ui.REFERENCE)
     async def compare_to_reference(reference_path: str, mix_path: str | None = None,
                                    start_beat: float | None = None,
                                    length_beats: float = 16.0,
@@ -2950,7 +2951,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         report["reference"] = str(reference)
         return to_json(report)
 
-    @tool
+    @tool(ui=ui.LEVELS)
     async def measure_levels(seconds: float = 8.0, tracks: list[int | str] | None = None,
                              start_beat: float | None = None, play: bool = True,
                              ctx: Context | None = None) -> str:
