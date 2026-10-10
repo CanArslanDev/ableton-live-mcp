@@ -2099,85 +2099,348 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         result["clip"] = info.get("name")
         return to_json(result)
 
-    @tool
-    async def render_and_analyze(start_beat: float | None = None,
-                                 length_beats: float = 16.0, source: str = "master",
-                                 keep_track: bool = False) -> str:
-        """Listen to the set: record a section in real time and analyze it.
+    async def record_section(sources: list[tuple[str, str]], start_beat: float | None,
+                             length_beats: float, keep_tracks: bool = False,
+                             scene: int | str | None = None) -> dict:
+        """Record several inputs at once, in one real-time pass.
 
-        Records `length_beats` from `start_beat` (default: Arrangement loop
-        start) of the master output ("master", via Resampling) or of one track
-        (track name), on a temporary audio track in the Arrangement, then runs
-        analyze_audio_file on the recording. Takes as long as the section
-        plays. Other tracks' arm states, loop, metronome and record mode are
-        restored afterwards; the temporary track is deleted unless keep_track.
-        Undo history will contain the recording steps.
+        sources: (label, input) pairs, where input is "Resampling" (the master)
+        or the name of a track or return as Live lists it among audio inputs.
+        Each gets a temporary audio track, fed after the source's mixer.
+
+        What plays: with `scene`, that Session scene is launched and recorded
+        into fixed-length Session clips; without scene or start_beat, the
+        Session clips already playing are recorded the same way; otherwise the
+        Arrangement from start_beat (default: the loop start). Arm states and
+        the metronome are restored (and loop, record mode and the playhead in
+        the Arrangement); the temporary tracks are deleted unless keep_tracks.
         """
-        from .audio_analysis import analyze
-
         song = await asend("lom_get", {"path": "live_set", "properties": [
             "tempo", "loop", "loop_start", "metronome", "record_mode", "is_playing",
             "current_song_time"]})
-        if song["is_playing"]:
+        tracks = (await asend("lom_get", {"path": "live_set tracks", "properties": [
+            "name", "can_be_armed", "arm", "playing_slot_index"]}))["items"]
+        session_playing = song["is_playing"] and any(
+            isinstance(t.get("playing_slot_index"), int) and t["playing_slot_index"] >= 0
+            for t in tracks)
+        session = scene is not None or (start_beat is None and session_playing)
+        scene_index = (await asyncio.to_thread(index_in, "live_set scenes", scene)
+                       if scene is not None else None)
+        if song["is_playing"] and not session:
             await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
         start = float(start_beat if start_beat is not None else song["loop_start"])
-        tracks = (await asend("lom_get", {"path": "live_set tracks",
-                                          "properties": ["name", "can_be_armed", "arm"]}))["items"]
         # Tracks are addressed by id from here on: the user may add or remove
         # tracks while the section plays, which would shift every index.
         armed = [t["$id"] for t in tracks if t.get("can_be_armed") and t.get("arm") is True]
-        input_name = "Resampling" if source.lower() == "master" else source
+        # In the Session, record into the launched scene's row: a scene launch
+        # may itself start recording on armed tracks' empty slots there
+        slot = scene_index or 0
         new = "live_set tracks -1"
-        setup = [op_call("live_set", "create_audio_track", -1),
-                 {"type": "lom_get", "params": {"path": new, "properties": ["name"]}},
-                 op_set(new, "name", "MCP Render"),
-                 op_set(new, "input_routing_type",
-                        ref(f"{new} available_input_routing_types {shlex.quote(input_name)}")),
-                 op_set(new, "current_monitoring_state", MONITORING["off"])]
-        setup += [op_set(f"id {i}", "arm", False) for i in armed]
-        setup += [op_set(new, "arm", True), op_set("live_set", "loop", False),
-                  op_set("live_set", "metronome", False),
-                  op_set("live_set", "current_song_time", start),
-                  op_set("live_set", "record_mode", True),
-                  op_call("live_set", "continue_playing")]
-        render_id = None
+        temp: dict[str, int] = {}
         try:
-            result = await asend("batch", {"commands": setup})
-            steps = result.get("results", [])
-            if len(steps) > 1 and steps[1].get("status") == "success":
-                render_id = steps[1]["result"]["$id"]
+            created = await asend("batch", {"commands": [
+                step for _source in sources for step in (
+                    op_call("live_set", "create_audio_track", -1),
+                    {"type": "lom_get", "params": {"path": new, "properties": ["name"]}})],
+                "stop_on_error": False})
+            steps = created.get("results", [])
+            for k, (label, _input) in enumerate(sources):
+                got = steps[2 * k + 1] if len(steps) > 2 * k + 1 else {}
+                if got.get("status") == "success":
+                    temp[label] = got["result"]["$id"]
+            if len(temp) < len(sources):
+                raise RuntimeError("Render setup failed: could not create a track for "
+                                   + ", ".join(lab for lab, _ in sources if lab not in temp))
+            # Live fills a new track's input choices only after the call that
+            # created it, and only for the first track created in a call, so
+            # inputs are set in a separate call (and retried).
+            pending = list(sources)
+            problems: list[str] = []
+            for attempt in range(3):
+                if attempt:
+                    await asyncio.sleep(0.25)
+                ops = []
+                for label, input_name in pending:
+                    track = f"id {temp[label]}"
+                    ops += [op_set(track, "input_routing_type", ref(
+                                f"{track} available_input_routing_types "
+                                f"{shlex.quote(input_name)}")),
+                            op_set(track, "name", f"MCP Rec {label}"[:48]),
+                            op_set(track, "current_monitoring_state", MONITORING["off"])]
+                    if input_name != "Resampling":
+                        # What the source sends on: after its devices, fader and pan
+                        ops.append(op_set(track, "input_routing_channel", ref(
+                            f'{track} available_input_routing_channels "Post Mixer"')))
+                result = await asend("batch", {"commands": ops, "stop_on_error": False})
+                steps = result.get("results", [])
+                position, failed, problems = 0, [], []
+                for label, input_name in pending:
+                    step = steps[position] if len(steps) > position else {}
+                    if step.get("status") != "success":
+                        failed.append((label, input_name))
+                        problems.append(f"{label} ({input_name}): "
+                                        f"{step.get('message', 'not run')}")
+                    position += 3 if input_name == "Resampling" else 4
+                pending = failed
+                if not pending:
+                    break
+            if problems:
+                raise RuntimeError("Render setup failed: " + "; ".join(problems))
+            begin = [op_set(f"id {i}", "arm", False) for i in armed]
+            begin += [op_set(f"id {i}", "arm", True) for i in temp.values()]
+            begin.append(op_set("live_set", "metronome", False))
+            if session:
+                if scene_index is not None:
+                    begin.append(op_call(f"live_set scenes {scene_index}", "fire"))
+                # Fixed-length Session recordings, starting on the next launch
+                # quantization boundary together with the scene
+                begin += [op_call(f"id {i} clip_slots {slot}", "fire", float(length_beats))
+                          for i in temp.values()]
+            else:
+                begin += [op_set("live_set", "loop", False),
+                          op_set("live_set", "current_song_time", start),
+                          op_set("live_set", "record_mode", True),
+                          op_call("live_set", "continue_playing")]
+            seconds = length_beats * 60.0 / float(song["tempo"])
             try:
-                if result.get("failed"):
-                    raise RuntimeError("Render setup failed: "
-                                       + to_json(batch_summary(result)))
-                seconds = length_beats * 60.0 / float(song["tempo"])
-                deadline = time.monotonic() + seconds + 30.0
+                started = await asend("batch", {"commands": begin})
+                if started.get("failed"):
+                    raise RuntimeError("Could not start recording: "
+                                       + to_json(batch_summary(started)))
+                # Session recordings wait for the next launch boundary (≤ 8 bars)
+                deadline = time.monotonic() + seconds + (32 * 60.0 / float(song["tempo"])
+                                                         if session else 0) + 30.0
                 while time.monotonic() < deadline:
                     await asyncio.sleep(0.2)
-                    now = await asend("lom_get", {"path": "live_set",
-                                                  "properties": ["current_song_time"]})
-                    if now["current_song_time"] >= start + length_beats:
-                        break
+                    if session:
+                        polled = await asend("batch", {"commands": [
+                            {"type": "lom_get", "params": {
+                                "path": f"id {i} clip_slots {slot} clip",
+                                "properties": ["is_recording"]}} for i in temp.values()],
+                            "stop_on_error": False})
+                        if all(s.get("status") == "success"
+                               and s["result"].get("is_recording") is False
+                               for s in polled["results"]):
+                            break
+                    else:
+                        now = await asend("lom_get", {"path": "live_set",
+                                                      "properties": ["current_song_time"]})
+                        if now["current_song_time"] >= start + length_beats:
+                            break
             finally:
-                restore = [op_call("live_set", "stop_playing"),
-                           op_set("live_set", "record_mode", song["record_mode"])]
-                if render_id is not None:
-                    restore.append(op_set(f"id {render_id}", "arm", False))
+                restore = [op_set(f"id {i}", "arm", False) for i in temp.values()]
                 restore += [op_set(f"id {i}", "arm", True) for i in armed]
-                restore += [op_set("live_set", "loop", song["loop"]),
-                            op_set("live_set", "metronome", song["metronome"]),
-                            op_set("live_set", "current_song_time",
-                                   float(song["current_song_time"]))]
+                restore.append(op_set("live_set", "metronome", song["metronome"]))
+                if not session or not song["is_playing"]:
+                    restore.append(op_call("live_set", "stop_playing"))
+                if not session:
+                    restore += [op_set("live_set", "record_mode", song["record_mode"]),
+                                op_set("live_set", "loop", song["loop"])]
+                if not session or not song["is_playing"]:
+                    restore.append(op_set("live_set", "current_song_time",
+                                          float(song["current_song_time"])))
                 await asend("batch", {"commands": restore, "stop_on_error": False})
-
-            file_path = await recorded_file(f"id {render_id}")
-            analysis = await asyncio.to_thread(analyze, file_path)
+            files = {label: await recorded_file(f"id {track_id}",
+                                                slot if session else None)
+                     for label, track_id in temp.items()}
         finally:
-            if render_id is not None and not keep_track:
-                await delete_track_by_id(render_id)
-        analysis["render"] = {"source": source, "start_beat": start,
-                              "length_beats": length_beats, "track_kept": keep_track}
+            if not keep_tracks:
+                for track_id in temp.values():
+                    await delete_track_by_id(track_id)
+        section: dict[str, Any] = {"mode": "session" if session else "arrangement",
+                                   "length_beats": length_beats, "seconds": round(seconds, 2)}
+        if session:
+            section["scene"] = scene_index if scene_index is not None else "playing clips"
+        else:
+            section["start_beat"] = start
+        return {"files": files, "section": section}
+
+    async def stem_sources(tracks: list[int | str] | None,
+                           include_master: bool) -> list[tuple[str, str]]:
+        """(label, input name) for each part to record. By default every
+        unmuted, non-group track with audio output and every return."""
+        if tracks:
+            sources = []
+            for track in tracks:
+                path = track_path(track)
+                name = (await asend("lom_get", {"path": path, "properties": ["name"]}))["name"]
+                sources.append(("Master", "Resampling") if path == "live_set master_track"
+                               else (name, name))
+        else:
+            listing = await asend("batch", {"commands": [
+                {"type": "lom_get", "params": {
+                    "path": "live_set tracks", "ids": False,
+                    "properties": ["name", "has_audio_output", "is_foldable", "mute"]}},
+                {"type": "lom_get", "params": {"path": "live_set return_tracks", "ids": False,
+                                               "properties": ["name", "mute"]}}]})
+            normal, returns = (step["result"]["items"] for step in listing["results"])
+            sources = [(t["name"], t["name"]) for t in normal
+                       if t.get("has_audio_output") is True and not t.get("is_foldable")
+                       and not t.get("mute")]
+            sources += [(t["name"], t["name"]) for t in returns if not t.get("mute")]
+        if include_master and ("Master", "Resampling") not in sources:
+            sources.append(("Master", "Resampling"))
+        labels = [label for label, _ in sources]
+        if len(set(labels)) != len(labels):
+            raise ValueError("Two tracks share a name; rename them so their outputs can be "
+                             "told apart: " + ", ".join(sorted({x for x in labels
+                                                               if labels.count(x) > 1})))
+        if len(sources) > 24:
+            raise ValueError(f"{len(sources)} parts is too many for one pass; pass `tracks` "
+                             "to choose up to 24")
+        return sources
+
+    @tool
+    async def render_and_analyze(start_beat: float | None = None,
+                                 length_beats: float = 16.0, source: str = "master",
+                                 keep_track: bool = False,
+                                 scene: int | str | None = None) -> str:
+        """Listen to the set: record a section in real time and analyze it.
+
+        Records `length_beats` of the master output ("master", via Resampling)
+        or of one track (track name) on a temporary audio track, then runs
+        analyze_audio_file on the recording. What plays:
+        - scene: launch this Session scene (index or name) and record it
+        - neither scene nor start_beat while Session clips play: record those
+        - otherwise the Arrangement from start_beat (default: the loop start)
+        Takes as long as the section plays. Arm states, metronome, loop and
+        record mode are restored; the temporary track is deleted unless
+        keep_track. Undo history will contain the recording steps.
+        """
+        from .audio_analysis import analyze
+
+        input_name = "Resampling" if source.lower() == "master" else source
+        recorded = await record_section([(source, input_name)], start_beat, length_beats,
+                                        keep_track, scene)
+        analysis = await asyncio.to_thread(analyze, recorded["files"][source])
+        analysis["render"] = dict(recorded["section"], source=source, track_kept=keep_track)
         return to_json(analysis)
+
+    @tool
+    async def capture_stems(tracks: list[int | str] | None = None,
+                            start_beat: float | None = None, length_beats: float = 16.0,
+                            include_master: bool = True,
+                            scene: int | str | None = None) -> str:
+        """Record several tracks at once — one real-time pass of the section,
+        each on its own temporary audio track fed from that track's output
+        (after its devices, fader and pan) — and summarise each stem:
+        loudness, peak, energy per band, stereo correlation.
+
+        - tracks: names/indexes (also "master" and returns); default every
+          unmuted non-group track with audio output, every return, the master
+        - start_beat / length_beats / scene: what plays, as in render_and_analyze
+        Takes as long as the section plays. The temporary tracks are deleted;
+        the recorded files stay in the project and are listed.
+        """
+        from .audio_analysis import load_audio
+        from .mix_analysis import stem_summary
+
+        sources = await stem_sources(tracks, include_master)
+        recorded = await record_section(sources, start_beat, length_beats, scene=scene)
+
+        def summarise() -> dict:
+            return {label: dict(stem_summary(*load_audio(path)), file=path)
+                    for label, path in recorded["files"].items()}
+
+        stems = await asyncio.to_thread(summarise)
+        return to_json({"section": recorded["section"], "stems": stems})
+
+    @tool
+    async def mix_doctor(start_beat: float | None = None, length_beats: float = 16.0,
+                         tracks: list[int | str] | None = None,
+                         platform: str = "spotify",
+                         scene: int | str | None = None) -> str:
+        """Diagnose the mix of a section, the way an engineer listening to
+        solos would. Records every track and the master in one real-time pass
+        (see capture_stems; start_beat / scene choose what plays), then reports:
+        - the master: loudness, true peak, dynamics and tonal balance against
+          `platform`'s target (spotify, apple_music, youtube, tidal, …, club)
+        - masking: which parts fight for the same frequencies at the same
+          time, in which band, how often, and what to do about it
+        - per stem: stray low end, phase problems, overs, level and main band
+        Suggestions only: nothing in the set is changed. Save a snapshot
+        before applying fixes, then compare.
+        """
+        from .audio_analysis import analyze, load_audio
+        from .mix_analysis import masking_report, stem_findings, stem_summary
+        from .prompts import LOUDNESS_TARGETS
+
+        sources = await stem_sources(tracks, include_master=True)
+        recorded = await record_section(sources, start_beat, length_beats, scene=scene)
+        files = recorded["files"]
+
+        def diagnose() -> dict:
+            master = analyze(files["Master"])
+            audio = {label: load_audio(path) for label, path in files.items()
+                     if label != "Master"}
+            stems = {label: stem_summary(*pair) for label, pair in audio.items()}
+            masking = masking_report({label: pair for label, pair in audio.items()
+                                      if stems[label]["lufs"] > -60})
+            return {"master": master, "stems": stems, "masking": masking,
+                    "stem_notes": stem_findings(stems)}
+
+        found = await asyncio.to_thread(diagnose)
+        master = found["master"]
+        key = platform.strip().lower().replace(" ", "_")
+        target_text = LOUDNESS_TARGETS.get(key, LOUDNESS_TARGETS["spotify"])[0]
+        findings = list(master["observations"])
+        target = re.search(r"-?\d+(?:\.\d+)?", target_text)
+        if target and master["integrated_lufs"] > -60:
+            gap = master["integrated_lufs"] - float(target.group())
+            if abs(gap) >= 2:
+                findings.append(f"Master is {abs(gap):.1f} LU {'above' if gap > 0 else 'below'}"
+                                f" the {key} target ({target_text}); in this section.")
+        findings += [p["advice"] for p in found["masking"]["pairs"] if p["severity"] >= 0.4]
+        findings += found["stem_notes"]
+        return to_json({
+            "section": recorded["section"],
+            "findings": findings or ["No clear problems in this section."],
+            "master": {k: master[k] for k in ("integrated_lufs", "true_peak_dbtp",
+                                              "loudness_range_lu", "crest_factor_db",
+                                              "band_energy_percent", "stereo")},
+            "masking": found["masking"]["pairs"],
+            "stems": {label: {k: s[k] for k in ("lufs", "peak_dbfs", "main_band")}
+                      for label, s in found["stems"].items()},
+        })
+
+    @tool
+    async def compare_to_reference(reference_path: str, mix_path: str | None = None,
+                                   start_beat: float | None = None,
+                                   length_beats: float = 16.0,
+                                   whole_reference: bool = False,
+                                   scene: int | str | None = None) -> str:
+        """Compare the mix with a reference track: loudness, true peak,
+        dynamics (crest factor, loudness range), stereo width and tonal balance
+        per 1/3 octave after matching levels — plus EQ Eight settings that move
+        the mix about 60% of the way (apply them with add_device on the master
+        or a bus, ideally after saving a snapshot).
+
+        The mix is mix_path, or else a real-time recording of the master
+        (start_beat / scene / length_beats as in render_and_analyze). Unless whole_reference, the
+        reference's loudest stretch of the same length is used, so a drop is
+        compared with a drop.
+        """
+        from .audio_analysis import load_audio
+        from .mix_analysis import reference_report
+
+        reference = Path(reference_path).expanduser()
+        if not reference.is_file():
+            raise ValueError(f"Reference file not found: {reference}")
+        section = None
+        if mix_path is None:
+            recorded = await record_section([("Master", "Resampling")], start_beat,
+                                            length_beats, scene=scene)
+            mix_path = recorded["files"]["Master"]
+            section = recorded["section"]
+
+        def compare() -> dict:
+            return reference_report(load_audio(mix_path), load_audio(reference),
+                                    match_section=not whole_reference)
+
+        report = await asyncio.to_thread(compare)
+        report["mix"] = section or {"file": str(Path(mix_path).expanduser())}
+        report["reference"] = str(reference)
+        return to_json(report)
 
     @tool
     async def measure_levels(seconds: float = 8.0, tracks: list[int | str] | None = None,
@@ -2273,11 +2536,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         found.append(("Master", f"id {master['$id']}"))
         return found
 
-    async def recorded_file(track: str) -> str:
-        """Path of the newest recording on `track`, once Live has finished writing it."""
+    async def recorded_file(track: str, slot: int | None = None) -> str:
+        """Path of the newest recording on `track` (its Arrangement, or Session
+        clip slot `slot`), once Live has finished writing it."""
         for _ in range(50):
-            clips = (await asend("lom_get", {"path": f"{track} arrangement_clips",
-                                             "properties": ["file_path"]}))["items"]
+            if slot is None:
+                clips = (await asend("lom_get", {"path": f"{track} arrangement_clips",
+                                                 "properties": ["file_path"]}))["items"]
+            else:
+                clips = [await asend("lom_get", {"path": f"{track} clip_slots {slot} clip",
+                                                 "properties": ["file_path"]})]
             if clips and clips[-1].get("file_path"):
                 candidate = Path(clips[-1]["file_path"])
                 if candidate.is_file() and candidate.stat().st_size > 0:

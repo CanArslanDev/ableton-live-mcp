@@ -118,7 +118,7 @@ def test_workflow_prompts_are_listed_and_render(monkeypatch):
     import MCP_Server.server as server
     prompts = {p.name: p for p in asyncio.run(server.mcp.list_prompts())}
     assert {"mix_check", "beat_from_scratch", "follow_the_harmony", "arrange_from_loop",
-            "release_check", "explain_my_set"} <= set(prompts)
+            "release_check", "explain_my_set", "match_reference"} <= set(prompts)
     rendered = asyncio.run(server.mcp.get_prompt("release_check", {"platform": "apple_music"}))
     text = rendered.messages[0].content.text
     assert "-16 LUFS" in text and "render_and_analyze" in text

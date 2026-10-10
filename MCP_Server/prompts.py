@@ -34,17 +34,20 @@ def register_prompts(mcp) -> None:
         return f"""Check the mix of the current Ableton set.
 
 1. get_session_overview to learn the tracks, groups, returns and devices.
-2. render_and_analyze on {section} (master). If there is no loop, pick the
-   busiest 16 bars from the arrangement.
-3. Compare the result with the delivery target — {_target(platform)} — and
-   with a balanced mix: low end mono below ~150 Hz, no clipping, crest factor
-   not crushed, no band dominating.
-4. Report at most 7 findings, most important first. For each: what you
+2. snapshot action="save" name="before mix check", so every change can be undone
+   as a whole or A/B-compared.
+3. mix_doctor on {section} with platform="{platform}" (for a Session loop pass
+   scene=<its scene>; otherwise start_beat/length_beats in the Arrangement — pick
+   the busiest 16 bars if there is no loop).
+4. Weigh its findings against the delivery target — {_target(platform)} — and a
+   balanced mix: low end mono below ~150 Hz, no clipping, crest factor not
+   crushed, no two parts fighting for the same band.
+5. Report at most 7 findings, most important first. For each: what was
    measured, why it matters, and the exact change (track, device, parameter,
-   value), e.g. "Bass: EQ Eight band 1 high-pass at 30 Hz".
-5. Ask before changing anything. After the user agrees, apply the changes,
-   render the same section again and show before/after numbers. Undo a change
-   that made the numbers worse."""
+   value), e.g. "Pad: EQ Eight band 2 bell -3 dB at 200 Hz (it masks the bass)".
+6. Ask before changing anything. After the user agrees, apply the changes, run
+   mix_doctor on the same section again and show before/after numbers. Offer
+   snapshot action="restore" name="before mix check" if the user prefers the old sound."""
 
     @mcp.prompt(name="beat_from_scratch", title="Beat from scratch")
     def beat_from_scratch(genre: str = "house", bpm: str = "", key: str = "",
@@ -56,17 +59,34 @@ def register_prompts(mcp) -> None:
 
 1. get_session_overview, then set_song_properties (tempo, root_note,
    scale_name). Reuse empty tracks before creating new ones.
-2. Drums: a MIDI track with a Drum Rack (get_browser_tree / load_drum_kit),
-   then generate_drum_pattern in a {genre}-appropriate style.
-3. Chords: an instrument from the browser, then generate_chord_progression
-   (pick a progression and rhythm idiomatic for {genre}).
+2. Drums: a MIDI track, build_drum_kit with a style word that suits {genre}
+   (e.g. "808" for trap, "909" for techno; source="user" to use the user's own
+   samples), then generate_drum_pattern in a {genre}-appropriate style.
+3. Chords: an instrument (browser_search + browser_load, or add_device), then
+   generate_chord_progression (pick a progression and rhythm idiomatic for {genre}).
 4. Bass: analyze_harmony on the chord clip, then generate_bassline with its
    progression and bars_per_chord so the bass follows the chords.
 5. Optional top line with generate_melody or generate_arpeggio.
 6. Name and colour the tracks and clips (manage_track, set_clip_properties),
-   set rough levels with set_track_mixer, put the clips in one scene and fire it.
-7. render_and_analyze the loop and fix anything clearly off (levels,
-   muddiness, clipping). Summarise what you made."""
+   set rough levels with set_track_mixer, put the clips in one scene.
+7. mix_doctor with scene=<that scene> and length_beats of the loop; fix anything
+   clearly off (levels, masking, clipping). Fire the scene and summarise what you made."""
+
+    @mcp.prompt(name="match_reference", title="Match a reference track")
+    def match_reference(reference_path: str, section: str = "the drop") -> str:
+        """Move the mix's tonal balance and loudness towards a reference."""
+        return f"""Bring this mix closer to the reference track at {reference_path}.
+
+1. snapshot action="save" name="before reference match".
+2. compare_to_reference with reference_path="{reference_path}" over {section}
+   (scene=... for a Session loop, start_beat/length_beats in the Arrangement).
+3. Explain the differences in plain words: loudness, dynamics, width, and
+   where the tonal balance differs (which frequencies, how many dB).
+4. Propose the EQ moves it suggests (eq_eight_settings, about 60% of the way)
+   on the master or the relevant bus, plus any loudness/limiting change. Ask first.
+5. Apply with add_device (device="EQ Eight", settings=eq_eight_settings), run
+   compare_to_reference again and show what moved. Let the user A/B with
+   snapshot restore "before reference match" and decide."""
 
     @mcp.prompt(name="follow_the_harmony", title="Write a part that follows the chords")
     def follow_the_harmony(source_track: str, part: str = "bassline",

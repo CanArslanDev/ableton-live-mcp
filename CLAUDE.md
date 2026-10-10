@@ -30,6 +30,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/snapshots.py` | Capture / compare / restore mixer and device parameters (A/B), stored in `~/.ableton-mcp/snapshots`. |
 | `MCP_Server/music.py` | Pure music theory + generators + note transforms over note dicts. No Live access. |
 | `MCP_Server/audio_analysis.py` | numpy/scipy/soundfile analysis (BS.1770 LUFS, spectrum, stereo, tempo, key). |
+| `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
 | `MCP_Server/telemetry*.py`, `MCP_Server/dataset/` | Inherited from upstream. Inactive without the unshipped `MCP_Server/config.py`. |
@@ -132,6 +133,13 @@ Measured on Live 12.3.8:
   `id(obj)` so `{"$ref": "id N"}` reaches them. Selecting a pad
   (`rack.view.selected_drum_pad`) and then `browser.load_item(sample)` puts
   the sample on that pad as a Simpler (~100 ms each).
+- **Recording several tracks at once:** in one call, only the first audio
+  track created gets its `available_input_routing_types` filled; create the
+  tracks in one call and set their inputs in the next (`record_section`
+  retries). A track's input channel "Post Mixer" takes its sound after
+  devices, fader and pan. `ClipSlot.fire(length)` (positional) on an armed
+  empty slot records a fixed-length Session clip from the next launch
+  boundary; firing a scene and those slots in one batch starts them together.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
 

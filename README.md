@@ -34,6 +34,7 @@ while testing against Live 12.3.
 - *"Put a vocal chain on the Vox track and duck the bass from the kick."*
 - *"Build me an 808 kit from my own samples and write a trap beat on it."*
 - *"Save a snapshot, make the mix brighter, then let me A/B the two."*
+- *"Which parts are fighting in my drop? Compare it with this reference track."*
 
 ## Features
 
@@ -55,14 +56,15 @@ while testing against Live 12.3.
 | **Browser** | `browser_search` finds presets, devices, plug-ins, clips and samples by name (yours too; ~12,000 samples in about 0.1 s), `browser_load` puts one on a track or a Drum Rack pad, `browser_preview` plays it in Live's preview |
 | **Drum kits** | `build_drum_kit` fills a Drum Rack's General MIDI pads with one-shots from Drums › Drum Hits — by style ("808", "909"), from the Core Library or your own samples |
 | **Snapshots & A/B** | `snapshot` saves the mixer and every device parameter (racks included), shows what changed in Live's own units, and restores it in one undo step; automated parameters are left alone |
-| **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a section through Resampling and measures it; `analyze_audio_file`, `analyze_clip_audio` |
+| **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a Session scene, the clips playing or an Arrangement section and measures it; `analyze_audio_file`, `analyze_clip_audio` |
+| **Mix diagnosis** | `mix_doctor` records every track and the master in one pass and reports masking (which parts fight in which band, how often, what to do), stray low end, phase, overs and the master against a streaming target; `capture_stems` returns the stem files; `compare_to_reference` compares tonal balance, loudness, dynamics and width with a reference track and returns EQ Eight settings that move the mix towards it |
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview`, `ableton://events` |
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-55 tools in the default profile (77 with `ABLETON_MCP_PROFILE=full`), plus
+58 tools in the default profile (80 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
-`arrange_from_loop`, `release_check`, `explain_my_set`.
+`arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
 ### Audio analysis
 
@@ -207,8 +209,9 @@ new tracks, clips, notes), so a call that does both can take two Cmd+Z.
 - Live's API cannot write track-level Arrangement automation, and it refuses
   envelope edits on Arrangement clips. Automation tools write clip envelopes on
   Session clips; `duplicate_to_arrangement` carries them into the Arrangement.
-- Live has no export/render API. `render_and_analyze` records in real time on a
-  temporary track (deleted afterwards), so it takes as long as the section plays.
+- Live has no export/render API. `render_and_analyze`, `capture_stems` and
+  `mix_doctor` record in real time on temporary tracks (deleted afterwards; the
+  audio files stay in the project), so they take as long as the section plays.
 - Arrangement clip creation and `move_device` need Live 12; `add_device` and
   `apply_device_chain` need Live 12.3; the extended note API needs Live 11.
 - Live's API cannot map parameters to rack macros, group tracks, bounce,
@@ -237,7 +240,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 185 tests, no Live required
+uv run --with pytest pytest -q        # 195 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the
