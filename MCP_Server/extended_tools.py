@@ -374,11 +374,57 @@ def musical_context(key: str, scale: Any, context: dict) -> dict:
     return {"key": key, "scale": scale, "time_signature": context["time_signature"]}
 
 
-def setting_ops(device: str, settings: dict[str, Any]) -> list[dict]:
-    """Batch steps setting device parameters: text by display, numbers raw."""
+# Parameters Live 12.4 renamed: (Live 12.3 name, Live 12.4 name)
+PARAMETER_RENAMES = [
+    ("Output Gain", "Output"), ("Makeup", "Output"), ("Gain", "Output"),
+    ("Master Output", "Output"),
+    ("In LowCut On", "In Lo Cut On"), ("In HighCut On", "In Hi Cut On"),
+    ("In Filter Freq", "Input Freq"), ("In Filter Width", "Input Width"),
+    ("HiFilter On", "Diff. Hi On"), ("HiFilter Type", "Diff. Hi Type"),
+    ("HiFilter Freq", "Diff. Hi Freq"), ("LowShelf On", "Diff. Lo On"),
+    ("LowShelf Freq", "Diff. Lo Freq"),
+    ("Mod Freq", "LFO Freq"), ("Dly < Mod", "LFO > Delay"), ("Filter < Mod", "LFO > Filter"),
+    ("Morph", "Filter Morph"), ("Type", "Filter Type"), ("Slope", "Filter Slope"),
+    ("Feedback Inv", "FB Invert"), ("FB Inv", "FB Invert"), ("Fb Inv On", "FB Invert"),
+    ("HPF Enabled", "HP On"), ("HPF Freq", "HP Freq"), ("Fb Amt", "Feedback"),
+    ("Fb Time Mode", "FB Time Mode"), ("Fb Time", "FB Time"), ("Fb Synced", "FB Synced"),
+    ("Fb Note", "FB Note"), ("Fb Freq", "FB Freq"), ("Fb Width", "FB Width"),
+]
+
+
+def parameter_aliases(name: str) -> list[str]:
+    """Other names the same parameter has in another Live version."""
+    found = [new for old, new in PARAMETER_RENAMES if old == name]
+    found += [old for old, new in PARAMETER_RENAMES if new == name]
+    eq_band = re.fullmatch(r"(\d) (Resonance|Q) ([AB])", name)
+    if eq_band:
+        number, kind, side = eq_band.groups()
+        found.append(f"{number} {'Q' if kind == 'Resonance' else 'Resonance'} {side}")
+    return found
+
+
+def resolve_parameter_names(device: str, names: list[str]) -> dict[str, str]:
+    """Map setting names onto the device's actual parameter names, so a name
+    from Live 12.3 ("Output Gain") also works on 12.4 ("Output") and back."""
+    present = {p.get("name") for p in send("lom_get", {
+        "path": f"{device} parameters", "properties": ["name"], "ids": False})["items"]}
+    mapping = {}
+    for name in names:
+        if name in present or isinstance(name, int) or str(name).isdigit():
+            mapping[name] = name
+            continue
+        mapping[name] = next((alias for alias in parameter_aliases(name)
+                              if alias in present), name)
+    return mapping
+
+
+def setting_ops(device: str, settings: dict[str, Any],
+                names: dict[str, str] | None = None) -> list[dict]:
+    """Batch steps setting device parameters: text by display, numbers raw.
+    names: setting name → the device's parameter name (resolve_parameter_names)."""
     ops = []
     for name, value in settings.items():
-        parameter = f"{device} parameters {selector(name)}"
+        parameter = f"{device} parameters {selector((names or {}).get(name, name))}"
         if isinstance(value, str):
             ops.append(op_display(parameter, value))
         else:
@@ -1295,7 +1341,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         length = float(grids[str(step).lower()]) if str(step).lower() in grids \
             else float(step)
         context = song_context()
-        pads = dict(music.GM_DRUMS, **drum_mapping_from_rack(track))
+        pads = {**music.GM_DRUMS, **drum_mapping_from_rack(track)}
         resolved = []
         for voice in voices:
             pad = voice.get("pad", voice.get("pitch", "kick"))
@@ -1383,7 +1429,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         from . import turkish
 
         info = turkish.usul(usul)
-        roles = dict(music.GM_DRUMS, **drum_mapping_from_rack(track))
+        roles = {**music.GM_DRUMS, **drum_mapping_from_rack(track)}
         pads = {stroke: roles.get(role, music.GM_DRUMS[role])
                 for stroke, (role, _weight) in turkish.STROKES.items()}
         pads.update(darbuka_pads(track))
@@ -1674,8 +1720,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         device_id = inserted_device_ids(tp, [args])[0]
         result: dict[str, Any] = {"device": device, "track": track, "id": device_id}
         if settings:
-            result["settings"] = batch_summary(batch(setting_ops(f"id {device_id}", settings),
-                                                     stop_on_error=False))
+            names = resolve_parameter_names(f"id {device_id}", list(settings))
+            result["settings"] = batch_summary(batch(
+                setting_ops(f"id {device_id}", settings, names), stop_on_error=False))
         return to_json(result)
 
     @tool
@@ -1702,7 +1749,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         ids = inserted_device_ids(tp, [[name] for name, _settings in spec["devices"]])
         ops = []
         for (_name, settings), device_id in zip(spec["devices"], ids):
-            ops += setting_ops(f"id {device_id}", settings)
+            names = resolve_parameter_names(f"id {device_id}", list(settings))
+            ops += setting_ops(f"id {device_id}", settings, names)
         if sidechain_from is not None:
             source = lom_get(track_path(sidechain_from), ["name"])["name"]
             compressor = f"id {ids[0]}"
@@ -1723,6 +1771,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         with parameter "volume" | "pan" | "send A".
         The error message lists valid parameter names when one is not found.
         """
+        if str(device).lower() not in ("mixer", "mixer_device") and isinstance(parameter, str) \
+                and not parameter.strip().isdigit():
+            parameter = resolve_parameter_names(device_path(track, device),
+                                                [parameter])[parameter]
         pp = parameter_path(track, device, parameter)
         if display_value is not None:
             return to_json(send("param_set_display", {"path": pp, "value": display_value}))
@@ -1831,8 +1883,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if not done:
             try:
                 send("browser_search", {"walk_id": walk_id, "cancel": True})
-            except Exception:
-                pass
+            except AbletonCommandError as e:  # the walk ended on its own meanwhile
+                logger.debug("Browser walk %s already gone: %s", walk_id, e)
         ranked = sorted(found, key=rank)
         return {"query": query, "category": category, "complete": done, "searched": visited,
                 "matches": len(found),
@@ -1890,8 +1942,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             try:
                 send("lom_set", {"path": "live_set view", "property": "selected_track",
                                  "value": previous})
-            except Exception:
-                pass
+            except AbletonCommandError as e:  # that track was deleted meanwhile
+                logger.debug("Could not reselect the previous track: %s", e)
         return result
 
     @tool(read_only=True)

@@ -109,7 +109,7 @@ def test_temporary_track_is_deleted_by_id_after_tracks_shift(wav):
 def test_arm_states_are_restored_by_id(wav):
     live = ScriptedLive(wav)
     _render(live, length_beats=4)
-    create, configure, start, restore = live.batches()
+    _create, _configure, start, restore = live.batches()
     assert {"type": "lom_set", "params": {"path": "id 101", "property": "arm",
                                           "value": False}} in start
     assert {"type": "lom_set", "params": {"path": f"id {RENDER_ID}", "property": "arm",

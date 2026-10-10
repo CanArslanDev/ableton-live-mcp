@@ -150,6 +150,11 @@ Measured on Live 12.3.8:
   `browser.load_item` on an `.ascl` in User Library › Tunings does not load it
   (12.4) — the user double-clicks it. Live picks up new files there after a
   few seconds.
+- **Live 12.4 renamed device parameters:** "Output Gain"/"Gain"/"Makeup"/
+  "Master Output" → "Output", EQ Eight "N Resonance A" → "N Q A", and names in
+  Reverb, Delay, Auto Filter, Echo, Chorus-Ensemble and Roar. Settings go
+  through `resolve_parameter_names`, which maps either version's name onto the
+  device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
 

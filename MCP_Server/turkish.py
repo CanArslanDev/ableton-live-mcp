@@ -37,8 +37,8 @@ MAKAMS = {
     "rast": ([9, 8, 5, 9, 9, 8, 5], "G", "D", "Rast pentachord + Rast tetrachord"),
     "mahur": ([9, 9, 4, 9, 9, 9, 4], "G", "G", "Çargâh pentachord + Çargâh tetrachord on Rast"),
     "ussak": ([8, 5, 9, 9, 4, 9, 9], "A", "D", "Uşşak tetrachord + Bûselik pentachord"),
-    "bayati": ([8, 5, 9, 9, 4, 9, 9], "A", "D", "Uşşak tetrachord + Bûselik pentachord "
-               "(the Uşşak scale, sung around Neva)"),
+    "bayati": ([8, 5, 9, 9, 4, 9, 9], "A", "D", ("Uşşak tetrachord + Bûselik pentachord "
+                                                 "(the Uşşak scale, sung around Neva)")),
     "huseyni": ([8, 5, 9, 9, 8, 5, 9], "A", "E", "Hüseynî pentachord + Uşşak tetrachord"),
     "muhayyer": ([8, 5, 9, 9, 8, 5, 9], "A", "E", "Hüseynî scale, starting from the top"),
     "neva": ([8, 5, 9, 9, 8, 5, 9], "A", "D", "Uşşak tetrachord + Rast pentachord on Neva"),
@@ -53,15 +53,15 @@ MAKAMS = {
     "saba": ([8, 5, 5, 12, 5, 9, 9], "A", "C", "Saba tetrachord + Hicaz pentachord on Çargâh"),
     "segah": ([5, 9, 9, 8, 5, 9, 8], "B", "D", "Segâh trichord + Rast pentachord on Neva"),
     "huzzam": ([5, 9, 5, 12, 5, 9, 8], "B", "D", "Segâh trichord + Hicaz tetrachord on Neva"),
-    "nihavend": ([9, 4, 9, 9, 4, 9, 9], "G", "D", "Bûselik pentachord + Kürdî tetrachord "
-                 "on Rast"),
+    "nihavend": ([9, 4, 9, 9, 4, 9, 9], "G", "D",
+                 "Bûselik pentachord + Kürdî tetrachord on Rast"),
     "suzinak": ([9, 8, 5, 9, 5, 12, 5], "G", "D", "Rast pentachord + Hicaz tetrachord"),
     "hicazkar": ([5, 12, 5, 9, 5, 12, 5], "G", "D", "Zirgüleli Hicaz on Rast"),
     "kurdilihicazkar": ([4, 9, 9, 9, 4, 9, 9], "G", "C", "Kürdî scale on Rast"),
     "nikriz": ([9, 4, 13, 5, 9, 8, 5], "G", "D", "Nikriz pentachord + Rast tetrachord"),
     "acemasiran": ([9, 9, 4, 9, 9, 9, 4], "F", "C", "Çargâh scale on Acemaşiran"),
-    "sultaniyegah": ([9, 4, 9, 9, 5, 12, 5], "D", "A", "Bûselik pentachord + Hicaz "
-                     "tetrachord on Yegâh"),
+    "sultaniyegah": ([9, 4, 9, 9, 5, 12, 5], "D", "A",
+                     "Bûselik pentachord + Hicaz tetrachord on Yegâh"),
 }
 _ALIASES = {"beyati": "bayati", "huseyni_asiran": "huseyni", "zirgule": "zirguleli_hicaz",
             "kurdili_hicazkar": "kurdilihicazkar", "nihavent": "nihavend",
@@ -122,7 +122,7 @@ def makam(name: str) -> dict:
     cents = [round(c * COMMA_CENTS, 1) for c in commas]
     return {"makam": key, "karar": karar, "guclu": guclu, "built_from": built,
             "steps_commas": steps, "degrees_commas": commas, "degrees_cents": cents,
-            "intervals_12tet": [int(round(c / 100.0)) % 12 for c in cents]}
+            "intervals_12tet": [round(c / 100.0) % 12 for c in cents]}
 
 
 def intervals_12tet(name: str) -> list[int]:

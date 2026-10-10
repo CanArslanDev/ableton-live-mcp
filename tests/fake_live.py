@@ -223,6 +223,8 @@ def _compressor():
         FakeParam("Release", 0.2, display=lambda v: "%.1f ms" % (3000 ** v)),
         FakeParam("Model", 1, 0, 2, items=["Peak", "RMS", "Expand"]),
         FakeParam("S/C On", 0, 0, 1, items=["Off", "On"]),
+        # Live 12.4's name; Live 12.3 called it "Output Gain"
+        FakeParam("Output", 0.0, -36.0, 36.0, display=lambda v: "%.2f dB" % v),
     ], available_input_routing_types=routing, input_routing_type=routing[-1])
 
 

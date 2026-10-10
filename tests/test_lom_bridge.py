@@ -988,7 +988,7 @@ def test_turkish_makam_info_and_tuning_file(live_server, tmp_path, monkeypatch):
     from MCP_Server import turkish
 
     monkeypatch.setattr(turkish, "tuning_folder", lambda: tmp_path / "Tunings")
-    script, call = live_server
+    _script, call = live_server
     listing = call("turkish_makam")
     assert "hicaz" in listing["makams"] and "aksak" in listing["usuls"]
     info = call("turkish_makam", name="Hicaz", tonic="D", tuning_file=True)
@@ -999,3 +999,21 @@ def test_turkish_makam_info_and_tuning_file(live_server, tmp_path, monkeypatch):
     chords = call("generate_chord_progression", track="Bass", clip_index=2,
                   progression="i II", key="D", scale="hicaz")
     assert chords["scale"] == "hicaz"
+
+
+def test_parameter_names_from_another_live_version_still_work(live_server):
+    """Live 12.4 renamed "Output Gain" to "Output" (and Resonance to Q, …);
+    recipes and agents may use either name."""
+    script, call = live_server
+    added = call("add_device", track="Bass", device="Compressor",
+                 settings={"Output Gain": "6 dB", "Threshold": "-30 dB"})
+    assert added["settings"]["ok"], added
+    compressor = script._song.tracks[1].devices[-1]
+    output = next(p for p in compressor.parameters if p.name == "Output")
+    assert output.str_for_value(output.value) == "6.00 dB"
+    call("set_device_parameter_by_name", track="Bass", device="Compressor",
+         parameter="Output Gain", display_value="-3 dB")
+    assert output.str_for_value(output.value) == "-3.00 dB"
+    from MCP_Server.extended_tools import parameter_aliases
+    assert parameter_aliases("2 Resonance A") == ["2 Q A"]
+    assert parameter_aliases("Output") == ["Output Gain", "Makeup", "Gain", "Master Output"]

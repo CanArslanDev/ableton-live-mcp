@@ -244,7 +244,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 219 tests, no Live required
+uv run --with pytest pytest -q        # 220 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the

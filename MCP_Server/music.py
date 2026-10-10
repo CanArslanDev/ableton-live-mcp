@@ -862,9 +862,9 @@ def chop(notes: list[dict], parts: int = 2, velocity_decay: float = 0.0) -> list
     for n in _copy(notes):
         piece = n["duration"] / parts
         for i in range(parts):
-            vel = int(max(1, round(n["velocity"] * (1 - velocity_decay) ** i)))
-            values = dict(start_time=round(n["start_time"] + i * piece, 6),
-                          duration=round(piece, 6), velocity=vel)
+            vel = max(1, round(n["velocity"] * (1 - velocity_decay) ** i))
+            values = {"start_time": round(n["start_time"] + i * piece, 6),
+                      "duration": round(piece, 6), "velocity": vel}
             out.append(dict(n, **values) if i == 0 else _new(n, **values))
     return out
 
@@ -1046,12 +1046,12 @@ def arpeggiate(notes: list[dict], style: str = "up", rate: float = 0.25, gate: f
             order = None
         else:
             raise ValueError("style must be up, down, updown, downup, random or played")
-        velocity = int(round(sum(n["velocity"] for n in chord) / len(chord)))
+        velocity = round(sum(n["velocity"] for n in chord) / len(chord))
         count = max(1, int((end - start) / rate + 1e-9))
         for k in range(count):
             pitch = rng.choice(pitches) if order is None else order[k % len(order)]
-            values = dict(pitch=pitch, start_time=round(start + k * rate, 6),
-                          duration=round(rate * gate, 6), velocity=velocity)
+            values = {"pitch": pitch, "start_time": round(start + k * rate, 6),
+                      "duration": round(rate * gate, 6), "velocity": velocity}
             # The chord's own notes become the first steps; the rest are new
             out.append(dict(chord[k], **values) if k < len(chord) else _new(chord[0], **values))
     return out

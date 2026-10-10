@@ -14,8 +14,9 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 MAX_RACK_DEPTH = 3
 PARAM_PROPS = ["name", "value", "automation_state"]

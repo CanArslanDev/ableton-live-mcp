@@ -40,6 +40,10 @@ class AbletonCommandError(Exception):
     """Live refused a command (bad path, wrong value, …). The connection is fine."""
 
 
+class AbletonConnectionError(Exception):
+    """The connection failed mid-request; it was dropped and the next call reconnects."""
+
+
 def session_file() -> Path:
     """Where the Remote Script publishes its port and session token."""
     override = os.environ.get("ABLETON_MCP_SESSION_FILE")
@@ -89,7 +93,7 @@ class AbletonConnection:
         self.sock, self.protocol, self._inbox = sock, 0, bytearray()
         try:
             self._greet()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — any failure means no usable session
             self.last_error = str(e)
             logger.error("Ableton refused the connection: %s", e)
             self._drop_socket()
@@ -132,22 +136,22 @@ class AbletonConnection:
                 return self._exchange(command_type, params or {}, timeout)
             except AbletonCommandError:
                 raise
-            except socket.timeout:
+            except TimeoutError:
                 logger.error("Timeout waiting for Ableton to answer %s", command_type)
                 self._drop_socket()
-                raise Exception("Timeout waiting for Ableton response")
+                raise AbletonConnectionError("Timeout waiting for Ableton response") from None
             except OSError as e:
                 logger.error("Connection to Ableton lost: %s", e)
                 self._drop_socket()
-                raise Exception(f"Connection to Ableton lost: {e}")
+                raise AbletonConnectionError(f"Connection to Ableton lost: {e}") from e
             except ValueError as e:
                 logger.error("Invalid response from Ableton: %s", e)
                 self._drop_socket()
-                raise Exception(f"Invalid response from Ableton: {e}")
-            except Exception as e:
+                raise AbletonConnectionError(f"Invalid response from Ableton: {e}") from e
+            except Exception as e:  # the stream is in an unknown state
                 logger.error("Error communicating with Ableton: %s", e)
                 self._drop_socket()
-                raise Exception(f"Communication error with Ableton: {e}")
+                raise AbletonConnectionError(f"Communication error with Ableton: {e}") from e
 
     def _exchange(self, command_type: str, params: dict, timeout: float) -> Any:
         self._next_id += 1
@@ -191,7 +195,7 @@ class AbletonConnection:
                     return message
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise socket.timeout("timed out")
+                raise TimeoutError("timed out")
             self.sock.settimeout(remaining)
             chunk = self.sock.recv(65536)
             if not chunk:

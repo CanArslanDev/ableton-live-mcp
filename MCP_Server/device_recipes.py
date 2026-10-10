@@ -1,7 +1,8 @@
 """Ready-made device chains built from Live's native devices.
 
 Starting points to adjust by ear, not presets. Parameter names and value
-displays are the ones Live 12.3 shows; a string value is set by display
+displays are the ones Live 12.3 shows (names Live 12.4 changed, like "Output
+Gain" → "Output", are mapped when applied); a string value is set by display
 ("-18 dB", "120 Hz", "High Pass 48dB"), a number is a raw parameter value
 (used where Live's display has no unit, e.g. Glue Compressor's stepped
 Attack/Release/Ratio).
