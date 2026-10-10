@@ -244,6 +244,7 @@ def test_envelope_writes_clamped_steps(script):
     ("800 Hz", 800.0), ("1.20 kHz", 1200.0), ("-6.0 dB", -6.0), ("350 ms", 350.0),
     ("1.50 s", 1500.0), ("50L", -50.0), ("C", 0.0), ("25R", 25.0), ("40 %", 40.0),
     ("-inf dB", float("-inf")), ("Lowpass", None),
+    (".6", 0.6), ("-.5 dB", -0.5), ("4.00 : 1", 4.0),
 ])
 def test_parse_display_number(script, text, expected):
     assert script.module.parse_display_number(text) == expected
@@ -421,12 +422,15 @@ def test_tools_watch_and_events(live_server):
     assert call("get_live_events")["observers"] == []
 
 
-def test_tool_errors_come_back_as_text(live_server):
+def test_tool_errors_are_reported_as_tool_errors(live_server):
+    from mcp.server.fastmcp.exceptions import ToolError
+
     script, call = live_server
     result = call("set_track_mixer", track="Nope", mute=True)
     assert result["ok"] is False
     assert "No item named 'Nope'" in result["steps"][0]["error"]
-    with pytest.raises(AssertionError, match="Error in manage_scene"):
+    # FastMCP turns the exception into a result with isError=true
+    with pytest.raises(ToolError, match="manage_scene: Unknown action 'explode'"):
         call("manage_scene", action="explode", scene=0)
 
 
@@ -472,3 +476,219 @@ def test_each_modifying_command_closes_its_undo_step(script):
         {"type": "lom_set", "params": {"path": "live_set", "property": "swing_amount",
                                        "value": 0.1}}])
     assert script._song.undo_log == ["end", "end"]
+
+
+def test_generators_follow_the_sets_meter_and_key(live_server):
+    script, call = live_server
+    song = script._song
+    song.signature_numerator, song.signature_denominator = 3, 4
+    song.root_note, song.scale_name = 2, "Dorian"
+    song.scale_intervals = [0, 2, 3, 5, 7, 9, 10]
+    result = call("generate_chord_progression", track="Bass", clip_index=3)
+    # The default progression uses the mode's own chords: D Dorian → i IV i VII
+    assert [c["chord"] for c in result["chords"]] == ["Dm", "G", "Dm", "C"]
+    assert (result["key"], result["scale"], result["time_signature"]) == ("D", "Dorian", "3/4")
+    clip = song.tracks[1].clip_slots[3].clip
+    assert clip.length == 4 * 3.0
+    drums = call("generate_drum_pattern", track="Drums", style="house", bars=2, fill=False,
+                 humanize=0, clip_index=2)
+    assert drums["length_beats"] == 6.0
+    kicks = [n for n in song.tracks[0].clip_slots[2].clip._notes if n.pitch == 36]
+    assert len(kicks) == 6
+
+
+def test_transforms_edit_notes_in_place(live_server):
+    script, call = live_server
+    song = script._song
+    call("generate_chord_progression", track="Bass", progression="I IV", key="C",
+         clip_index=1)
+    clip = song.tracks[1].clip_slots[1].clip
+    ids_before = sorted(n.note_id for n in clip._notes)
+    result = call("transform_clip_notes", track="Bass", clip_index=1, operation="transpose",
+                  semitones=2)
+    assert result["notes_modified"] == len(ids_before)
+    assert sorted(n.note_id for n in clip._notes) == ids_before
+    # Only the chosen notes are removed, by id
+    result = call("transform_clip_notes", track="Bass", clip_index=1, operation="delete",
+                  time_start=4.0)
+    assert result["notes_removed"] == 3
+    assert all(n.start_time < 4.0 for n in clip._notes)
+    assert all(n.note_id in ids_before for n in clip._notes)
+
+
+def test_analyze_harmony_reads_back_a_written_progression(live_server):
+    script, call = live_server
+    call("generate_chord_progression", track="Bass", progression="Am F C G", key="C",
+         clip_index=1, voicing="close")
+    result = call("analyze_harmony", track="Bass", clip_index=1)
+    assert result["progression"] == "Am F C G"
+    assert [w["roman"] for w in result["windows"]] == ["vi", "IV", "I", "V"]
+    assert result["bars_per_chord"] == 1.0
+    # …and a bassline can follow it
+    call("generate_bassline", track="Bass", clip_index=2, progression=result["progression"],
+         key="C", bars_per_chord=result["bars_per_chord"])
+    roots = sorted(n.start_time for n in script._song.tracks[1].clip_slots[2].clip._notes)
+    assert roots == [0.0, 4.0, 8.0, 12.0]
+
+
+def test_midi_files_round_trip_through_clips(live_server, tmp_path):
+    script, call = live_server
+    song = script._song
+    call("generate_arpeggio", track="Bass", progression="I IV", key="C", clip_index=1)
+    source = song.tracks[1].clip_slots[1].clip
+    exported = call("export_clip_to_midi", track="Bass", clip_index=1,
+                    path=str(tmp_path / "arp.mid"))
+    assert exported["notes"] == len(source._notes) and exported["tempo_bpm"] == 120.0
+    listing = call("import_midi_file", path=exported["file"])
+    assert [t["note_count"] for t in listing["tracks"]] == [0, len(source._notes)]
+    call("import_midi_file", path=exported["file"], track="Bass", clip_index=3,
+         transpose=12)
+    copy = song.tracks[1].clip_slots[3].clip
+    assert copy.length == 8.0 and copy.name == "arp"
+    assert sorted(n.pitch for n in copy._notes) == sorted(n.pitch + 12 for n in source._notes)
+    with pytest.raises(Exception, match="exists"):
+        call("export_clip_to_midi", track="Bass", clip_index=1, path=exported["file"])
+
+
+def test_add_device_inserts_by_name_and_applies_settings(live_server):
+    script, call = live_server
+    bass = script._song.tracks[1]
+    result = call("add_device", track="Bass", device="Utility",
+                  settings={"Bass Mono": "On", "Gain": 0.25})
+    assert result["settings"]["ok"]
+    utility = bass.devices[-1]
+    assert utility.class_name == "StereoGain"
+    assert utility.parameters[1].value == 1 and utility.parameters[2].value == 0.25
+    with pytest.raises(Exception, match="Could not insert 'Nope'"):
+        call("add_device", track="Bass", device="Nope")
+
+
+def test_sidechain_chain_keys_the_compressor_from_another_track(live_server):
+    script, call = live_server
+    bass = script._song.tracks[1]
+    result = call("apply_device_chain", track="Bass", chain="sidechain_duck",
+                  sidechain_from="Drums")
+    assert result["ok"], result
+    compressor = bass.devices[-1]
+    params = {p.name: p for p in compressor.parameters}
+    assert params["S/C On"].value == 1 and params["Model"].value == 0
+    assert params["Threshold"].str_for_value(params["Threshold"].value) == "-30.00 dB"
+    assert params["Ratio"].str_for_value(params["Ratio"].value) == "8.00 : 1"
+    assert compressor.input_routing_type.display_name == "Drums"
+    with pytest.raises(Exception, match="needs sidechain_from"):
+        call("apply_device_chain", track="Bass", chain="sidechain_duck")
+
+
+def test_device_info_lists_parameter_values(live_server):
+    script, call = live_server
+    info = call("manage_device", track="Bass", device="Operator", action="info")
+    names = [p["name"] for p in info["parameters"]]
+    assert names == ["Device On", "Filter Freq", "Filter Type"]
+    assert info["parameters"][2]["value_items"] == ["Lowpass", "Highpass", "Bandpass"]
+
+
+def test_measure_levels_reads_live_meters_while_playing(live_server):
+    import threading
+    import time as _time
+
+    script, call = live_server
+    song = script._song
+    bass, master = song.tracks[1], song.master_track
+    stop = threading.Event()
+
+    def play_audio():
+        # What Live does while the set plays: the meters move
+        levels = [0.7631, 0.8421, 0.7631]
+        i = 0
+        while not stop.is_set():
+            bass.output_meter_left = levels[i % 3]
+            bass.output_meter_right = levels[i % 3]
+            master.output_meter_left = 0.80
+            i += 1
+            _time.sleep(0.05)
+
+    song.continue_playing = lambda: setattr(song, "is_playing", True)
+    player = threading.Thread(target=play_audio, daemon=True)
+    player.start()
+    try:
+        result = call("measure_levels", seconds=1, tracks=["Bass", "master"])
+    finally:
+        stop.set()
+        player.join()
+    levels = {r["track"]: r for r in result["levels"]}
+    assert levels["Bass"]["peak_dbfs"] == -6.0
+    assert levels["Master"]["peak_dbfs"] == -9.2
+    # Watchers it started are gone again, playback stopped
+    assert call("get_live_events")["observers"] == []
+    assert song.is_playing is False
+
+
+# ── Remote Script 1.9 ────────────────────────────────────────────────────────
+
+def test_display_pseudo_property_shows_live_text(script):
+    result = run(script, "lom_get", path='live_set tracks "Bass" devices 0 parameters',
+                 properties=["name", "$display"])
+    displays = {p["name"]: p["$display"] for p in result["items"]}
+    assert displays["Filter Type"] == "Lowpass"
+    assert displays["Filter Freq"].endswith("Hz")
+
+
+def test_value_objects_can_be_described(script):
+    class TuningSystem(object):  # Live keeps these outside the Live module
+        __module__ = "Song"
+        name = "Rast"
+        pseudo_octave_in_cents = 1200.0
+
+    script._song.tuning_system = TuningSystem()
+    described = run(script, "lom_get", path="live_set tuning_system")
+    assert described["$type"] == "TuningSystem"
+    assert described["properties"]["name"] == "Rast"
+    assert "$id" in described
+
+
+def test_reading_never_closes_an_undo_step(script):
+    run(script, "lom_call", path="live_set tracks 1 devices 0 parameters 1",
+        method="str_for_value", args=[0.5])
+    run(script, "batch", commands=[
+        {"type": "lom_get", "params": {"path": "live_set", "properties": ["tempo"]}},
+        {"type": "clip_get_notes", "params": {"track_index": 0, "clip_index": 0}},
+    ], stop_on_error=False)
+    assert script._song.undo_log == []
+    run(script, "batch", commands=[
+        {"type": "lom_get", "params": {"path": "live_set", "properties": ["tempo"]}},
+        {"type": "lom_set", "params": {"path": "live_set", "property": "tempo", "value": 97}}])
+    assert script._song.undo_log == ["end"]
+
+
+def test_bad_requests_are_not_logged_as_crashes(script):
+    logged = []
+    script.log_message = lambda message: logged.append(message)
+    run_error(script, "lom_get", path="live_set tracks 99")
+    assert not any("Traceback" in m for m in logged)
+
+    def broken(_params):
+        raise RuntimeError("bug in the script")
+
+    script._handlers_cache["broken"] = broken
+    run_error(script, "broken")
+    assert any("Traceback" in m for m in logged)
+
+
+def test_macro_mapping_command_is_gone(script):
+    # Live has no API that maps a parameter to a rack macro
+    assert "Unknown command" in run_error(script, "map_rack_magnitude")
+
+
+def test_a_refused_command_keeps_the_connection(live_server):
+    from MCP_Server.server import AbletonCommandError
+
+    script, _call = live_server
+    from MCP_Server import extended_tools
+    connection = extended_tools._get_connection()
+    connection.send_command("lom_get", {"path": "live_set", "properties": ["tempo"]})
+    sock = connection.sock
+    with pytest.raises(AbletonCommandError, match="No item named 'Nope'"):
+        connection.send_command("lom_get", {"path": 'live_set tracks "Nope"'})
+    assert connection.sock is sock
+    assert connection.send_command("lom_get", {"path": "live_set",
+                                               "properties": ["tempo"]})["tempo"] == 120.0

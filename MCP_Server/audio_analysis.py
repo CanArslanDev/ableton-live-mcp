@@ -286,3 +286,95 @@ def observations(r: dict) -> list[str]:
     if abs(r["dc_offset"]) > 0.01:
         notes.append("DC offset present.")
     return notes
+
+
+# ── Live's track meters ──────────────────────────────────────────────────────
+
+# Live's output meters read 0..1 and are linear in dB: a sine at 0 dBFS peak
+# reads 0.921 and every 12 dB lower reads 12/76 less (measured on Live 12.3.8),
+# so 0 is -70 dB and 1 is +6 dB, the ends of Live's meter scale. The meters
+# show smoothed peak level.
+METER_FLOOR_DB = -70.0
+METER_SPAN_DB = 76.0
+
+
+def meter_to_db(value: float) -> float | None:
+    """dBFS of a Live meter reading; None for silence (below -70 dB)."""
+    if value is None or value <= 0:
+        return None
+    return round(METER_FLOOR_DB + METER_SPAN_DB * float(value), 1)
+
+
+def _channel_stats(readings: list[tuple[float | None, float]], end: float | None) -> dict:
+    """Peak and time-weighted average (in dB) of one meter's change events.
+
+    readings: (Live timestamp or None for the value when watching began, value).
+    A meter only reports when it changes, so each value holds until the next.
+    """
+    values = [v for _t, v in readings]
+    timed = [(t, v) for t, v in readings if t is not None]
+    if readings and readings[0][0] is None and timed:
+        timed.insert(0, (timed[0][0], readings[0][1]))
+    area = duration = 0.0
+    for (t0, v0), (t1, _v1) in zip(timed, timed[1:] + [(end, None)]):
+        if t1 is None or t1 <= t0:
+            continue
+        area += (meter_to_db(v0) or METER_FLOOR_DB) * (t1 - t0)
+        duration += t1 - t0
+    peak = meter_to_db(max(values)) if values else None
+    if duration > 0:
+        average = round(area / duration, 1)
+    else:
+        average = meter_to_db(values[-1]) if values else None
+    if peak is None:
+        average = None
+    return {"peak": peak, "average": average}
+
+
+def level_report(meters: dict) -> dict:
+    """Per-track peak/average dBFS and gain-staging notes from meter readings.
+
+    meters: {observer id: {"track": name, "readings": [(ts, value), ...]}},
+    two entries (left and right) per track.
+    """
+    end = max((t for m in meters.values() for t, _v in m["readings"] if t is not None),
+              default=None)
+    per_track: dict[str, list[dict]] = {}
+    for meter in meters.values():
+        per_track.setdefault(meter["track"], []).append(_channel_stats(meter["readings"], end))
+    levels = []
+    for track, channels in per_track.items():
+        peaks = [c["peak"] for c in channels if c["peak"] is not None]
+        averages = [c["average"] for c in channels if c["average"] is not None]
+        levels.append({"track": track,
+                       "peak_dbfs": max(peaks) if peaks else None,
+                       "average_dbfs": round(sum(averages) / len(averages), 1)
+                       if averages else None})
+    # Loudest first, silent tracks last
+    levels.sort(key=lambda r: (r["peak_dbfs"] is None, -(r["peak_dbfs"] or 0.0)))
+
+    notes = []
+    sounding = [r for r in levels if r["peak_dbfs"] is not None]
+    silent = [r["track"] for r in levels if r["peak_dbfs"] is None]
+    if not sounding:
+        notes.append("Nothing sounded while metering: start playback (play=True) or check "
+                     "that clips are playing.")
+    master = next((r for r in levels if r["track"] == "Master"), None)
+    if master and master["peak_dbfs"] is not None:
+        if master["peak_dbfs"] > -0.5:
+            notes.append(f"Master peaks at {master['peak_dbfs']} dBFS: no headroom. Without "
+                         "a limiter on the master this clips on export; for mixing, aim for "
+                         "peaks around -6 dBFS and leave loudness to mastering.")
+        elif master["peak_dbfs"] < -18:
+            notes.append(f"Master peaks at only {master['peak_dbfs']} dBFS: the mix is very "
+                         "quiet; raise track levels evenly.")
+    hot = [r["track"] for r in sounding if r["track"] != "Master" and r["peak_dbfs"] > 0]
+    if hot:
+        notes.append("Above 0 dBFS: " + ", ".join(hot) + ". Live's mixer does not clip "
+                     "internally, but devices after the fader and the master can; pull "
+                     "these down so tracks peak around -10 to -6 dBFS.")
+    if silent and sounding:
+        notes.append("No signal on: " + ", ".join(silent) + " (muted, empty or not playing).")
+    return {"levels": levels, "observations": notes,
+            "meter_scale": "Live meters, smoothed peak: dBFS = 76 × meter − 70 "
+                           "(−70 to +6 dB)"}

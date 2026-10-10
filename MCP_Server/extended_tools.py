@@ -14,8 +14,6 @@ Addressing conventions shared by the tools:
 from __future__ import annotations
 
 import asyncio
-import functools
-import inspect
 import json
 import logging
 import re
@@ -26,6 +24,7 @@ from typing import Any, Callable
 
 from . import music
 from .telemetry_decorator import telemetry_tool
+from .tooling import register_tool
 
 logger = logging.getLogger("AbletonMCPServer")
 
@@ -217,27 +216,6 @@ def batch_summary(result: dict) -> dict:
             "steps": steps}
 
 
-def _errors_as_text(fn: Callable) -> Callable:
-    if inspect.iscoroutinefunction(fn):
-        @functools.wraps(fn)
-        async def async_wrapper(*args, **kwargs):
-            try:
-                return await fn(*args, **kwargs)
-            except Exception as e:
-                logger.error("%s failed: %s", fn.__name__, e)
-                return f"Error in {fn.__name__}: {e}"
-        return async_wrapper
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            logger.error("%s failed: %s", fn.__name__, e)
-            return f"Error in {fn.__name__}: {e}"
-    return wrapper
-
-
 # ── Shared note helpers ──────────────────────────────────────────────────────
 
 def read_notes(path: str, **window: Any) -> dict:
@@ -283,6 +261,75 @@ def generated_result(path: str, notes: list[dict], written: dict, extra: dict | 
     if extra:
         payload.update(extra)
     return to_json(payload)
+
+
+def song_context(optional: bool = False) -> dict:
+    """The set's bar length and Key & Scale, which generators default to.
+
+    Live 11 has no Key & Scale; then "key" is None. With optional=True a
+    missing connection gives 4/4 and no key instead of an error.
+    """
+    try:
+        info = lom_get("live_set", ["signature_numerator", "signature_denominator",
+                                    "root_note", "scale_name", "scale_intervals"])
+    except Exception:
+        if not optional:
+            raise
+        info = {}
+    num, den = info.get("signature_numerator"), info.get("signature_denominator")
+    meter_known = isinstance(num, int) and isinstance(den, int) and num > 0 and den > 0
+    root, intervals = info.get("root_note"), info.get("scale_intervals")
+    has_key = isinstance(root, int) and isinstance(intervals, list) and bool(intervals)
+    return {
+        "beats_per_bar": music.beats_per_bar(num, den) if meter_known else 4.0,
+        "time_signature": f"{num}/{den}" if meter_known else "4/4",
+        "key": music.NOTE_NAMES[root % 12] if has_key else None,
+        "scale": [int(i) for i in intervals] if has_key else None,
+        "scale_name": info.get("scale_name") if has_key else None,
+    }
+
+
+def resolve_key(key: str | None, scale: Any, context: dict) -> tuple[str, Any]:
+    """The caller's key/scale, else the set's (Live 12), else C major."""
+    if key is not None:
+        return key, scale
+    if context.get("key") is not None:
+        return context["key"], scale if scale is not None else context["scale"]
+    return "C", scale
+
+
+def musical_context(key: str, scale: Any, context: dict) -> dict:
+    """What a generator used, for its result: key, scale, time signature."""
+    if isinstance(scale, list) and scale == context.get("scale"):
+        scale = context.get("scale_name") or scale
+    return {"key": key, "scale": scale, "time_signature": context["time_signature"]}
+
+
+def setting_ops(device: str, settings: dict[str, Any]) -> list[dict]:
+    """Batch steps setting device parameters: text by display, numbers raw."""
+    ops = []
+    for name, value in settings.items():
+        parameter = f"{device} parameters {selector(name)}"
+        if isinstance(value, str):
+            ops.append(op_display(parameter, value))
+        else:
+            ops.append(op_set(parameter, "value", float(value)))
+    return ops
+
+
+def inserted_device_ids(track: str, inserts: list[list[Any]]) -> list[int]:
+    """Insert devices with Track.insert_device (Live 12.3+); their ids, in order."""
+    result = batch([op_call(track, "insert_device", *args) for args in inserts])
+    ids = []
+    for args, step in zip(inserts, result["results"]):
+        if step["status"] == "error":
+            message = step["message"]
+            if "has no method 'insert_device'" in message:
+                message = ("inserting devices by name needs Live 12.3 or later; use "
+                           "load_instrument_or_effect with a browser URI")
+            raise RuntimeError(f"Could not insert {args[0]!r}: {message}")
+        ids.append(step["result"]["result"]["$id"])
+    return ids
 
 
 DRUM_KEYWORDS = [
@@ -377,13 +424,18 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     global _get_connection
     _get_connection = get_connection
 
-    def tool(fn: Callable) -> Callable:
-        wrapped = telemetry_tool(fn.__name__)(_errors_as_text(fn))
-        return mcp.tool()(wrapped)
+    def tool(fn: Callable | None = None, **hints: Any) -> Callable:
+        """@tool, or @tool(read_only=True | destructive=True | idempotent=True).
+
+        Hints become MCP tool annotations; see tooling.register_tool.
+        """
+        def decorate(f: Callable) -> Callable:
+            return register_tool(mcp, telemetry_tool(f.__name__)(f), **hints)
+        return decorate(fn) if fn is not None else decorate
 
     # ── Generic LOM access ───────────────────────────────────────────────────
 
-    @tool
+    @tool(read_only=True)
     def lom_get_object(path: str, properties: list[str] | None = None) -> str:
         """Read anything in the Live Object Model (LOM) by path.
 
@@ -403,7 +455,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """
         return to_json(lom_get(path, properties))
 
-    @tool
+    @tool(idempotent=True)
     def lom_set_property(path: str, property: str, value: Any) -> str:
         """Set any LOM property. `value` may be a number, bool, string, enum
         member name, or a Live object reference {"$ref": "<path>"} / {"$id": n}
@@ -411,7 +463,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """
         return to_json(send("lom_set", {"path": path, "property": property, "value": value}))
 
-    @tool
+    @tool(destructive=True)
     def lom_call_method(path: str, method: str, args: list[Any] | None = None,
                         kwargs: dict[str, Any] | None = None) -> str:
         """Call any LOM method, e.g. path="live_set", method="create_scene", args=[-1];
@@ -421,7 +473,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return to_json(send("lom_call", {"path": path, "method": method,
                                          "args": args or [], "kwargs": kwargs or {}}))
 
-    @tool
+    @tool(destructive=True)
     def run_batch(commands: list[dict], stop_on_error: bool = True) -> str:
         """Run several Remote Script commands in one round-trip, on Live's main
         thread. Each command call is its own undo history entry; Live keeps
@@ -439,7 +491,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """
         return to_json(batch(commands, stop_on_error))
 
-    @tool
+    @tool(read_only=True)
     def get_session_overview() -> str:
         """Compact map of the whole set: every track (type, group, mute/solo/arm,
         volume, pan, sends, devices, Session clips), returns, master, scenes,
@@ -450,7 +502,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Tracks & mixer ───────────────────────────────────────────────────────
 
-    @tool
+    @tool(idempotent=True)
     def set_track_mixer(track: int | str, volume_db: float | None = None,
                         pan: float | str | None = None, mute: bool | None = None,
                         solo: bool | None = None, arm: bool | None = None,
@@ -490,7 +542,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             return "Nothing to change"
         return to_json(batch_summary(batch(ops)))
 
-    @tool
+    @tool(destructive=True)
     def manage_track(action: str, track: int | str | None = None, name: str | None = None,
                      color: str | int | None = None, index: int = -1) -> str:
         """Create, delete, duplicate, rename, recolor or fold tracks.
@@ -540,7 +592,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                             "value": action == "fold"}))
         raise ValueError(f"Unknown action {action!r}")
 
-    @tool
+    @tool(idempotent=True)
     def set_track_routing(track: int | str, input_type: str | None = None,
                           input_channel: str | None = None, output_type: str | None = None,
                           output_channel: str | None = None) -> str:
@@ -577,7 +629,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Scenes ───────────────────────────────────────────────────────────────
 
-    @tool
+    @tool(destructive=True)
     def manage_scene(action: str, scene: int | str | None = None, name: str | None = None,
                      tempo: float | None = None, index: int = -1) -> str:
         """Scenes: create | delete | duplicate | fire | rename | set_tempo |
@@ -620,7 +672,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Clips ────────────────────────────────────────────────────────────────
 
-    @tool
+    @tool(idempotent=True)
     def set_clip_properties(track: int | str, clip_index: int | None = None,
                             arrangement_clip_index: int | None = None,
                             name: str | None = None, color: str | int | None = None,
@@ -681,7 +733,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             return to_json(lom_get(cp))
         return to_json(batch_summary(batch(ops)))
 
-    @tool
+    @tool(destructive=True)
     def manage_clip(action: str, track: int | str, clip_index: int | None = None,
                     arrangement_clip_index: int | None = None,
                     target_track: int | str | None = None,
@@ -741,10 +793,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             return to_json(batch_summary(batch(ops, stop_on_error=False)))
         raise ValueError(f"Unknown action {action!r}")
 
-    @tool
-    def write_clip_automation(track: int | str, parameter: int | str = "volume",
-                              device: int | str = "mixer", clip_index: int | None = None,
-                              arrangement_clip_index: int | None = None,
+    @tool(destructive=True)
+    def write_clip_automation(track: int | str, clip_index: int,
+                              parameter: int | str = "volume",
+                              device: int | str = "mixer",
                               points: list[dict] | None = None, shape: str | None = None,
                               start: float = 0.0, end: float | None = None,
                               low: float = 0.0, high: float = 1.0, cycles: float = 1.0,
@@ -761,10 +813,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - normalized=True: values are 0..1 of the parameter range; False: raw
           parameter units.
         - points=[] with shape=None just clears the envelope.
-        Times are clip-relative beats. (Live's API cannot write track-level
-        Arrangement automation; this writes clip envelopes.)
+        Times are clip-relative beats. Session clips only: Live's API refuses
+        envelope edits on Arrangement clips and has no track automation. To
+        get automation into the Arrangement, write it on a Session clip and
+        duplicate_to_arrangement — the copy keeps its envelopes.
         """
-        cp = clip_path(track, clip_index, arrangement_clip_index)
+        cp = clip_path(track, clip_index)
         pp = parameter_path(track, device, parameter)
         info = lom_get(pp, ["min", "max", "name"])
         pmin, pmax = float(info["min"]), float(info["max"])
@@ -785,7 +839,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Notes ────────────────────────────────────────────────────────────────
 
-    @tool
+    @tool(read_only=True)
     def read_clip_notes(track: int | str, clip_index: int | None = None,
                         arrangement_clip_index: int | None = None,
                         from_time: float | None = None, time_span: float | None = None,
@@ -809,7 +863,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             n["name"] = music.note_name(n["pitch"])
         return to_json(result)
 
-    @tool
+    @tool(destructive=True)
     def edit_clip_notes(track: int | str, mode: str = "add", notes: list[dict] | None = None,
                         clip_index: int | None = None,
                         arrangement_clip_index: int | None = None,
@@ -843,11 +897,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return to_json(write_notes(clip_path(track, clip_index, arrangement_clip_index),
                                    prepared, mode, **extra))
 
-    @tool
+    @tool(destructive=True)
     def transform_clip_notes(track: int | str, operation: str,
                              clip_index: int | None = None,
                              arrangement_clip_index: int | None = None,
-                             semitones: int = 0, steps: int = 0, key: str = "C",
+                             semitones: int = 0, steps: int = 0, key: str | None = None,
                              scale: str | None = None, grid: float = 0.25,
                              strength: float = 1.0, timing: float = 0.01,
                              velocity_amount: float = 8.0, factor: float = 1.0,
@@ -871,6 +925,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - double_speed | half_speed
         - set_probability (value 0..1) | set_velocity_deviation (value)
         - dedupe | delete
+        key/scale default to the set's Key & Scale (Live 12).
+        Notes are edited in place (Live 11+), so note ids and per-note
+        expression the API cannot read (MPE) are kept.
         """
         cp = clip_path(track, clip_index, arrangement_clip_index)
         data = read_notes(cp)
@@ -880,8 +937,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         t0 = time_start if time_start is not None else float("-inf")
         t1 = time_end if time_end is not None else float("inf")
         chosen = [n for n in notes if lo <= n["pitch"] <= hi and t0 <= n["start_time"] < t1]
-        kept = [n for n in notes if n not in chosen]
         op = operation.lower()
+        if op in ("transpose_in_scale", "constrain_to_scale"):
+            key, scale = resolve_key(key, scale, song_context())
         ops: dict[str, Callable[[list[dict]], list[dict]]] = {
             "transpose": lambda ns: music.transpose(ns, semitones),
             "transpose_in_scale": lambda ns: music.transpose_in_scale(ns, steps, key, scale),
@@ -905,28 +963,44 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if op not in ops:
             raise ValueError(f"Unknown operation {operation!r}. Known: {', '.join(ops)}")
         changed = ops[op](chosen)
-        for n in changed:
+        summary = {"operation": op, "notes_affected": len(chosen)}
+        if chosen and all("note_id" in n for n in notes):
+            if op in ("dedupe", "delete"):
+                survivors = {n["note_id"] for n in changed}
+                doomed = [n["note_id"] for n in chosen if n["note_id"] not in survivors]
+                if doomed:
+                    write_notes(cp, [], "remove_ids", note_ids=doomed)
+                summary["notes_removed"] = len(doomed)
+            else:
+                result = write_notes(cp, changed, "modify")
+                summary["notes_modified"] = result.get("modified")
+            summary["notes_in_clip"] = len(notes) - summary.get("notes_removed", 0)
+            return to_json(summary)
+        # No note ids (Live 10): rewrite the clip
+        chosen_ids = {id(n) for n in chosen}
+        final = [n for n in notes if id(n) not in chosen_ids] + changed
+        for n in final:
             n.pop("note_id", None)
-        for n in kept:
-            n.pop("note_id", None)
-        final = kept + changed
         result = write_notes(cp, final, "replace")
-        return to_json({"operation": op, "notes_affected": len(chosen),
-                        "notes_in_clip": result.get("written")})
+        summary["notes_in_clip"] = result.get("written")
+        return to_json(summary)
 
     # ── Generators ───────────────────────────────────────────────────────────
 
-    @tool
-    def music_theory(key: str = "C", scale: str | None = None,
+    @tool(read_only=True)
+    def music_theory(key: str | None = None, scale: str | None = None,
                      progression: str | None = None, sevenths: bool = False) -> str:
         """Scale notes, diatonic chords and (optionally) a parsed progression.
 
-        key: "C", "F#", "A minor", "Ebm"; scale: major, minor, dorian, phrygian,
+        key: "C", "F#", "A minor", "Ebm" (default: the set's Key & Scale in
+        Live 12, else C major); scale: major, minor, dorian, phrygian,
         lydian, mixolydian, locrian, harmonic_minor, melodic_minor, hijaz,
         phrygian_dominant, major_pentatonic, minor_pentatonic, blues, ...
         progression: roman numerals ("ii7 V7 Imaj7", "i VI III VII", "bVII")
         or chord symbols ("Am7 F C/E G").
         """
+        if key is None:
+            key, scale = resolve_key(key, scale, song_context(optional=True))
         root, intervals = music.parse_key(key, scale)
         result: dict[str, Any] = {
             "root": music.NOTE_NAMES[root],
@@ -943,9 +1017,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                      for c, v in zip(chords, voiced)]
         return to_json(result)
 
-    @tool
-    def generate_chord_progression(track: int | str, progression: str = "I V vi IV",
-                                   key: str = "C", scale: str | None = None,
+    @tool(destructive=True)
+    def generate_chord_progression(track: int | str, progression: str | None = None,
+                                   key: str | None = None, scale: str | None = None,
                                    clip_index: int | None = 0,
                                    arrangement_time: float | None = None,
                                    bars_per_chord: float = 1.0, octave: int = 3,
@@ -955,7 +1029,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """Write a chord progression into a MIDI clip (created if missing).
 
         - progression: roman numerals ("ii7 V7 Imaj7", "i iv bVII III") or chord
-          symbols ("Am F C G", "Dm7 G7 Cmaj7", "C/E")
+          symbols ("Am F C G", "Dm7 G7 Cmaj7", "C/E"); default: four chords
+          from the scale's own triads (C major: C G Am F; D Dorian: Dm G Dm C)
+        - key/scale: default to the set's Key & Scale (Live 12); bars follow the
+          set's time signature
         - voicing: smooth (voice-led inversions) | close | open | drop2 | spread
         - rhythm: sustain | half | quarters | eighths | offbeat | syncopated |
           charleston | stabs
@@ -963,18 +1040,22 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - arrangement_time: write into a new Arrangement clip at this beat
           instead of a Session slot (Live 12+)
         """
+        context = song_context()
+        key, scale = resolve_key(key, scale, context)
+        progression = progression or music.default_progression(key, scale)
+        bar = context["beats_per_bar"]
         chords = music.parse_progression(progression, key, scale)
         voiced = music.voice_progression(chords, octave, voicing, add_bass_note)
-        notes = music.chord_notes(voiced, bars_per_chord, rhythm, velocity)
-        length = len(chords) * bars_per_chord * 4
+        notes = music.chord_notes(voiced, bars_per_chord, rhythm, velocity, bar)
+        length = len(chords) * bars_per_chord * bar
         path = prepare_clip(track, clip_index, length, arrangement_time,
                             clip_name or progression)
         written = write_notes(path, notes, "replace" if replace else "add")
-        return generated_result(path, notes, written, {
+        return generated_result(path, notes, written, dict(musical_context(key, scale, context), **{
             "chords": [{"chord": c["symbol"], "notes": [music.note_name(p) for p in v]}
-                       for c, v in zip(chords, voiced)], "length_beats": length})
+                       for c, v in zip(chords, voiced)], "length_beats": length}))
 
-    @tool
+    @tool(destructive=True)
     def generate_drum_pattern(track: int | str, style: str = "house", bars: int = 2,
                               clip_index: int | None = 0,
                               arrangement_time: float | None = None,
@@ -987,6 +1068,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         style: house | techno | trap | drill | boom_bap | lofi | dnb | breakbeat |
         uk_garage | reggaeton | afrobeats | rock | funk | disco | halftime
+        Bars follow the set's time signature: the 4/4 grooves are cut or
+        extended to fit other meters.
         - swing 0..1 delays off-beat 16ths; humanize 0..1 adds timing/velocity variation
         - fill: snare fill on the last beat of the last bar
         - auto_map_drum_rack: find kick/snare/hat/... pads by their names in the
@@ -994,21 +1077,26 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
           clap D#1=39, closed hat F#1=42, open hat A#1=46)
         - mapping overrides: {"kick": 36, "closed_hat": "F#1", ...}
         """
+        context = song_context()
+        bar = context["beats_per_bar"]
         pads = drum_mapping_from_rack(track) if auto_map_drum_rack else {}
         if mapping:
             pads.update({k: music.parse_note(v) for k, v in mapping.items()})
-        notes = music.drum_pattern(style, bars, pads, swing, humanize, fill, seed, velocity)
-        path = prepare_clip(track, clip_index, bars * 4, arrangement_time,
+        notes = music.drum_pattern(style, bars, pads, swing, humanize, fill, seed, velocity,
+                                   bar)
+        path = prepare_clip(track, clip_index, bars * bar, arrangement_time,
                             clip_name or f"{style} drums")
         written = write_notes(path, notes, "replace" if replace else "add")
         used = sorted({n["pitch"] for n in notes})
         return generated_result(path, notes, written, {
             "pad_mapping": pads or "General MIDI defaults",
-            "pads_used": [music.note_name(p) for p in used]})
+            "pads_used": [music.note_name(p) for p in used],
+            "time_signature": context["time_signature"], "length_beats": bars * bar})
 
-    @tool
-    def generate_bassline(track: int | str, progression: str = "I V vi IV", key: str = "C",
-                          scale: str | None = None, clip_index: int | None = 0,
+    @tool(destructive=True)
+    def generate_bassline(track: int | str, progression: str | None = None,
+                          key: str | None = None, scale: str | None = None,
+                          clip_index: int | None = 0,
                           arrangement_time: float | None = None,
                           bars_per_chord: float = 1.0, octave: int = 1,
                           style: str = "root", velocity: int = 100,
@@ -1019,20 +1107,29 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         style: root (whole notes) | octave (8th-note octave jumps) | offbeat
         (house) | syncopated | walking (scale steps approaching the next root) |
         pulse (16ths) | 808 (long notes). octave=1 → roots around C1 (36).
+        key/scale default to the set's Key & Scale (Live 12); the progression
+        to four chords from the scale's own triads. To follow chords already
+        in a clip, run analyze_harmony and pass its progression and
+        bars_per_chord.
         """
+        context = song_context()
+        key, scale = resolve_key(key, scale, context)
         root, intervals = music.parse_key(key, scale)
+        progression = progression or music.default_progression(key, scale)
+        bar = context["beats_per_bar"]
         chords = music.parse_progression(progression, key, scale)
         notes = music.bassline(chords, bars_per_chord, octave, style, root, intervals,
-                               velocity, seed)
-        length = len(chords) * bars_per_chord * 4
+                               velocity, seed, bar)
+        length = len(chords) * bars_per_chord * bar
         path = prepare_clip(track, clip_index, length, arrangement_time,
                             clip_name or f"bass {style}")
         written = write_notes(path, notes, "replace" if replace else "add")
-        return generated_result(path, notes, written, {"length_beats": length})
+        return generated_result(path, notes, written, dict(
+            musical_context(key, scale, context), progression=progression, length_beats=length))
 
-    @tool
-    def generate_arpeggio(track: int | str, progression: str = "i VI III VII",
-                          key: str = "A minor", scale: str | None = None,
+    @tool(destructive=True)
+    def generate_arpeggio(track: int | str, progression: str | None = None,
+                          key: str | None = None, scale: str | None = None,
                           clip_index: int | None = 0, arrangement_time: float | None = None,
                           bars_per_chord: float = 1.0, octave: int = 4,
                           pattern: str = "up", rate: float = 0.25, octaves: int = 1,
@@ -1043,19 +1140,26 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         pattern: up | down | updown | downup | random | converge | pinky
         rate: note length in beats (0.25 = 1/16, 0.5 = 1/8, 1/3 = 1/8 triplet)
         octaves: how many octaves the arpeggio spans; gate: note length fraction
+        key/scale default to the set's Key & Scale (Live 12); the progression
+        to four chords from the scale's own triads.
         """
+        context = song_context()
+        key, scale = resolve_key(key, scale, context)
+        progression = progression or music.default_progression(key, scale)
+        bar = context["beats_per_bar"]
         chords = music.parse_progression(progression, key, scale)
         voiced = music.voice_progression(chords, octave, "smooth")
         notes = music.arpeggio(voiced, bars_per_chord, rate, pattern, octaves, gate,
-                               velocity, seed)
-        length = len(chords) * bars_per_chord * 4
+                               velocity, seed, bar)
+        length = len(chords) * bars_per_chord * bar
         path = prepare_clip(track, clip_index, length, arrangement_time,
                             clip_name or f"arp {pattern}")
         written = write_notes(path, notes, "replace" if replace else "add")
-        return generated_result(path, notes, written, {"length_beats": length})
+        return generated_result(path, notes, written, dict(
+            musical_context(key, scale, context), progression=progression, length_beats=length))
 
-    @tool
-    def generate_melody(track: int | str, key: str = "C", scale: str | None = None,
+    @tool(destructive=True)
+    def generate_melody(track: int | str, key: str | None = None, scale: str | None = None,
                         bars: int = 4, progression: str | None = None,
                         bars_per_chord: float = 1.0, clip_index: int | None = 0,
                         arrangement_time: float | None = None, low: str = "C4",
@@ -1066,19 +1170,127 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         If a progression is given, strong beats land on chord tones. density
         0..1 controls how busy it is; low/high bound the range; vary `seed` for
-        alternatives and keep it to reproduce one.
+        alternatives and keep it to reproduce one. key/scale default to the
+        set's Key & Scale (Live 12); bars follow the set's time signature.
         """
+        context = song_context()
+        key, scale = resolve_key(key, scale, context)
+        bar = context["beats_per_bar"]
         chords = music.parse_progression(progression, key, scale) if progression else None
         notes = music.melody(key, scale, bars, low, high, chords, bars_per_chord, density,
-                             seed, velocity)
-        path = prepare_clip(track, clip_index, bars * 4, arrangement_time,
+                             seed, velocity, bar)
+        path = prepare_clip(track, clip_index, bars * bar, arrangement_time,
                             clip_name or "melody")
         written = write_notes(path, notes, "replace" if replace else "add")
-        return generated_result(path, notes, written, {"seed": seed})
+        return generated_result(path, notes, written, dict(
+            musical_context(key, scale, context), seed=seed, length_beats=bars * bar))
+
+    # ── Harmony analysis & MIDI files ────────────────────────────────────────
+
+    @tool(read_only=True)
+    def analyze_harmony(track: int | str, clip_index: int | None = None,
+                        arrangement_clip_index: int | None = None,
+                        resolution: str = "bar", key: str | None = None,
+                        scale: str | None = None) -> str:
+        """Name the chords in a MIDI clip: chord per window, key, roman
+        numerals, and the chord changes with their lengths.
+
+        - resolution: bar | half_bar | beat | 2_bars (window per chord)
+        - key/scale: analyse in this key; by default the key is estimated
+          from the notes (the set's Key & Scale is reported alongside)
+        The result's `progression` and `bars_per_chord` can be passed to
+        generate_bassline / generate_arpeggio / generate_melody /
+        generate_chord_progression so a new part follows these chords.
+        """
+        cp = clip_path(track, clip_index, arrangement_clip_index)
+        data = read_notes(cp)
+        context = song_context(optional=True)
+        bar = context["beats_per_bar"]
+        windows = {"bar": bar, "half_bar": bar / 2, "beat": 1.0, "2_bars": bar * 2}
+        if resolution not in windows:
+            raise ValueError(f"resolution must be one of {', '.join(windows)}")
+        result = music.analyze_harmony(data["notes"], bar, windows[resolution],
+                                       float(data["length"]), key, scale)
+        result["clip"] = data.get("clip")
+        result["time_signature"] = context["time_signature"]
+        if context.get("key") is not None:
+            result["set_key"] = f"{context['key']} {context.get('scale_name') or ''}".strip()
+        return to_json(result)
+
+    @tool(destructive=True)
+    def import_midi_file(path: str, track: int | str | None = None,
+                         clip_index: int | None = 0, arrangement_time: float | None = None,
+                         midi_track: int | str | None = None, channel: int | None = None,
+                         transpose: int = 0, replace: bool = True,
+                         clip_name: str | None = None) -> str:
+        """Import the notes of a .mid file into a MIDI clip (created if missing).
+
+        Without `track`, nothing is imported: the file's tracks, channels, note
+        counts, tempo and time signature are listed instead.
+        - midi_track: index or name of one track in the file (default: all
+          tracks merged); channel: 1-16 to take one channel only
+        - clip_index (Session slot) or arrangement_time (beats, Live 12+)
+        - The clip is rounded up to whole bars of the set's time signature.
+          The file's tempo is reported, not applied to the set.
+        """
+        from . import midi_files
+
+        info = midi_files.read_midi(path)
+        if track is None:
+            return to_json({k: v for k, v in info.items() if k != "tracks"} | {
+                "tracks": [{k: v for k, v in t.items() if k != "notes"}
+                           for t in info["tracks"]]})
+        notes = midi_files.select_notes(info, midi_track, channel)
+        if not notes:
+            raise ValueError("No notes found for that track/channel; call import_midi_file "
+                             "without `track` to list what the file holds")
+        for n in notes:
+            n["pitch"] = min(127, max(0, n["pitch"] + transpose))
+            n.pop("channel", None)
+        bar = song_context()["beats_per_bar"]
+        end = max(n["start_time"] + n["duration"] for n in notes)
+        length = max(1, -(-end // bar)) * bar
+        name = clip_name or Path(info["file"]).stem
+        clip = prepare_clip(track, clip_index, length, arrangement_time, name)
+        written = write_notes(clip, notes, "replace" if replace else "add")
+        return generated_result(clip, notes, written, {
+            "file": info["file"], "length_beats": length, "file_tempo_bpm": info["tempo_bpm"],
+            "file_time_signature": info["time_signature"]})
+
+    @tool
+    def export_clip_to_midi(track: int | str, clip_index: int | None = None,
+                            arrangement_clip_index: int | None = None,
+                            path: str | None = None, include_muted: bool = False,
+                            overwrite: bool = False) -> str:
+        """Write a MIDI clip's notes to a .mid file, with the set's tempo and
+        time signature.
+
+        path: a .mid file; default ~/Music/Ableton MCP/MIDI/<clip name>.mid
+        (numbered, never overwritten). An existing `path` is only replaced
+        with overwrite=True. Muted notes are skipped unless include_muted.
+        """
+        from . import midi_files
+
+        cp = clip_path(track, clip_index, arrangement_clip_index)
+        data = read_notes(cp)
+        notes = [n for n in data["notes"] if include_muted or not n.get("mute")]
+        song = lom_get("live_set", ["tempo", "signature_numerator", "signature_denominator"])
+        name = data.get("clip") or "clip"
+        if path:
+            target = Path(path).expanduser()
+            if target.exists() and not overwrite:
+                raise ValueError(f"{target} exists; pass overwrite=True to replace it")
+        else:
+            target = midi_files.free_path(Path.home() / "Music" / "Ableton MCP" / "MIDI", name)
+        result = midi_files.write_midi(target, notes, float(song["tempo"]),
+                                       int(song["signature_numerator"]),
+                                       int(song["signature_denominator"]), name)
+        result["clip"] = name
+        return to_json(result)
 
     # ── Devices & racks ──────────────────────────────────────────────────────
 
-    @tool
+    @tool(destructive=True)
     def manage_device(track: int | str, device: int | str, action: str,
                       target_track: int | str | None = None,
                       target_index: int | None = None) -> str:
@@ -1088,9 +1300,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         action = action.lower()
         dp = device_path(track, device)
         if action == "info":
-            return to_json(lom_get(dp, ["name", "class_name", "class_display_name", "type",
-                                        "is_active", "can_have_chains", "can_have_drum_pads",
-                                        "parameters"]))
+            info = lom_get(dp, ["name", "class_name", "class_display_name", "type",
+                                "is_active", "can_have_chains", "can_have_drum_pads"])
+            info["parameters"] = [
+                {k: v for k, v in p.items()
+                 if not (isinstance(v, dict) and "$error" in v) and k != "$id"}
+                for p in lom_get(f"{dp} parameters", ["name", "value", "$display", "min",
+                                                      "max", "is_quantized",
+                                                      "value_items"])["items"]]
+            return to_json(info)
         if action == "delete":
             idx = index_in(f"{track_path(track)} devices", device)
             return to_json(send("lom_call", {"path": track_path(track),
@@ -1121,6 +1339,68 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         raise ValueError(f"Unknown action {action!r}")
 
     @tool
+    def add_device(track: int | str, device: str, position: int | None = None,
+                   settings: dict[str, float | str] | None = None) -> str:
+        """Insert one of Live's own devices by name, without the browser (Live 12.3+).
+
+        device: the name in Live's browser, e.g. "EQ Eight", "Compressor",
+        "Glue Compressor", "Limiter", "Saturator", "Utility", "Reverb",
+        "Delay", "Echo", "Auto Filter", "Drum Buss", "Multiband Dynamics",
+        "Chorus-Ensemble", "Roar", "Channel EQ", "Gate"; instruments ("Drift",
+        "Operator", "Wavetable", "Simpler", "Drum Rack", "Meld"); MIDI effects
+        ("Arpeggiator", "Chord", "Scale"); racks ("Audio Effect Rack",
+        "Instrument Rack"). Plug-ins, Max devices and presets need
+        load_instrument_or_effect with a browser URI.
+        - position: index in the device chain (default: the end); MIDI effects
+          go before the instrument
+        - settings: {"Threshold": "-18 dB", "Ratio": "4", "1 Filter Type A":
+          "High Pass 48dB"} as Live displays them, or raw numbers
+        """
+        tp = track_path(track)
+        args = [device] if position is None else [device, int(position)]
+        device_id = inserted_device_ids(tp, [args])[0]
+        result: dict[str, Any] = {"device": device, "track": track, "id": device_id}
+        if settings:
+            result["settings"] = batch_summary(batch(setting_ops(f"id {device_id}", settings),
+                                                     stop_on_error=False))
+        return to_json(result)
+
+    @tool
+    def apply_device_chain(track: int | str, chain: str,
+                           sidechain_from: int | str | None = None) -> str:
+        """Add a ready-made chain of Live's devices to the end of a track
+        (Live 12.3+). Starting points to adjust by ear, not presets:
+
+        - vocal: low cut, mud dip, compression, soft saturation, air
+        - drum_bus: Drum Buss + parallel Glue Compressor
+        - bass: sub cleanup, compression, harmonics, mono below 120 Hz
+        - pad: low cut, chorus, long reverb, wider image
+        - master: subsonic cut, 2:1 glue, bass mono, true-peak limiter at -1 dB
+        - sidechain_duck: compressor keyed from `sidechain_from` (e.g. the kick)
+        Use track="master" for the master chain.
+        """
+        from . import device_recipes
+
+        spec = device_recipes.recipe(chain)
+        if spec.get("needs_sidechain") and sidechain_from is None:
+            raise ValueError("This chain needs sidechain_from: the track that should duck "
+                             "this one (usually the kick or drums)")
+        tp = track_path(track)
+        ids = inserted_device_ids(tp, [[name] for name, _settings in spec["devices"]])
+        ops = []
+        for (_name, settings), device_id in zip(spec["devices"], ids):
+            ops += setting_ops(f"id {device_id}", settings)
+        if sidechain_from is not None:
+            source = lom_get(track_path(sidechain_from), ["name"])["name"]
+            compressor = f"id {ids[0]}"
+            ops.append(op_set(compressor, "input_routing_type", ref(
+                f"{compressor} available_input_routing_types {shlex.quote(source)}")))
+        applied = batch_summary(batch(ops, stop_on_error=False))
+        return to_json({"chain": chain, "description": spec["description"],
+                        "devices": [name for name, _settings in spec["devices"]],
+                        "ok": applied["ok"], "settings": applied["steps"]})
+
+    @tool(idempotent=True)
     def set_device_parameter_by_name(track: int | str, device: int | str,
                                      parameter: int | str, value: float | None = None,
                                      display_value: str | None = None) -> str:
@@ -1138,7 +1418,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             return to_json(info)
         return to_json(send("lom_set", {"path": pp, "property": "value", "value": float(value)}))
 
-    @tool
+    @tool(destructive=True)
     def rack_control(track: int | str, device: int | str, action: str = "info",
                      macro: int | str | None = None, value: float | None = None,
                      variation: int | None = None) -> str:
@@ -1183,7 +1463,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             return to_json(send("lom_call", {"path": dp, "method": action}))
         raise ValueError(f"Unknown action {action!r}")
 
-    @tool
+    @tool(read_only=True)
     def get_drum_pads(track: int | str, device: int | str | None = None) -> str:
         """List the filled pads of a Drum Rack: MIDI note, note name, pad name,
         mute/solo. Without `device`, the first Drum Rack on the track is used.
@@ -1203,7 +1483,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Song, transport, view ────────────────────────────────────────────────
 
-    @tool
+    @tool(idempotent=True)
     def set_song_properties(tempo: float | None = None, time_signature: str | None = None,
                             swing: float | None = None, metronome: bool | None = None,
                             loop: bool | None = None, loop_start: float | None = None,
@@ -1258,7 +1538,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             return "Nothing to change"
         return to_json(batch_summary(batch(ops)))
 
-    @tool
+    @tool(destructive=True)
     def transport(action: str, time: float | None = None, beats: float | None = None) -> str:
         """Transport and edit commands.
 
@@ -1296,7 +1576,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                             "value": False}))
         raise ValueError(f"Unknown action {action!r}")
 
-    @tool
+    @tool(idempotent=True)
     def select_in_live(view: str | None = None, track: int | str | None = None,
                        scene: int | str | None = None, clip_index: int | None = None,
                        device: int | str | None = None) -> str:
@@ -1321,6 +1601,24 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                                      "detail_clip"]))
         return to_json(batch_summary(batch(ops, stop_on_error=False)))
 
+    # ── Diagnostics ──────────────────────────────────────────────────────────
+
+    @tool(read_only=True)
+    def doctor() -> str:
+        """Diagnose the setup when Live does not respond or tools fail: server
+        and Remote Script versions, installed script copies (including an old
+        copy inside the Live application that shadows the new one), the
+        connection, dialogs open in Live, CPU load, and AbletonMCP errors in
+        Live's log. Each problem comes with a fix. Changes nothing.
+        """
+        import os
+
+        from . import doctor as diagnostics
+
+        host = os.environ.get("ABLETON_HOST", "127.0.0.1")
+        port = int(os.environ.get("ABLETON_PORT", "9877"))
+        return to_json(diagnostics.run("127.0.0.1" if host == "localhost" else host, port))
+
     # ── Live events ──────────────────────────────────────────────────────────
 
     presets = {
@@ -1332,7 +1630,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                       ("live_set", "return_tracks")],
     }
 
-    @tool
+    @tool(read_only=True)
     def watch_live(path: str | None = None, property: str | None = None,
                    preset: str | None = None) -> str:
         """Start listening to changes the user makes in Live. Events are buffered
@@ -1352,12 +1650,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         latest = send("poll_events", {"since": 10**12})["latest_seq"]
         return to_json({"watching": results, "events_since": latest})
 
-    @tool
+    @tool(read_only=True)
     def unwatch_live(observer_id: int | str = "all") -> str:
         """Stop a watcher (id from watch_live) or all of them ("all")."""
         return to_json(send("unobserve", {"observer_id": observer_id}))
 
-    @tool
+    @tool(read_only=True)
     async def get_live_events(since: int = 0, wait_seconds: float = 0.0,
                               limit: int = 200) -> str:
         """Read events from active watchers newer than `since` (pass the previous
@@ -1375,7 +1673,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Audio analysis ───────────────────────────────────────────────────────
 
-    @tool
+    @tool(read_only=True)
     async def analyze_audio_file(path: str, max_seconds: float = 600.0) -> str:
         """Analyze an audio file (wav, aiff, flac, mp3, ogg): integrated LUFS,
         true peak, loudness range, crest factor, clipping, tonal balance by
@@ -1385,7 +1683,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         from .audio_analysis import analyze
         return to_json(await asyncio.to_thread(analyze, path, max_seconds))
 
-    @tool
+    @tool(read_only=True)
     async def analyze_clip_audio(track: int | str, clip_index: int | None = None,
                                  arrangement_clip_index: int | None = None) -> str:
         """Analyze the audio file behind an audio clip (see analyze_audio_file)."""
@@ -1423,55 +1721,160 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         start = float(start_beat if start_beat is not None else song["loop_start"])
         tracks = (await asend("lom_get", {"path": "live_set tracks",
                                           "properties": ["name", "can_be_armed", "arm"]}))["items"]
-        armed = [i for i, t in enumerate(tracks) if t.get("can_be_armed") and t.get("arm") is True]
+        # Tracks are addressed by id from here on: the user may add or remove
+        # tracks while the section plays, which would shift every index.
+        armed = [t["$id"] for t in tracks if t.get("can_be_armed") and t.get("arm") is True]
         input_name = "Resampling" if source.lower() == "master" else source
         new = "live_set tracks -1"
         setup = [op_call("live_set", "create_audio_track", -1),
+                 {"type": "lom_get", "params": {"path": new, "properties": ["name"]}},
                  op_set(new, "name", "MCP Render"),
                  op_set(new, "input_routing_type",
                         ref(f"{new} available_input_routing_types {shlex.quote(input_name)}")),
                  op_set(new, "current_monitoring_state", MONITORING["off"])]
-        setup += [op_set(f"live_set tracks {i}", "arm", False) for i in armed]
+        setup += [op_set(f"id {i}", "arm", False) for i in armed]
         setup += [op_set(new, "arm", True), op_set("live_set", "loop", False),
                   op_set("live_set", "metronome", False),
                   op_set("live_set", "current_song_time", start),
                   op_set("live_set", "record_mode", True),
                   op_call("live_set", "continue_playing")]
-        result = await asend("batch", {"commands": setup})
-        render_index = len(tracks)
-        error = None
-        file_path = None
+        render_id = None
         try:
-            if result.get("failed"):
-                raise RuntimeError("Render setup failed: " + to_json(batch_summary(result)))
-            seconds = length_beats * 60.0 / float(song["tempo"])
-            deadline = time.monotonic() + seconds + 30.0
-            while time.monotonic() < deadline:
-                await asyncio.sleep(0.2)
-                now = await asend("lom_get", {"path": "live_set",
-                                              "properties": ["current_song_time"]})
-                if now["current_song_time"] >= start + length_beats:
-                    break
-        except Exception as e:
-            error = str(e)
-        finally:
-            restore = [op_call("live_set", "stop_playing"),
-                       op_set("live_set", "record_mode", song["record_mode"]),
-                       op_set(f"live_set tracks {render_index}", "arm", False)]
-            restore += [op_set(f"live_set tracks {i}", "arm", True) for i in armed]
-            restore += [op_set("live_set", "loop", song["loop"]),
-                        op_set("live_set", "metronome", song["metronome"]),
-                        op_set("live_set", "current_song_time",
-                               float(song["current_song_time"]))]
-            await asend("batch", {"commands": restore,
-                                  "stop_on_error": False})
-        if error:
-            raise RuntimeError(error)
+            result = await asend("batch", {"commands": setup})
+            steps = result.get("results", [])
+            if len(steps) > 1 and steps[1].get("status") == "success":
+                render_id = steps[1]["result"]["$id"]
+            try:
+                if result.get("failed"):
+                    raise RuntimeError("Render setup failed: "
+                                       + to_json(batch_summary(result)))
+                seconds = length_beats * 60.0 / float(song["tempo"])
+                deadline = time.monotonic() + seconds + 30.0
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(0.2)
+                    now = await asend("lom_get", {"path": "live_set",
+                                                  "properties": ["current_song_time"]})
+                    if now["current_song_time"] >= start + length_beats:
+                        break
+            finally:
+                restore = [op_call("live_set", "stop_playing"),
+                           op_set("live_set", "record_mode", song["record_mode"])]
+                if render_id is not None:
+                    restore.append(op_set(f"id {render_id}", "arm", False))
+                restore += [op_set(f"id {i}", "arm", True) for i in armed]
+                restore += [op_set("live_set", "loop", song["loop"]),
+                            op_set("live_set", "metronome", song["metronome"]),
+                            op_set("live_set", "current_song_time",
+                                   float(song["current_song_time"]))]
+                await asend("batch", {"commands": restore, "stop_on_error": False})
 
-        # Live finalises the file shortly after recording stops
+            file_path = await recorded_file(f"id {render_id}")
+            analysis = await asyncio.to_thread(analyze, file_path)
+        finally:
+            if render_id is not None and not keep_track:
+                await delete_track_by_id(render_id)
+        analysis["render"] = {"source": source, "start_beat": start,
+                              "length_beats": length_beats, "track_kept": keep_track}
+        return to_json(analysis)
+
+    @tool
+    async def measure_levels(seconds: float = 8.0, tracks: list[int | str] | None = None,
+                             start_beat: float | None = None, play: bool = True) -> str:
+        """Gain staging: meter the set while it plays and report the peak and
+        average level of every track, return and the master in dBFS, read
+        from Live's own meters. Nothing is recorded or written, so it is much
+        quicker than render_and_analyze (but measures level only, no spectrum).
+
+        - seconds: how long to listen (1-60)
+        - tracks: names/indexes to meter (default: every track with audio
+          output, the returns and the master)
+        - play: start playback (from start_beat, default where the playhead
+          is) and stop it again afterwards; False meters whatever is playing
+        Live's meters show smoothed peaks, -70 dB to +6 dB.
+        """
+        seconds = max(1.0, min(60.0, float(seconds)))
+        targets = await meter_targets(tracks)
+        channels = [(label, path, prop) for label, path in targets
+                    for prop in ("output_meter_left", "output_meter_right")]
+        started = await asend("batch", {"commands": [
+            {"type": "observe", "params": {"path": path, "property": prop}}
+            for _label, path, prop in channels], "stop_on_error": False})
+        meters: dict[int, dict] = {}
+        for (label, _path, _prop), step in zip(channels, started["results"]):
+            if step["status"] == "success":
+                info = step["result"]
+                meters[info["observer_id"]] = {
+                    "track": label, "ours": not info.get("already_observed"),
+                    "readings": [(None, float(info.get("value") or 0.0))]}
+        since = (await asend("poll_events", {"since": 10 ** 12}))["latest_seq"]
+        song = await asend("lom_get", {"path": "live_set", "properties": [
+            "is_playing", "current_song_time"]})
+        we_started = play and not song["is_playing"]
+        missed = False
+        try:
+            if we_started:
+                ops = [op_call("live_set", "continue_playing")]
+                if start_beat is not None:
+                    ops.insert(0, op_set("live_set", "current_song_time", float(start_beat)))
+                await asend("batch", {"commands": ops})
+            deadline = time.monotonic() + seconds
+            while True:
+                await asyncio.sleep(0.25)
+                polled = await asend("poll_events", {"since": since, "limit": 2000})
+                missed = missed or polled.get("missed", False)
+                for event in polled["events"]:
+                    meter = meters.get(event.get("observer_id"))
+                    if meter is not None and isinstance(event.get("value"), (int, float)):
+                        meter["readings"].append((event["ts"], float(event["value"])))
+                if polled["events"]:
+                    since = polled["events"][-1]["seq"]
+                if time.monotonic() >= deadline and not polled.get("more"):
+                    break
+        finally:
+            ours = [oid for oid, meter in meters.items() if meter["ours"]]
+            cleanup = [{"type": "unobserve", "params": {"observer_id": oid}} for oid in ours]
+            if we_started:
+                cleanup += [op_call("live_set", "stop_playing"),
+                            op_set("live_set", "current_song_time",
+                                   float(song["current_song_time"]))]
+            if cleanup:
+                await asend("batch", {"commands": cleanup, "stop_on_error": False})
+        from .audio_analysis import level_report
+
+        report = level_report(meters)
+        if missed:
+            report["warning"] = "Some meter readings were dropped; levels may be approximate"
+        report["seconds"] = seconds
+        return to_json(report)
+
+    async def meter_targets(tracks: list[int | str] | None) -> list[tuple[str, str]]:
+        """(label, "id N" path) of each track to meter."""
+        if tracks:
+            found = []
+            for track in tracks:
+                path = track_path(track)
+                info = await asend("lom_get", {"path": path, "properties": ["name"]})
+                # Live 12 names the master "Main"; reports call it Master
+                label = "Master" if path == "live_set master_track" else info["name"]
+                found.append((label, f"id {info['$id']}"))
+            return found
+        listing = await asend("batch", {"commands": [
+            {"type": "lom_get", "params": {"path": f"live_set {kind}",
+                                           "properties": ["name", "has_audio_output"]}}
+            for kind in ("tracks", "return_tracks")] + [
+            {"type": "lom_get", "params": {"path": "live_set master_track",
+                                           "properties": ["name"]}}]})
+        tracks_info, returns_info, master = (step["result"] for step in listing["results"])
+        found = [(t["name"], f"id {t['$id']}") for t in tracks_info["items"]
+                 if t.get("has_audio_output") is True]
+        found += [(t["name"], f"id {t['$id']}") for t in returns_info["items"]]
+        found.append(("Master", f"id {master['$id']}"))
+        return found
+
+    async def recorded_file(track: str) -> str:
+        """Path of the newest recording on `track`, once Live has finished writing it."""
         for _ in range(50):
-            clips = (await asend("lom_get", {"path": f"live_set tracks {render_index} "
-                                             "arrangement_clips",
+            clips = (await asend("lom_get", {"path": f"{track} arrangement_clips",
                                              "properties": ["file_path"]}))["items"]
             if clips and clips[-1].get("file_path"):
                 candidate = Path(clips[-1]["file_path"])
@@ -1479,19 +1882,18 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     size = candidate.stat().st_size
                     await asyncio.sleep(0.3)
                     if candidate.stat().st_size == size:
-                        file_path = str(candidate)
-                        break
+                        return str(candidate)
             await asyncio.sleep(0.2)
-        if file_path is None:
-            raise RuntimeError("Recording finished but no audio file was found on the "
-                               "MCP Render track; check that its input could be set.")
-        analysis = await asyncio.to_thread(analyze, file_path)
-        if not keep_track:
+        raise RuntimeError("Recording finished but no audio file was found on the "
+                           "MCP Render track; check that its input could be set.")
+
+    async def delete_track_by_id(track_id: int) -> None:
+        items = (await asend("lom_get", {"path": "live_set tracks",
+                                         "properties": ["name"]}))["items"]
+        index = next((i for i, t in enumerate(items) if t.get("$id") == track_id), None)
+        if index is not None:
             await asend("lom_call", {"path": "live_set", "method": "delete_track",
-                                     "args": [render_index]})
-        analysis["render"] = {"source": source, "start_beat": start,
-                              "length_beats": length_beats, "track_kept": keep_track}
-        return to_json(analysis)
+                                     "args": [index]})
 
     # ── Resources ────────────────────────────────────────────────────────────
 

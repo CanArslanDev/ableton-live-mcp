@@ -9,10 +9,11 @@ from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List, Union
 
-from .telemetry import record_startup
+from .telemetry import is_telemetry_enabled, record_startup
 from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
 from .dataset import dataset_enabled, get_recorder
 from .dataset.trajectory_decorator import trajectory_tool
+from .tooling import register_tool
 
 ABLETON_HOST = os.environ.get("ABLETON_HOST", "localhost")
 ABLETON_PORT = int(os.environ.get("ABLETON_PORT", "9877"))
@@ -21,6 +22,10 @@ ABLETON_PORT = int(os.environ.get("ABLETON_PORT", "9877"))
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AbletonMCPServer")
+
+class AbletonCommandError(Exception):
+    """Live refused a command (bad path, wrong value, …). The connection is fine."""
+
 
 @dataclass
 class AbletonConnection:
@@ -76,12 +81,18 @@ class AbletonConnection:
                         break
                     
                     chunks.append(chunk)
-                    
+
+                    # A response is one JSON object: it can only be complete
+                    # when the data ends with "}". Skipping the parse until
+                    # then keeps large responses linear instead of quadratic.
+                    if not b''.join(chunks[-2:]).rstrip().endswith(b'}'):
+                        continue
+
                     # Check if we've received a complete JSON object
                     try:
                         data = b''.join(chunks)
                         json.loads(data.decode('utf-8'))
-                        logger.info(f"Received complete response ({len(data)} bytes)")
+                        logger.debug(f"Received complete response ({len(data)} bytes)")
                         return data
                     except json.JSONDecodeError:
                         # Incomplete JSON, continue receiving
@@ -99,7 +110,7 @@ class AbletonConnection:
         # If we get here, we either timed out or broke out of the loop
         if chunks:
             data = b''.join(chunks)
-            logger.info(f"Returning data after receive completion ({len(data)} bytes)")
+            logger.debug(f"Returning data after receive completion ({len(data)} bytes)")
             try:
                 json.loads(data.decode('utf-8'))
                 return data
@@ -146,11 +157,11 @@ class AbletonConnection:
         }
         
         try:
-            logger.info(f"Sending command: {command_type} with params: {params}")
+            logger.debug(f"Sending command: {command_type}")
             
             # Send the command
             self.sock.sendall(json.dumps(command).encode('utf-8'))
-            logger.info(f"Command sent, waiting for response...")
+            logger.debug("Command sent, waiting for response...")
             
             # Set timeout based on command type. Everything now runs on Live's
             # main thread (10 s budget there), so reads need the same headroom.
@@ -162,35 +173,52 @@ class AbletonConnection:
 
             # Receive the response
             response_data = self.receive_full_response(self.sock, timeout=timeout)
-            logger.info(f"Received {len(response_data)} bytes of data")
+            logger.debug(f"Received {len(response_data)} bytes of data")
 
             # Parse the response
             response = json.loads(response_data.decode('utf-8'))
-            logger.info(f"Response parsed, status: {response.get('status', 'unknown')}")
+            logger.debug(f"Response parsed, status: {response.get('status', 'unknown')}")
 
             if response.get("status") == "error":
-                logger.error(f"Ableton error: {response.get('message')}")
-                raise Exception(response.get("message", "Unknown error from Ableton"))
-            
+                # A refused command, answered in full: the stream is in step,
+                # so the connection stays open.
+                logger.info(f"Ableton refused {command_type}: {response.get('message')}")
+                raise AbletonCommandError(response.get("message", "Unknown error from Ableton"))
+
             return response.get("result", {})
+        except AbletonCommandError:
+            raise
         except socket.timeout:
             logger.error("Socket timeout while waiting for response from Ableton")
-            self.sock = None
+            self._drop_socket()
             raise Exception("Timeout waiting for Ableton response")
         except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
             logger.error(f"Socket connection error: {str(e)}")
-            self.sock = None
+            self._drop_socket()
             raise Exception(f"Connection to Ableton lost: {str(e)}")
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON response from Ableton: {str(e)}")
             if 'response_data' in locals() and response_data:
                 logger.error(f"Raw response (first 200 bytes): {response_data[:200]}")
-            self.sock = None
+            self._drop_socket()
             raise Exception(f"Invalid response from Ableton: {str(e)}")
         except Exception as e:
             logger.error(f"Error communicating with Ableton: {str(e)}")
-            self.sock = None
+            self._drop_socket()
             raise Exception(f"Communication error with Ableton: {str(e)}")
+
+    def _drop_socket(self):
+        """Close a socket whose request/response stream is in an unknown state.
+
+        Only nulling the attribute left the socket open, and with it a client
+        thread in Live waiting on it, after every failed request.
+        """
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.sock = None
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
@@ -295,27 +323,71 @@ mcp = FastMCP(
     lifespan=server_lifespan
 )
 
+
+def legacy_tool(tier: str, **hints):
+    """Register one of the original tools (see tooling.register_tool).
+
+    tier "core" keeps it in the default profile; "full" only registers it under
+    ABLETON_MCP_PROFILE=full, because a newer tool does the same job.
+    """
+    def decorate(fn):
+        return register_tool(mcp, fn, tier=tier, legacy=True, **hints)
+    return decorate
+
+
+def dataset_tool(**hints):
+    """Register a dataset-recording tool, but only where recording can happen.
+
+    Without MCP_Server/config.py (it is not in this repository) these tools
+    could only answer that recording is off, so they are left out.
+    """
+    def decorate(fn):
+        if not is_telemetry_enabled():
+            return fn
+        return register_tool(mcp, fn, legacy=True, **hints)
+    return decorate
+
+
 # Global connection for resources
 _ableton_connection = None
+# Tools run on worker threads, so creating or replacing the shared connection
+# must not race.
+_connection_lock = threading.Lock()
 
 def get_ableton_connection():
     """Get or create a persistent Ableton connection"""
+    with _connection_lock:
+        return _get_ableton_connection_locked()
+
+
+def _socket_closed_by_peer(connection) -> bool:
+    """Peek at the socket without blocking: b'' means Live closed it.
+
+    Skipped while another thread is mid-request on the connection: toggling
+    the socket's blocking mode under that thread's recv() would drop its
+    timeout. A connection in use is alive by definition.
+    """
+    if not connection._lock.acquire(blocking=False):
+        return False
+    try:
+        connection.sock.setblocking(False)
+        try:
+            return connection.sock.recv(1, socket.MSG_PEEK) == b''
+        except BlockingIOError:
+            return False  # alive, nothing waiting — the normal case
+        finally:
+            connection.sock.setblocking(True)
+    finally:
+        connection._lock.release()
+
+
+def _get_ableton_connection_locked():
     global _ableton_connection
 
     if _ableton_connection is not None and _ableton_connection.sock is not None:
         try:
-            # Check if the socket is still alive by peeking for data
-            # MSG_PEEK + MSG_DONTWAIT will raise BlockingIOError if alive but no data,
-            # or return b'' if the remote end has closed the connection.
-            _ableton_connection.sock.setblocking(False)
-            try:
-                data = _ableton_connection.sock.recv(1, socket.MSG_PEEK)
-                if data == b'':
-                    raise ConnectionError("Remote end closed")
-            except BlockingIOError:
-                pass  # Socket is alive, just no data waiting — this is normal
-            finally:
-                _ableton_connection.sock.setblocking(True)
+            if _socket_closed_by_peer(_ableton_connection):
+                raise ConnectionError("Remote end closed")
             return _ableton_connection
         except Exception as e:
             logger.warning(f"Existing connection is no longer valid: {str(e)}")
@@ -365,7 +437,7 @@ def get_ableton_connection():
 
 # Core Tool endpoints
 
-@mcp.tool()
+@dataset_tool(idempotent=True)
 def set_dataset_consent(ctx: Context, consent: bool, user_said: str = "") -> str:
     """Record the user's answer to the dataset consent question.
 
@@ -424,14 +496,11 @@ def set_dataset_consent(ctx: Context, consent: bool, user_said: str = "") -> str
     )
 
 
-@mcp.tool()
+@legacy_tool("full", read_only=True)
 @telemetry_tool("get_session_info")
 @trajectory_tool("get_session_info")
-def get_session_info(ctx: Context, user_prompt: str = "") -> str:
+def get_session_info(ctx: Context) -> str:
     """Get detailed information about the current Ableton session
-
-    Parameters:
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -442,10 +511,10 @@ def get_session_info(ctx: Context, user_prompt: str = "") -> str:
         return f"Error getting session info: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("core", read_only=True)
 @telemetry_tool("get_remote_script_info")
 @trajectory_tool("get_remote_script_info", modifying=False)
-def get_remote_script_info(ctx: Context, user_prompt: str = "") -> str:
+def get_remote_script_info(ctx: Context) -> str:
     """
     Report Ableton Remote Script version and capabilities (handshake).
 
@@ -464,16 +533,15 @@ def get_remote_script_info(ctx: Context, user_prompt: str = "") -> str:
         logger.error(f"Error getting remote script info: {str(e)}")
         return f"Error getting remote script info: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full", read_only=True)
 @telemetry_tool("get_track_info")
 @trajectory_tool("get_track_info")
-def get_track_info(ctx: Context, track_index: int, user_prompt: str = "") -> str:
+def get_track_info(ctx: Context, track_index: int) -> str:
     """
     Get detailed information about a specific track in Ableton.
 
     Parameters:
     - track_index: The index of the track to get information about
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -484,14 +552,13 @@ def get_track_info(ctx: Context, track_index: int, user_prompt: str = "") -> str
         return f"Error getting track info: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full", read_only=True)
 @telemetry_tool("get_clip_notes")
 @trajectory_tool("get_clip_notes")
 def get_clip_notes(
     ctx: Context,
     track_index: int,
     clip_index: int,
-    user_prompt: str = "",
 ) -> str:
     """
     Read all MIDI notes from a Session-view clip.
@@ -501,7 +568,6 @@ def get_clip_notes(
     Parameters:
     - track_index: Track that owns the clip
     - clip_index: Session clip slot index
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         from .script_handshake import require_capability
@@ -520,14 +586,13 @@ def get_clip_notes(
         return f"Error getting clip notes: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full", read_only=True)
 @telemetry_tool("get_device_parameters")
 @trajectory_tool("get_device_parameters")
 def get_device_parameters(
     ctx: Context,
     track_index: int,
     device_index: int,
-    user_prompt: str = "",
 ) -> str:
     """
     Read all parameters for a device on a track (name, value, min, max).
@@ -535,7 +600,6 @@ def get_device_parameters(
     Parameters:
     - track_index: Track that owns the device
     - device_index: Index into the track's device chain
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -549,7 +613,7 @@ def get_device_parameters(
         return f"Error getting device parameters: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full", idempotent=True)
 @rich_telemetry_tool("set_device_parameter")
 @trajectory_tool("set_device_parameter")
 def set_device_parameter(
@@ -558,7 +622,6 @@ def set_device_parameter(
     device_index: int,
     parameter_index: int,
     value: float,
-    user_prompt: str = "",
 ) -> str:
     """
     Set a device parameter to a specific value.
@@ -570,7 +633,6 @@ def set_device_parameter(
     - device_index: Index into the track's device chain
     - parameter_index: Index into device.parameters
     - value: New parameter value (Live parameter units)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -592,14 +654,13 @@ def set_device_parameter(
         return f"Error setting device parameter: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full", read_only=True)
 @telemetry_tool("get_session_snapshot")
 @trajectory_tool("get_session_snapshot")
 def get_session_snapshot(
     ctx: Context,
     include_notes: bool = True,
     include_params: bool = True,
-    user_prompt: str = "",
 ) -> str:
     """
     Capture a full project state snapshot for trajectory recording.
@@ -611,7 +672,6 @@ def get_session_snapshot(
     Parameters:
     - include_notes: Include MIDI note arrays in clips (default True)
     - include_params: Include device parameter values (default True)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         from .script_handshake import require_capability
@@ -633,16 +693,15 @@ def get_session_snapshot(
         return f"Error getting session snapshot: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full")
 @telemetry_tool("create_midi_track")
 @trajectory_tool("create_midi_track")
-def create_midi_track(ctx: Context, index: int = -1, user_prompt: str = "") -> str:
+def create_midi_track(ctx: Context, index: int = -1) -> str:
     """
     Create a new MIDI track in the Ableton session.
 
     Parameters:
     - index: The index to insert the track at (-1 = end of list)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -653,10 +712,10 @@ def create_midi_track(ctx: Context, index: int = -1, user_prompt: str = "") -> s
         return f"Error creating MIDI track: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full")
 @telemetry_tool("create_audio_track")
 @trajectory_tool("create_audio_track")
-def create_audio_track(ctx: Context, index: int = -1, user_prompt: str = "") -> str:
+def create_audio_track(ctx: Context, index: int = -1) -> str:
     """
     Create a new audio track in the Ableton session.
 
@@ -665,7 +724,6 @@ def create_audio_track(ctx: Context, index: int = -1, user_prompt: str = "") -> 
 
     Parameters:
     - index: The index to insert the track at (-1 = end of list)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -676,17 +734,16 @@ def create_audio_track(ctx: Context, index: int = -1, user_prompt: str = "") -> 
         return f"Error creating audio track: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full", idempotent=True)
 @rich_telemetry_tool("set_track_name")
 @trajectory_tool("set_track_name")
-def set_track_name(ctx: Context, track_index: int, name: str, user_prompt: str = "") -> str:
+def set_track_name(ctx: Context, track_index: int, name: str) -> str:
     """
     Set the name of a track.
 
     Parameters:
     - track_index: The index of the track to rename
     - name: The new name for the track
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -696,10 +753,10 @@ def set_track_name(ctx: Context, track_index: int, name: str, user_prompt: str =
         logger.error(f"Error setting track name: {str(e)}")
         return f"Error setting track name: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full")
 @rich_telemetry_tool("create_clip")
 @trajectory_tool("create_clip")
-def create_clip(ctx: Context, track_index: int, clip_index: int, length: float = 4.0, user_prompt: str = "") -> str:
+def create_clip(ctx: Context, track_index: int, clip_index: int, length: float = 4.0) -> str:
     """
     Create a new MIDI clip in the specified track and clip slot.
 
@@ -707,7 +764,6 @@ def create_clip(ctx: Context, track_index: int, clip_index: int, length: float =
     - track_index: The index of the track to create the clip in
     - clip_index: The index of the clip slot to create the clip in
     - length: The length of the clip in beats (default: 4.0)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -721,10 +777,10 @@ def create_clip(ctx: Context, track_index: int, clip_index: int, length: float =
         logger.error(f"Error creating clip: {str(e)}")
         return f"Error creating clip: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("core")
 @rich_telemetry_tool("create_audio_clip")
 @trajectory_tool("create_audio_clip")
-def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str, user_prompt: str = "") -> str:
+def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str) -> str:
     """
     Create a new audio clip in an audio track's clip slot by importing a file.
 
@@ -737,7 +793,6 @@ def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str
     - clip_index: The index of the clip slot to create the clip in
     - path: Absolute path to a supported audio file (e.g. a .wav). The target
       track must be an audio track and the clip slot must be empty.
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -751,7 +806,7 @@ def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str
         logger.error(f"Error creating audio clip: {str(e)}")
         return f"Error creating audio clip: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full")
 @rich_telemetry_tool("add_notes_to_clip", capture_notes=True)
 @trajectory_tool("add_notes_to_clip")
 def add_notes_to_clip(
@@ -759,7 +814,6 @@ def add_notes_to_clip(
     track_index: int,
     clip_index: int,
     notes: List[Dict[str, Union[int, float, bool]]],
-    user_prompt: str = ""
 ) -> str:
     """
     Add MIDI notes to a clip.
@@ -768,7 +822,6 @@ def add_notes_to_clip(
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot containing the clip
     - notes: List of note dictionaries, each with pitch, start_time, duration, velocity, and mute
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -782,13 +835,12 @@ def add_notes_to_clip(
         logger.error(f"Error adding notes to clip: {str(e)}")
         return f"Error adding notes to clip: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full", destructive=True)
 @rich_telemetry_tool("clear_notes_from_clip")
 def clear_notes_from_clip(
     ctx: Context,
     track_index: int,
     clip_index: int,
-    user_prompt: str = ""
 ) -> str:
     """
     Remove all MIDI notes from a Session clip.
@@ -802,7 +854,6 @@ def clear_notes_from_clip(
     Parameters:
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot containing the clip
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         from .script_handshake import require_capability
@@ -825,10 +876,10 @@ def clear_notes_from_clip(
         logger.error(f"Error clearing notes from clip: {str(e)}")
         return f"Error clearing notes from clip: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full", idempotent=True)
 @rich_telemetry_tool("set_clip_name")
 @trajectory_tool("set_clip_name")
-def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str, user_prompt: str = "") -> str:
+def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str) -> str:
     """
     Set the name of a clip.
 
@@ -836,7 +887,6 @@ def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str, us
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot containing the clip
     - name: The new name for the clip
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -850,10 +900,10 @@ def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str, us
         logger.error(f"Error setting clip name: {str(e)}")
         return f"Error setting clip name: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full", idempotent=True)
 @rich_telemetry_tool("set_arrangement_clip_name")
 @trajectory_tool("set_arrangement_clip_name")
-def set_arrangement_clip_name(ctx: Context, track_index: int, clip_index: int, name: str, user_prompt: str = "") -> str:
+def set_arrangement_clip_name(ctx: Context, track_index: int, clip_index: int, name: str) -> str:
     """
     Set the name of a clip placed in the Arrangement timeline.
 
@@ -862,7 +912,6 @@ def set_arrangement_clip_name(ctx: Context, track_index: int, clip_index: int, n
     - clip_index: The index of the clip within track.arrangement_clips, in the
       same order returned by get_arrangement_clips (i.e. ordered by start_time)
     - name: The new name for the clip
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -876,16 +925,15 @@ def set_arrangement_clip_name(ctx: Context, track_index: int, clip_index: int, n
         logger.error(f"Error setting arrangement clip name: {str(e)}")
         return f"Error setting arrangement clip name: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full", idempotent=True)
 @rich_telemetry_tool("set_tempo")
 @trajectory_tool("set_tempo")
-def set_tempo(ctx: Context, tempo: float, user_prompt: str = "") -> str:
+def set_tempo(ctx: Context, tempo: float) -> str:
     """
     Set the tempo of the Ableton session.
 
     Parameters:
     - tempo: The new tempo in BPM
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -896,17 +944,16 @@ def set_tempo(ctx: Context, tempo: float, user_prompt: str = "") -> str:
         return f"Error setting tempo: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("core")
 @rich_telemetry_tool("load_instrument_or_effect")
 @trajectory_tool("load_instrument_or_effect")
-def load_instrument_or_effect(ctx: Context, track_index: int, uri: str, user_prompt: str = "") -> str:
+def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
     """
     Load an instrument or effect onto a track using its URI.
 
     Parameters:
     - track_index: The index of the track to load the instrument on
     - uri: The URI of the instrument or effect to load (e.g., 'query:Synths#Instrument%20Rack:Bass:FileId_5116')
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -929,17 +976,16 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str, user_pro
         logger.error(f"Error loading instrument by URI: {str(e)}")
         return f"Error loading instrument by URI: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full")
 @telemetry_tool("fire_clip")
 @trajectory_tool("fire_clip")
-def fire_clip(ctx: Context, track_index: int, clip_index: int, user_prompt: str = "") -> str:
+def fire_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Start playing a clip.
 
     Parameters:
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot containing the clip
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -952,17 +998,16 @@ def fire_clip(ctx: Context, track_index: int, clip_index: int, user_prompt: str 
         logger.error(f"Error firing clip: {str(e)}")
         return f"Error firing clip: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full")
 @telemetry_tool("stop_clip")
 @trajectory_tool("stop_clip")
-def stop_clip(ctx: Context, track_index: int, clip_index: int, user_prompt: str = "") -> str:
+def stop_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Stop playing a clip.
 
     Parameters:
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot containing the clip
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -976,9 +1021,9 @@ def stop_clip(ctx: Context, track_index: int, clip_index: int, user_prompt: str 
         return f"Error stopping clip: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full", destructive=True)
 @telemetry_tool("delete_clip")
-def delete_clip(ctx: Context, track_index: int, clip_index: int, user_prompt: str = "") -> str:
+def delete_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Delete the clip in the given clip slot, freeing it for reuse.
 
@@ -988,7 +1033,6 @@ def delete_clip(ctx: Context, track_index: int, clip_index: int, user_prompt: st
     Parameters:
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot to clear
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         from .script_handshake import require_capability
@@ -1007,14 +1051,11 @@ def delete_clip(ctx: Context, track_index: int, clip_index: int, user_prompt: st
         return f"Error deleting clip: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full")
 @telemetry_tool("start_playback")
 @trajectory_tool("start_playback")
-def start_playback(ctx: Context, user_prompt: str = "") -> str:
+def start_playback(ctx: Context) -> str:
     """Start playing the Ableton session.
-
-    Parameters:
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1024,14 +1065,11 @@ def start_playback(ctx: Context, user_prompt: str = "") -> str:
         logger.error(f"Error starting playback: {str(e)}")
         return f"Error starting playback: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("full")
 @telemetry_tool("stop_playback")
 @trajectory_tool("stop_playback")
-def stop_playback(ctx: Context, user_prompt: str = "") -> str:
+def stop_playback(ctx: Context) -> str:
     """Stop playing the Ableton session.
-
-    Parameters:
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1041,16 +1079,15 @@ def stop_playback(ctx: Context, user_prompt: str = "") -> str:
         logger.error(f"Error stopping playback: {str(e)}")
         return f"Error stopping playback: {str(e)}"
 
-@mcp.tool()
+@legacy_tool("core", read_only=True)
 @rich_telemetry_tool("get_browser_tree")
 @trajectory_tool("get_browser_tree")
-def get_browser_tree(ctx: Context, category_type: str = "all", user_prompt: str = "") -> str:
+def get_browser_tree(ctx: Context, category_type: str = "all") -> str:
     """
     Get a hierarchical tree of browser categories from Ableton.
 
     Parameters:
     - category_type: Type of categories to get ('all', 'instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects')
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1107,17 +1144,16 @@ def get_browser_tree(ctx: Context, category_type: str = "all", user_prompt: str 
             logger.error(f"Error getting browser tree: {error_msg}")
             return f"Error getting browser tree: {error_msg}"
 
-@mcp.tool()
+@legacy_tool("core", read_only=True)
 @rich_telemetry_tool("get_browser_items_at_path")
 @trajectory_tool("get_browser_items_at_path")
-def get_browser_items_at_path(ctx: Context, path: str, user_prompt: str = "") -> str:
+def get_browser_items_at_path(ctx: Context, path: str) -> str:
     """
     Get browser items at a specific path in Ableton's browser.
 
     Parameters:
     - path: Path in the format "category/folder/subfolder"
             where category is one of the available browser categories in Ableton
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1151,10 +1187,10 @@ def get_browser_items_at_path(ctx: Context, path: str, user_prompt: str = "") ->
             logger.error(f"Error getting browser items at path: {error_msg}")
             return f"Error getting browser items at path: {error_msg}"
 
-@mcp.tool()
+@legacy_tool("core")
 @rich_telemetry_tool("load_drum_kit")
 @trajectory_tool("load_drum_kit")
-def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str, user_prompt: str = "") -> str:
+def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) -> str:
     """
     Load a drum rack and then load a specific drum kit into it.
 
@@ -1162,7 +1198,6 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str, 
     - track_index: The index of the track to load on
     - rack_uri: The URI of the drum rack to load (e.g., 'Drums/Drum Rack')
     - kit_path: Path to the drum kit inside the browser (e.g., 'drums/acoustic/kit1')
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1205,14 +1240,11 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str, 
 
 # ── Arrangement view tools ────────────────────────────────────────────────────
 
-@mcp.tool()
+@legacy_tool("full", idempotent=True)
 @telemetry_tool("switch_to_arrangement_view")
 @trajectory_tool("switch_to_arrangement_view")
-def switch_to_arrangement_view(ctx: Context, user_prompt: str = "") -> str:
+def switch_to_arrangement_view(ctx: Context) -> str:
     """Switch Ableton's main window to the Arrangement view.
-
-    Parameters:
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1223,16 +1255,15 @@ def switch_to_arrangement_view(ctx: Context, user_prompt: str = "") -> str:
         return f"Error switching to arrangement view: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("full", idempotent=True)
 @rich_telemetry_tool("set_arrangement_time")
 @trajectory_tool("set_arrangement_time")
-def set_arrangement_time(ctx: Context, time: float, user_prompt: str = "") -> str:
+def set_arrangement_time(ctx: Context, time: float) -> str:
     """
     Move the arrangement playhead to a specific position.
 
     Parameters:
     - time: Position in beats from the start of the arrangement (e.g. 8.0 = bar 3 in 4/4)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1243,10 +1274,10 @@ def set_arrangement_time(ctx: Context, time: float, user_prompt: str = "") -> st
         return f"Error setting arrangement time: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("core", read_only=True)
 @telemetry_tool("get_arrangement_clips")
 @trajectory_tool("get_arrangement_clips")
-def get_arrangement_clips(ctx: Context, track_index: int, user_prompt: str = "") -> str:
+def get_arrangement_clips(ctx: Context, track_index: int) -> str:
     """
     List all clips placed in the Arrangement timeline for a track.
 
@@ -1254,7 +1285,6 @@ def get_arrangement_clips(ctx: Context, track_index: int, user_prompt: str = "")
 
     Parameters:
     - track_index: The index of the track to inspect
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1265,7 +1295,7 @@ def get_arrangement_clips(ctx: Context, track_index: int, user_prompt: str = "")
         return f"Error getting arrangement clips: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("core")
 @rich_telemetry_tool("duplicate_to_arrangement")
 @trajectory_tool("duplicate_to_arrangement")
 def duplicate_to_arrangement(
@@ -1273,7 +1303,6 @@ def duplicate_to_arrangement(
     track_index: int,
     clip_index: int,
     destination_time: float,
-    user_prompt: str = ""
 ) -> str:
     """
     Copy a Session-view clip into the Arrangement timeline.
@@ -1292,7 +1321,6 @@ def duplicate_to_arrangement(
     - clip_index:        Index of the clip slot in that track (Session view)
     - destination_time:  Beat position in the arrangement to place the clip
                          (e.g. 0.0 = start, 8.0 = bar 3 in 4/4)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
@@ -1315,13 +1343,12 @@ def duplicate_to_arrangement(
         return f"Error duplicating clip to arrangement: {str(e)}"
 
 
-@mcp.tool()
+@legacy_tool("core", idempotent=True)
 @rich_telemetry_tool("create_locator")
 def create_locator(
     ctx: Context,
     name: str,
     time: float,
-    user_prompt: str = ""
 ) -> str:
     """
     Create a named locator (cue point) in the Arrangement at a beat position.
@@ -1333,7 +1360,6 @@ def create_locator(
     Parameters:
     - name: The locator label (e.g. "Chorus", "Verse 1", "Drop")
     - time: Beat position where the locator should sit
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         from .script_handshake import require_capability
@@ -1357,7 +1383,7 @@ def create_locator(
 
 # ── Dataset / preference tools (Supabase trajectory recording) ─────────────────
 
-@mcp.tool()
+@dataset_tool()
 @telemetry_tool("submit_intent")
 @trajectory_tool("submit_intent", modifying=False)
 def submit_intent(
@@ -1395,7 +1421,7 @@ def submit_intent(
         return f"Error submitting intent: {str(e)}"
 
 
-@mcp.tool()
+@dataset_tool()
 @telemetry_tool("rate_last_action")
 @trajectory_tool("rate_last_action", modifying=False)
 def rate_last_action(
@@ -1439,7 +1465,7 @@ def rate_last_action(
         return f"Error rating action: {str(e)}"
 
 
-@mcp.tool()
+@dataset_tool()
 @telemetry_tool("prefer_candidate")
 @trajectory_tool("prefer_candidate", modifying=False)
 def prefer_candidate(
@@ -1488,7 +1514,7 @@ def prefer_candidate(
         return f"Error recording pairwise preference: {str(e)}"
 
 
-@mcp.tool()
+@dataset_tool()
 @telemetry_tool("reject_last_action")
 @trajectory_tool("reject_last_action", modifying=False)
 def reject_last_action(
@@ -1521,7 +1547,7 @@ def reject_last_action(
         return f"Error rejecting action: {str(e)}"
 
 
-@mcp.tool()
+@dataset_tool()
 @rich_telemetry_tool("record_audition")
 @trajectory_tool("record_audition", modifying=False)
 def record_audition(
@@ -1568,8 +1594,10 @@ def record_audition(
 
 
 from .extended_tools import register as _register_extended_tools
+from .prompts import register_prompts as _register_prompts
 
 _register_extended_tools(mcp, get_ableton_connection)
+_register_prompts(mcp)
 
 
 # Main execution

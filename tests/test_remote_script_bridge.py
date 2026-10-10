@@ -234,3 +234,38 @@ def test_browser_tree_caps_a_huge_folder_and_flags_it(script_module):
 
     assert len(category["children"]) == 64
     assert category["has_more"] is True
+
+
+
+def test_a_chunk_ending_in_a_brace_mid_command_waits_for_the_rest(script_module):
+    """Parsing is skipped until the buffer ends with "}", and a "}" that closes
+    a nested object mid-command must not be mistaken for the end."""
+    inst = make_instance(script_module)
+    command = {"type": "lom_get", "params": {"path": "live_set", "properties": ["tempo"]}}
+    payload = json.dumps(command).encode("utf-8")
+    cut = payload.index(b"}") + 1  # right after the inner object closes
+    inst.running = True
+    seen = []
+    inst._process_command = lambda c: seen.append(c) or {"status": "success", "result": {}}
+
+    class Client(object):
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+            self.sent = []
+
+        def settimeout(self, _value):
+            pass
+
+        def recv(self, _size):
+            return self.chunks.pop(0) if self.chunks else b""
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+        def close(self):
+            pass
+
+    client = Client([payload[:cut], payload[cut:]])
+    inst._handle_client(client)
+    assert seen == [command]
+    assert len(client.sent) == 1

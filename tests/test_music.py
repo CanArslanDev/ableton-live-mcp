@@ -130,3 +130,115 @@ def test_transformations():
     assert [n["velocity"] for n in music.velocity_ramp(notes, 10, 20)] == [10, 20]
     assert len(music.dedupe(notes + notes)) == 2
     assert notes[0]["pitch"] == 60  # inputs are never mutated
+
+
+# ── Meter and set scale awareness ────────────────────────────────────────────
+
+def test_scale_can_be_an_interval_list():
+    dorian = [0, 2, 3, 5, 7, 9, 10]
+    assert music.scale_intervals(dorian) == dorian
+    assert music.parse_key("D", dorian) == (2, dorian)
+    chords = music.parse_progression("i IV", "D", dorian)
+    assert [music.NOTE_NAMES[c["root_pc"]] for c in chords] == ["D", "G"]
+    with pytest.raises(ValueError):
+        music.scale_intervals([2, 4])
+
+
+def test_beats_per_bar_and_default_progression():
+    assert music.beats_per_bar(4, 4) == 4.0
+    assert music.beats_per_bar(6, 8) == 3.0
+    assert music.beats_per_bar(7, 8) == 3.5
+    assert music.default_progression("C") == "C G Am F"
+    assert music.default_progression("A minor") == "Am F C G"
+    assert music.default_progression("D", [0, 2, 3, 5, 7, 9, 10]) == "Dm G Dm C"
+    assert music.default_progression("E", "phrygian") == "Em F Em Dm"
+    assert music.default_progression("C", "minor_pentatonic") == "i VI III VII"
+
+
+def test_drums_fit_other_meters():
+    notes = music.drum_pattern("house", bars=2, fill=False, beats_per_bar=3.0)
+    kicks = sorted(n["start_time"] for n in notes if n["pitch"] == 36)
+    assert kicks == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    assert max(n["start_time"] for n in notes) < 6.0
+    nine_eight = music.drum_pattern("techno", bars=1, fill=False, beats_per_bar=4.5)
+    assert max(n["start_time"] for n in nine_eight) < 4.5
+
+
+def test_fill_lands_on_the_last_beat_of_any_meter():
+    notes = music.drum_pattern("rock", bars=2, fill=True, beats_per_bar=3.5)
+    fill = [n for n in notes if n["pitch"] == 38 and n["start_time"] >= 3.5 + 2.5]
+    assert len(fill) >= 4
+    assert max(n["start_time"] for n in notes) < 7.0
+
+
+def test_chord_rhythms_keep_beat_positions_in_three_four():
+    voiced = music.voice_progression(music.parse_progression("I", "C"), 3, "close")
+    notes = music.chord_notes(voiced, 1, "quarters", beats_per_bar=3.0)
+    assert sorted({n["start_time"] for n in notes}) == [0.0, 1.0, 2.0]
+    assert all(n["start_time"] + n["duration"] <= 3.0 + 1e-9 for n in notes)
+
+
+def test_bass_arp_and_melody_stay_inside_odd_bars():
+    chords = music.parse_progression("I IV", "C")
+    bass = music.bassline(chords, 1, style="syncopated", beats_per_bar=3.0)
+    assert all(n["start_time"] + n["duration"] <= 6.0 + 1e-9 for n in bass)
+    arp = music.arpeggio(music.voice_progression(chords, 4), 1, 0.5, beats_per_bar=3.5)
+    assert len(arp) == 2 * 7 and max(n["start_time"] for n in arp) < 7.0
+    melody = music.melody("C", bars=4, seed=3, beats_per_bar=3.0)
+    assert max(n["start_time"] + n["duration"] for n in melody) <= 12.0 + 1e-9
+
+
+# ── Harmony analysis ─────────────────────────────────────────────────────────
+
+def _block(pitches, start, length=4.0, velocity=90):
+    return [{"pitch": p, "start_time": start, "duration": length, "velocity": velocity}
+            for p in pitches]
+
+
+def test_chords_key_and_numerals_in_minor():
+    notes = (_block([45, 57, 60, 64], 0) + _block([38, 57, 62, 65], 4)
+             + _block([40, 56, 59, 64], 8) + _block([45, 57, 60, 64], 12))
+    result = music.analyze_harmony(notes, 4.0)
+    assert result["key"]["key"] == "A minor"
+    assert result["progression"] == "Am Dm E Am"
+    assert [w["roman"] for w in result["windows"]] == ["i", "iv", "V", "i"]
+
+
+def test_sevenths_and_jazz_numerals():
+    notes = (_block([38, 53, 57, 60], 0) + _block([43, 53, 59, 62], 4)
+             + _block([36, 52, 55, 59], 8))
+    result = music.analyze_harmony(notes, 4.0, key="C")
+    assert result["progression"] == "Dm7 G7 Cmaj7"
+    assert [w["roman"] for w in result["windows"]] == ["ii7", "V7", "Imaj7"]
+
+
+def test_inversions_power_chords_and_rests():
+    notes = _block([40, 55, 60, 64], 0) + _block([36, 43], 4) + _block([41, 57, 60, 65], 12)
+    result = music.analyze_harmony(notes, 4.0, key="C")
+    assert [w["chord"] for w in result["windows"]] == ["C/E", "C5", "N.C.", "F"]
+    # Rests take the previous chord so the progression keeps its timing
+    assert result["progression"] == "C/E C5 C5 F"
+    assert [c["chord"] for c in result["changes"]] == ["C/E", "C5", "N.C.", "F"]
+    # …and it reads straight back into the generators
+    assert len(music.parse_progression(result["progression"], "C")) == 4
+
+
+def test_half_bar_windows_and_bars_per_chord():
+    notes = _block([48, 52, 55], 0, 2) + _block([53, 57, 60], 2, 2)
+    result = music.analyze_harmony(notes, 4.0, segment=2.0)
+    assert result["progression"] == "C F" and result["bars_per_chord"] == 0.5
+
+
+def test_roman_numerals_for_borrowed_chords():
+    assert music.roman_numeral(10, "", 0, "major") == "bVII"
+    assert music.roman_numeral(1, "", 0, "major") == "bII"
+    assert music.roman_numeral(8, "dim", 9, "minor") == "#vii°"
+    assert music.roman_numeral(4, "7", 9, "minor") == "V7"
+
+
+def test_estimate_key_and_empty_input():
+    assert music.estimate_key([]) is None
+    scale = [{"pitch": p, "start_time": i, "duration": 1, "velocity": 100}
+             for i, p in enumerate([62, 64, 66, 67, 69, 71, 73, 74, 62, 66, 69])]
+    assert music.estimate_key(scale)["key"] == "D major"
+    assert music.analyze_harmony([], 4.0)["progression"] is None

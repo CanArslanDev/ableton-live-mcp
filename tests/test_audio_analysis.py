@@ -69,3 +69,36 @@ def test_silence_and_missing_files(tmp_path):
     assert silent["observations"] == ["The file is silent or nearly silent."]
     with pytest.raises(FileNotFoundError):
         audio_analysis.analyze(str(tmp_path / "nope.wav"))
+
+
+def test_meter_scale_matches_live():
+    # Measured on Live 12.3.8 with a 1 kHz sine at known peak levels
+    assert audio_analysis.meter_to_db(0.9210) == 0.0
+    assert audio_analysis.meter_to_db(0.7631) == -12.0
+    assert audio_analysis.meter_to_db(0.2894) == -48.0
+    assert audio_analysis.meter_to_db(1.0) == 6.0
+    assert audio_analysis.meter_to_db(0.0) is None
+
+
+def test_level_report_peaks_time_weighted_averages_and_notes():
+    def track(name, readings):
+        return {"track": name, "readings": readings}
+
+    meters = {
+        # Bass: -12 dB for 3 s, then -6 dB for 1 s → peak -6, average -10.5
+        1: track("Bass", [(None, 0.0), (10.0, 0.7631), (13.0, 0.8421)]),
+        2: track("Bass", [(None, 0.0), (10.0, 0.7631), (13.0, 0.8421)]),
+        3: track("Keys", [(None, 0.0)]),
+        4: track("Keys", [(None, 0.0)]),
+        5: track("Master", [(None, 0.95), (12.0, 0.99), (14.0, 0.97)]),
+        6: track("Master", [(None, 0.95)]),
+    }
+    report = audio_analysis.level_report(meters)
+    levels = {r["track"]: r for r in report["levels"]}
+    assert levels["Bass"]["peak_dbfs"] == -6.0
+    assert levels["Bass"]["average_dbfs"] == -10.5
+    assert levels["Keys"]["peak_dbfs"] is None
+    assert levels["Master"]["peak_dbfs"] == 5.2
+    text = " ".join(report["observations"])
+    assert "no headroom" in text and "No signal on: Keys" in text
+    assert report["levels"][0]["track"] == "Master"

@@ -28,13 +28,17 @@ DEFAULT_PORT = 9877
 # behind a trusted network or an explicit relay.
 HOST = os.environ.get("ABLETON_MCP_HOST", "127.0.0.1")
 
+# Log every command to Live's Log.txt (off by default: it is one line per
+# tool step).
+VERBOSE = os.environ.get("ABLETON_MCP_VERBOSE", "").lower() in ("1", "true", "yes")
+
 # A command that never completes must not grow the buffer without bound.
 # Generous enough for a large add_notes_to_clip payload.
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
 # Bumped whenever the TCP command surface changes; the MCP server compares
 # this to EXPECTED_REMOTE_SCRIPT_VERSION.
-SCRIPT_VERSION = "1.8.0"
+SCRIPT_VERSION = "1.9.0"
 PROTOCOL_VERSION = 1
 
 SCRIPT_CAPABILITIES = [
@@ -102,6 +106,10 @@ class LomError(Exception):
     pass
 
 
+# Errors that mean "the request was wrong", not "the script is broken"
+EXPECTED_ERRORS = (LomError, ValueError, IndexError)
+
+
 def lom_tokenize(path):
     if isinstance(path, (list, tuple)):
         return list(path)
@@ -140,6 +148,15 @@ def lom_is_sequence(value):
     return hasattr(value, "__len__") and hasattr(value, "__getitem__")
 
 
+def lom_is_value_object(value):
+    """Objects Live defines outside the Live module (BrowserItem, RoutingType,
+    TuningSystem): no _live_ptr, but still worth describing and referencing."""
+    if value is None or isinstance(value, (bool, int, float, string_types, bytes, list,
+                                           tuple, dict)):
+        return False
+    return getattr(type(value), "__module__", "builtins") not in ("builtins", "__builtin__")
+
+
 def lom_check_name(name):
     """Attribute names reachable through the bridge: public LOM names only.
 
@@ -173,7 +190,7 @@ def parse_display_number(text):
     if pan:
         value = float(pan.group(1))
         return -value if pan.group(2) == "l" else value
-    match = re.search(r"-?\d+(?:\.\d+)?", s)
+    match = re.search(r"-?(?:\d+(?:\.\d+)?|\.\d+)", s)
     if not match:
         return None
     value = float(match.group(0))
@@ -379,7 +396,8 @@ class LomMixin(object):
         return str(value)
 
     def _lom_describe(self, obj):
-        info = self._lom_ref(obj) if lom_is_live_object(obj) else {"$type": type(obj).__name__}
+        info = self._lom_ref(obj) if (lom_is_live_object(obj) or lom_is_value_object(obj)) \
+            else {"$type": type(obj).__name__}
         properties, children, methods = {}, {}, []
         for name in sorted(dir(obj)):
             if name.startswith("_") or "listener" in name:
@@ -405,6 +423,13 @@ class LomMixin(object):
     def _lom_pick(self, obj, properties):
         picked = {}
         for prop in properties:
+            if prop == "$display":
+                # A parameter's value as Live shows it ("-6.0 dB", "800 Hz")
+                try:
+                    picked[prop] = obj.str_for_value(obj.value)
+                except Exception as e:
+                    picked[prop] = {"$error": str(e)[:160]}
+                continue
             name = lom_check_name(prop)
             try:
                 picked[name] = self._lom_value(getattr(obj, name))
@@ -427,7 +452,7 @@ class LomMixin(object):
             return {"items": self._lom_value(target), "length": len(target)}
         if properties:
             return self._lom_pick(target, properties)
-        if lom_is_live_object(target):
+        if lom_is_live_object(target) or lom_is_value_object(target):
             return self._lom_describe(target)
         return {"value": self._lom_value(target)}
 
@@ -1022,6 +1047,11 @@ class AbletonMCP(LomMixin, ControlSurface):
                             "Request exceeded %d bytes without a complete JSON command"
                             % MAX_REQUEST_BYTES)
 
+                    # A command is one JSON object, so it can only be complete
+                    # once the buffer ends with "}". Parsing the whole buffer
+                    # after every chunk made large requests quadratic.
+                    if not buffer.rstrip().endswith(b'}'):
+                        continue
                     try:
                         # Only a fully received command decodes and parses.
                         # Either error means "not all here yet", so wait.
@@ -1031,7 +1061,8 @@ class AbletonMCP(LomMixin, ControlSurface):
 
                     buffer = b''  # Clear buffer after successful parse
 
-                    self.log_message("Received command: " + str(command.get("type", "unknown")))
+                    if VERBOSE:
+                        self.log_message("Received command: " + str(command.get("type", "unknown")))
 
                     # Process the command and get response
                     response = self._process_command(command)
@@ -1140,9 +1171,6 @@ class AbletonMCP(LomMixin, ControlSurface):
                 self._duplicate_session_clip_to_arrangement(
                     p.get("track_index", 0), p.get("clip_index", 0),
                     p.get("destination_time", 0.0))),
-            "map_rack_magnitude": lambda p: self._map_rack_magnitude(
-                p.get("track_index", 0), p.get("device_index", 0),
-                p.get("macro_name", "Magnitude")),
             "inspect_rack": lambda p: self._inspect_rack(
                 p.get("track_index", 0), p.get("device_index", 0)),
             "create_locator": lambda p: self._create_locator(
@@ -1183,8 +1211,30 @@ class AbletonMCP(LomMixin, ControlSurface):
 
         timeout = self.LONG_RUNNING_COMMANDS.get(
             command_type, self.DEFAULT_MAIN_THREAD_TIMEOUT)
-        closes_undo_step = command_type not in self.READ_ONLY_COMMANDS
+        closes_undo_step = not self._is_read_only(command_type, params)
         return self._invoke_on_main_thread(handler, params, timeout, closes_undo_step)
+
+    # LOM methods that only read: calling them must not touch the undo history
+    READ_ONLY_METHODS = frozenset([
+        "str_for_value", "available_main_views", "value_at_time", "events_in_range",
+        "note_number_to_name", "find_device_position", "beat_to_sample_time",
+        "sample_to_beat_time", "seconds_to_sample_time",
+    ])
+
+    def _is_read_only(self, command_type, params):
+        if command_type in self.READ_ONLY_COMMANDS:
+            return True
+        if command_type == "lom_call":
+            method = str(params.get("method") or "")
+            return (method in self.READ_ONLY_METHODS
+                    or method.startswith("get_") or method.startswith("is_"))
+        if command_type == "batch":
+            commands = params.get("commands") or []
+            return bool(commands) and all(
+                isinstance(c, dict) and c.get("type") != "batch"
+                and self._is_read_only(c.get("type", ""), c.get("params") or {})
+                for c in commands)
+        return False
 
     def _close_undo_step(self):
         """Seal this command's changes as their own undo step.
@@ -1204,6 +1254,11 @@ class AbletonMCP(LomMixin, ControlSurface):
     def _invoke_handler(self, handler, params):
         try:
             return {"status": "success", "result": handler(params)}
+        except EXPECTED_ERRORS as e:
+            # A bad path or value from the client: worth a line, not a traceback
+            if VERBOSE:
+                self.log_message("Command refused: " + str(e))
+            return {"status": "error", "message": str(e)}
         except Exception as e:
             self.log_message("Error processing command: " + str(e))
             self.log_message(traceback.format_exc())
@@ -2194,73 +2249,6 @@ class AbletonMCP(LomMixin, ControlSurface):
             "devices": devices_info,
         }
 
-    def _map_rack_magnitude(self, track_index, device_index=0, macro_name="Magnitude"):
-        """Rename Macro 1 and map nested Dry/Wet (or Mix/Amount) params to it."""
-        if track_index < 0 or track_index >= len(self._song.tracks):
-            raise IndexError("Track index out of range")
-        track = self._song.tracks[track_index]
-        if device_index < 0 or device_index >= len(track.devices):
-            raise IndexError("Device index out of range")
-        rack = track.devices[device_index]
-        if not getattr(rack, "can_have_chains", False):
-            raise ValueError("Device '{0}' is not a rack".format(rack.name))
-        if not hasattr(rack, "macro_map"):
-            raise RuntimeError(
-                "RackDevice.macro_map is unavailable in this Live version")
-
-        # Ensure at least one macro is visible
-        try:
-            visible = int(getattr(rack, "visible_macro_count", 1) or 1)
-            while visible < 1 and hasattr(rack, "add_macro"):
-                rack.add_macro()
-                visible = int(rack.visible_macro_count)
-        except Exception as e:
-            self.log_message("Could not adjust visible macros: {0}".format(e))
-
-        if hasattr(rack, "rename_macro"):
-            rack.rename_macro(0, macro_name)
-        else:
-            # Fallback: Macro 1 is usually parameters[1] (0 = Device On)
-            try:
-                if len(rack.parameters) > 1:
-                    rack.parameters[1].name = macro_name
-            except Exception:
-                pass
-
-        mapped = []
-        skipped = []
-        for chain_index, chain in enumerate(rack.chains):
-            for nested in chain.devices:
-                blend, blend_name = self._find_blend_parameter(nested)
-                if not blend:
-                    skipped.append({
-                        "device": nested.name,
-                        "reason": "no Dry/Wet, Mix, or Amount parameter",
-                    })
-                    continue
-                try:
-                    rack.macro_map(0, blend)
-                    mapped.append({
-                        "device": nested.name,
-                        "parameter": blend_name,
-                        "chain_index": chain_index,
-                    })
-                except Exception as e:
-                    skipped.append({
-                        "device": nested.name,
-                        "parameter": blend_name,
-                        "reason": str(e),
-                    })
-
-        return {
-            "rack_name": rack.name,
-            "macro_name": macro_name,
-            "macro_index": 0,
-            "mapped": mapped,
-            "skipped": skipped,
-            "macros_mapped": list(getattr(rack, "macros_mapped", [])),
-        }
-    
     def _get_device_type(self, device):
         """Get the type of a device"""
         try:

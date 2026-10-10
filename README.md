@@ -16,8 +16,8 @@ actually sounds like.
 
 Built on [ahujasid/ableton-mcp](https://github.com/ahujasid/ableton-mcp) (MIT),
 whose history is kept in this repository. This fork adds a generic bridge to
-the Live Object Model, ~35 new tools, and fixes found while testing against
-Live 12.3.
+the Live Object Model, about 40 new tools, workflow prompts, and fixes found
+while testing against Live 12.3.
 
 ---
 
@@ -29,6 +29,9 @@ Live 12.3.
 - *"Set the filter cutoff on the Operator to 800 Hz and draw a 2-bar sweep up to 5 kHz."*
 - *"Record bars 9–16 of the master and tell me how loud it is and whether the low end is muddy."*
 - *"Watch what I change in Live for the next minute and tell me what I did."*
+- *"What chords are in the Keys clip? Write a walking bass that follows them."*
+- *"Play the drop and tell me which tracks are too hot."*
+- *"Put a vocal chain on the Vox track and duck the bass from the kick."*
 
 ## Features
 
@@ -43,12 +46,18 @@ Live 12.3.
 | **Automation** | `write_clip_automation` draws envelopes for any device or mixer parameter, from points or shapes |
 | **Devices & racks** | `set_device_parameter_by_name` accepts what Live displays (`"800 Hz"`, `"-6 dB"`, `"25L"`, `"Lowpass"`), `manage_device`, `rack_control` (macros, variations), `get_drum_pads` |
 | **Song & transport** | `set_song_properties` (time signature, swing, loop, Live 12 key/scale, quantization), `transport` (undo/redo, capture MIDI, cues), `select_in_live` |
-| **Generators** | `music_theory`, `generate_chord_progression`, `generate_drum_pattern` (maps your Drum Rack pads by name), `generate_bassline`, `generate_arpeggio`, `generate_melody` |
-| **Listening** | `render_and_analyze` records a section through Resampling and measures it; `analyze_audio_file`, `analyze_clip_audio` |
+| **Generators** | `music_theory`, `generate_chord_progression`, `generate_drum_pattern` (maps your Drum Rack pads by name), `generate_bassline`, `generate_arpeggio`, `generate_melody` — they follow the set's time signature and, unless told otherwise, its Key & Scale (Live 12) |
+| **Harmony** | `analyze_harmony` names the chords in a clip (key, roman numerals, changes) and returns a progression the generators accept, so new parts follow existing ones |
+| **MIDI files** | `import_midi_file` (whole file, one track or one channel), `export_clip_to_midi` (with the set's tempo and meter) |
+| **Device chains** | `add_device` inserts any of Live's own devices by name with settings; `apply_device_chain` adds ready-made chains (vocal, drum bus, bass, pad, master, sidechain duck) — Live 12.3+ |
+| **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a section through Resampling and measures it; `analyze_audio_file`, `analyze_clip_audio` |
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview`, `ableton://events` |
-| **Original tools** | tracks, clips, notes, tempo, browser loading, drum kits, Arrangement duplication, locators — all still there |
+| **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
+| **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-71 tools in total.
+50 tools in the default profile (72 with `ABLETON_MCP_PROFILE=full`), plus
+workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
+`arrange_from_loop`, `release_check`, `explain_my_set`.
 
 ### Audio analysis
 
@@ -58,6 +67,18 @@ range, crest factor, clipping, DC offset, energy per band (sub → air), spectra
 centroid, stereo correlation and width (including below 150 Hz), and tempo and
 key estimates — plus plain-language observations such as *"Heavy low-mids
 (250–500 Hz); a source of muddiness"*.
+
+### Tool profiles and safety
+
+Every tool carries MCP annotations (read-only, destructive, idempotent), so
+clients can run reads without asking and confirm deletions. Failures come back
+as MCP tool errors. Tool calls run off the event loop, so a long Live
+operation does not stall the server.
+
+The original upstream tools that newer ones replace (`set_tempo`,
+`fire_clip`, `get_clip_notes`, `create_midi_track`, …) are left out by
+default to keep the tool list short. Set `ABLETON_MCP_PROFILE=full` to get
+them back.
 
 ---
 
@@ -114,7 +135,12 @@ Point the client at `uv --directory /path/to/ableton-live-mcp run ableton-mcp`.
 </details>
 
 Run only one MCP client against Live at a time. Ask the assistant to call
-`get_remote_script_info` to confirm the server and the script versions match.
+`doctor` (or `get_remote_script_info`) to confirm the server and the script
+versions match.
+
+Environment variables: `ABLETON_MCP_PROFILE=full` (every original tool),
+`ABLETON_MCP_VERBOSE=1` in Live's environment (log every command to Live's
+Log.txt), `ABLETON_HOST` / `ABLETON_PORT` (where the server looks for Live).
 
 ---
 
@@ -166,16 +192,23 @@ new tracks, clips, notes), so a call that does both can take two Cmd+Z.
 
 ## Limitations
 
-- Live's API cannot write track-level Arrangement automation; automation tools
-  write clip envelopes (Session or Arrangement clips).
+- Live's API cannot write track-level Arrangement automation, and it refuses
+  envelope edits on Arrangement clips. Automation tools write clip envelopes on
+  Session clips; `duplicate_to_arrangement` carries them into the Arrangement.
 - Live has no export/render API. `render_and_analyze` records in real time on a
   temporary track (deleted afterwards), so it takes as long as the section plays.
-- Arrangement clip creation and `move_device` need Live 12; the extended note
-  API needs Live 11.
+- Arrangement clip creation and `move_device` need Live 12; `add_device` and
+  `apply_device_chain` need Live 12.3; the extended note API needs Live 11.
+- Live's API cannot map parameters to rack macros, group tracks, bounce,
+  freeze or export.
 - The socket only listens on `127.0.0.1` and is unauthenticated: anything on the
   machine can drive Live while the script is loaded.
 
 ## Troubleshooting
+
+Start with `uv run ableton-mcp-doctor` in a terminal, or ask the assistant to
+run `doctor`: it checks versions, installed copies of the script, the
+connection, open dialogs and Live's log, and says how to fix what it finds.
 
 | Symptom | Fix |
 |---|---|
@@ -188,7 +221,7 @@ new tracks, clips, notes), so a call that does both can take two Cmd+Z.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 109 tests, no Live required
+uv run --with pytest pytest -q        # 160 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the

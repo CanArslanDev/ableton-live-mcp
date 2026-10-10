@@ -6,6 +6,7 @@ Active only when telemetry is enabled and the user has consented
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import logging
@@ -438,14 +439,13 @@ def trajectory_tool(tool_name: str, modifying: bool | None = None):
         async def _call(*args, **kwargs) -> Any:
             """Invoke the wrapped tool, awaiting only if it is actually async.
 
-            Sync tool bodies run inline here, exactly as before. FastMCP calls
-            sync tools directly inside the event loop coroutine, so this is the
-            same thread and the same blocking behaviour — wrapping them in an
-            async wrapper changes nothing about how they execute.
+            Sync tool bodies run on a worker thread: they block on a socket
+            round-trip to Live, and running them inline would stall the event
+            loop (and every other request) for as long as Live takes.
             """
             if func_is_async:
                 return await func(*args, **kwargs)
-            return func(*args, **kwargs)
+            return await asyncio.to_thread(func, *args, **kwargs)
 
         # Always async, even around a sync tool. ctx.elicit is a coroutine, and
         # a sync wrapper has no way to await it: FastMCP runs sync tools inside

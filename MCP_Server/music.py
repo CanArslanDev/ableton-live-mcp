@@ -96,7 +96,16 @@ def parse_note(text: str | int) -> int:
     return parse_pitch_class(m.group(1)) + (int(m.group(2)) + 2) * 12
 
 
-def scale_intervals(scale: str) -> list[int]:
+def scale_intervals(scale: str | Iterable[int]) -> list[int]:
+    """Intervals of a named scale, or an interval list passed through.
+
+    A list is what Live 12 reports as Song.scale_intervals, e.g. [0, 2, 3, 5, 7, 9, 10].
+    """
+    if not isinstance(scale, str):
+        intervals = sorted({int(i) % 12 for i in scale})
+        if not intervals or intervals[0] != 0:
+            raise ValueError(f"Scale intervals must start at 0, got {list(scale)!r}")
+        return intervals
     key = scale.strip().lower().replace(" ", "_").replace("-", "_")
     key = _SCALE_ALIASES.get(key, key)
     if key not in SCALES:
@@ -104,7 +113,7 @@ def scale_intervals(scale: str) -> list[int]:
     return SCALES[key]
 
 
-def parse_key(key: str, scale: str | None = None) -> tuple[int, list[int]]:
+def parse_key(key: str, scale: str | Iterable[int] | None = None) -> tuple[int, list[int]]:
     """"A minor" / "F#m" / "Eb" (+ optional scale) → (root pitch class, intervals)."""
     text = key.strip()
     parts = text.split(None, 1)
@@ -116,7 +125,49 @@ def parse_key(key: str, scale: str | None = None) -> tuple[int, list[int]]:
             implied = implied or "minor"
             break
     root = parse_pitch_class(root_text)
+    if scale is not None and not isinstance(scale, str):
+        return root, scale_intervals(scale)
     return root, scale_intervals(scale or implied or "major")
+
+
+def beats_per_bar(numerator: int, denominator: int) -> float:
+    """Bar length in Live's beats (quarter notes): 4/4 → 4, 6/8 → 3, 7/8 → 3.5."""
+    return numerator * 4.0 / denominator
+
+
+def is_minor(intervals: list[int]) -> bool:
+    return 3 in intervals and 4 not in intervals
+
+
+# Scale degrees of a typical four-chord progression for each mode
+_MODE_PROGRESSIONS = {
+    (0, 2, 4, 5, 7, 9, 11): [1, 5, 6, 4],   # major:          I V vi IV
+    (0, 2, 3, 5, 7, 8, 10): [1, 6, 3, 7],   # natural minor:  i VI III VII
+    (0, 2, 3, 5, 7, 9, 10): [1, 4, 1, 7],   # dorian:         i IV i VII
+    (0, 1, 3, 5, 7, 8, 10): [1, 2, 1, 7],   # phrygian:       i bII i vii
+    (0, 2, 4, 6, 7, 9, 11): [1, 2, 1, 5],   # lydian:         I II I V
+    (0, 2, 4, 5, 7, 9, 10): [1, 7, 4, 1],   # mixolydian:     I bVII IV I
+    (0, 2, 3, 5, 7, 8, 11): [1, 4, 5, 1],   # harmonic minor: i iv V i
+    (0, 2, 3, 5, 7, 9, 11): [1, 4, 5, 1],   # melodic minor
+    (0, 1, 4, 5, 7, 8, 10): [1, 2, 1, 7],   # phrygian dominant / hijaz
+}
+
+
+def default_progression(key: str, scale: str | Iterable[int] | None = None) -> str:
+    """A four-chord progression that stays inside the key's scale, as chord symbols.
+
+    Built from the scale's own triads, so modes get their characteristic
+    chords (D Dorian: Dm G Dm C) instead of minor-key numerals.
+    """
+    _root, intervals = parse_key(key, scale)
+    if len(intervals) != 7:
+        return "i VI III VII" if is_minor(intervals) else "I V vi IV"
+    degrees = _MODE_PROGRESSIONS.get(tuple(intervals),
+                                     [1, 6, 3, 7] if is_minor(intervals) else [1, 5, 6, 4])
+    chords = diatonic_chords(key, scale)
+    if any("?" in chords[d - 1]["symbol"] for d in degrees):
+        return "i VI III VII" if is_minor(intervals) else "I V vi IV"
+    return " ".join(chords[d - 1]["symbol"] for d in degrees)
 
 
 def scale_pitches(root_pc: int, intervals: list[int], low: int, high: int) -> list[int]:
@@ -173,14 +224,15 @@ def parse_chord(token: str, key_root: int, intervals: list[int]) -> dict:
 
 
 def parse_progression(progression: str | Iterable[str], key: str,
-                      scale: str | None = None) -> list[dict]:
+                      scale: str | Iterable[int] | None = None) -> list[dict]:
     root, intervals = parse_key(key, scale)
     tokens = re.split(r"[\s,\-|]+", progression.strip()) if isinstance(progression, str) \
         else list(progression)
     return [parse_chord(t, root, intervals) for t in tokens if t]
 
 
-def diatonic_chords(key: str, scale: str | None = None, sevenths: bool = False) -> list[dict]:
+def diatonic_chords(key: str, scale: str | Iterable[int] | None = None,
+                    sevenths: bool = False) -> list[dict]:
     root, intervals = parse_key(key, scale)
     if len(intervals) != 7:
         raise ValueError("Diatonic chords need a seven-note scale")
@@ -292,14 +344,18 @@ def chord_notes(voiced: list[list[int]], bars_per_chord: float = 1.0,
         bar = 0.0
         while bar < span - 1e-9:
             for offset, duration in pattern:
-                scaled_offset = offset * beats_per_bar / 4.0
-                scaled_dur = duration * beats_per_bar / 4.0
+                # Patterns are written for a 4/4 bar. In other meters hits keep
+                # their beat position and those past the bar line are dropped.
                 if rhythm == "sustain":
-                    scaled_dur = span
-                start = chord_start + bar + scaled_offset
+                    duration = span
+                elif offset >= beats_per_bar - 1e-9:
+                    continue
+                else:
+                    duration = min(duration, beats_per_bar - offset)
+                start = chord_start + bar + offset
                 if start >= chord_start + span - 1e-9:
                     continue
-                dur = min(scaled_dur, chord_start + span - start)
+                dur = min(duration, chord_start + span - start)
                 for k, pitch in enumerate(pitches):
                     accent = 6 if offset == 0 else 0
                     notes.append(_note(pitch, start, dur, velocity + accent - k * 2))
@@ -355,16 +411,27 @@ DRUM_STYLES: dict[str, dict[str, str]] = {
 }
 
 
+def _fit_steps(steps: str, count: int) -> str:
+    """A 16-step 4/4 grid cut or repeated to `count` 16th steps (another meter)."""
+    if count <= len(steps):
+        return steps[:count]
+    return (steps * (count // len(steps) + 1))[:count]
+
+
 def drum_pattern(style: str, bars: int = 2, mapping: dict[str, int] | None = None,
                  swing: float = 0.0, humanize: float = 0.0, fill: bool = True,
-                 seed: int | None = None, velocity: int = 100) -> list[dict]:
+                 seed: int | None = None, velocity: int = 100,
+                 beats_per_bar: float = 4.0) -> list[dict]:
+    """Drum notes for `bars` bars. The 4/4 grids are cut or repeated to fit
+    other meters (3/4 → 12 steps, 7/8 → 14, 9/8 → 18)."""
     if style not in DRUM_STYLES:
         raise ValueError(f"Unknown style {style!r}. Known: {', '.join(sorted(DRUM_STYLES))}")
     pads = dict(GM_DRUMS)
     if mapping:
         pads.update({k: parse_note(v) for k, v in mapping.items()})
     notes = []
-    grid = DRUM_STYLES[style]
+    step_count = max(1, int(round(beats_per_bar * 4)))
+    grid = {voice: _fit_steps(steps, step_count) for voice, steps in DRUM_STYLES[style].items()}
     for bar in range(bars):
         last_bar = fill and bars > 1 and bar == bars - 1
         for voice, steps in grid.items():
@@ -375,7 +442,7 @@ def drum_pattern(style: str, bars: int = 2, mapping: dict[str, int] | None = Non
                 if ch == ".":
                     continue
                 vel = {"X": velocity + 15, "o": velocity * 0.45}.get(ch, velocity * 0.85)
-                start = bar * 4 + step * 0.25
+                start = bar * beats_per_bar + step * 0.25
                 if step % 2 == 1:
                     start += swing * 0.25 * 0.5
                 if ch == "r":
@@ -386,8 +453,9 @@ def drum_pattern(style: str, bars: int = 2, mapping: dict[str, int] | None = Non
                 notes.append(_note(pitch, start, 0.2, vel))
         if last_bar:
             snare = pads.get("snare", 38)
+            fill_start = bar * beats_per_bar + max(0.0, beats_per_bar - 1)
             for k in range(4):
-                notes.append(_note(snare, bar * 4 + 3 + k * 0.25, 0.2, 70 + k * 12))
+                notes.append(_note(snare, fill_start + k * 0.25, 0.2, 70 + k * 12))
     if humanize > 0:
         notes = humanize_notes(notes, timing=0.02 * humanize, velocity=12 * humanize, seed=seed)
     return notes
@@ -401,12 +469,12 @@ BASS_STYLES = ("root", "octave", "offbeat", "syncopated", "walking", "pulse", "8
 def bassline(chords: list[dict], bars_per_chord: float = 1.0, octave: int = 1,
              style: str = "root", key_root: int | None = None,
              intervals: list[int] | None = None, velocity: int = 100,
-             seed: int | None = None) -> list[dict]:
+             seed: int | None = None, beats_per_bar: float = 4.0) -> list[dict]:
     if style not in BASS_STYLES:
         raise ValueError(f"Unknown bass style {style!r}. Known: {', '.join(BASS_STYLES)}")
     rng = random.Random(seed)
     notes = []
-    span = bars_per_chord * 4
+    span = bars_per_chord * beats_per_bar
     for index, chord in enumerate(chords):
         pc = chord["bass_pc"] if chord.get("bass_pc") is not None else chord["root_pc"]
         root = pc + (octave + 2) * 12
@@ -429,9 +497,10 @@ def bassline(chords: list[dict], bars_per_chord: float = 1.0, octave: int = 1,
                                        (2.5, 0.5, root + 12), (3.0, 0.75, root)):
                 b = 0.0
                 while b < span - 1e-9:
-                    if b + offset < span:
-                        notes.append(_note(pitch, start + b + offset, dur, velocity))
-                    b += 4
+                    if offset < beats_per_bar and b + offset < span:
+                        notes.append(_note(pitch, start + b + offset,
+                                           min(dur, span - b - offset), velocity))
+                    b += beats_per_bar
         elif style == "walking":
             next_chord = chords[(index + 1) % len(chords)]
             target = next_chord["root_pc"] + (octave + 2) * 12
@@ -459,12 +528,13 @@ ARP_PATTERNS = ("up", "down", "updown", "downup", "random", "converge", "pinky")
 
 def arpeggio(voiced: list[list[int]], bars_per_chord: float = 1.0, rate: float = 0.25,
              pattern: str = "up", octaves: int = 1, gate: float = 0.8,
-             velocity: int = 90, seed: int | None = None) -> list[dict]:
+             velocity: int = 90, seed: int | None = None,
+             beats_per_bar: float = 4.0) -> list[dict]:
     if pattern not in ARP_PATTERNS:
         raise ValueError(f"Unknown pattern {pattern!r}. Known: {', '.join(ARP_PATTERNS)}")
     rng = random.Random(seed)
     notes = []
-    span = bars_per_chord * 4
+    span = bars_per_chord * beats_per_bar
     for index, pitches in enumerate(voiced):
         pool = [p + 12 * o for o in range(max(1, octaves)) for p in sorted(pitches)]
         if pattern == "down":
@@ -502,10 +572,10 @@ _MELODY_RHYTHMS = [
 ]
 
 
-def melody(key: str, scale: str | None = None, bars: int = 4, low: str | int = "C3",
-           high: str | int = "C5", chords: list[dict] | None = None,
+def melody(key: str, scale: str | Iterable[int] | None = None, bars: int = 4,
+           low: str | int = "C3", high: str | int = "C5", chords: list[dict] | None = None,
            bars_per_chord: float = 1.0, density: float = 0.6, seed: int | None = None,
-           velocity: int = 95) -> list[dict]:
+           velocity: int = 95, beats_per_bar: float = 4.0) -> list[dict]:
     """Phrase-structured melody (A A' B A'') that leans on chord tones on strong beats."""
     root, intervals = parse_key(key, scale)
     rng = random.Random(seed)
@@ -516,7 +586,7 @@ def melody(key: str, scale: str | None = None, bars: int = 4, low: str | int = "
     def chord_at(beat: float) -> set[int] | None:
         if not chords:
             return None
-        chord = chords[int(beat // (bars_per_chord * 4)) % len(chords)]
+        chord = chords[int(beat // (bars_per_chord * beats_per_bar)) % len(chords)]
         return {(chord["root_pc"] + i) % 12 for i in chord["intervals"]}
 
     def make_bar(start_idx: int) -> tuple[list[tuple[float, float, int]], int]:
@@ -527,11 +597,11 @@ def melody(key: str, scale: str | None = None, bars: int = 4, low: str | int = "
         out = []
         t = 0.0
         for dur in rhythm:
-            if t >= 4:
+            if t >= beats_per_bar - 1e-9:
                 break
             step = rng.choice([-2, -1, -1, 0, 1, 1, 2, 3, -3]) if rng.random() < 0.85 else rng.choice([-4, 4])
             idx = min(len(pool) - 1, max(0, idx + step))
-            out.append((t, min(dur, 4 - t), idx))
+            out.append((t, min(dur, beats_per_bar - t), idx))
             t += dur
         return out, idx
 
@@ -548,6 +618,10 @@ def melody(key: str, scale: str | None = None, bars: int = 4, low: str | int = "
         else:
             plan.append(motif_b)
 
+    def strong(t: float) -> bool:
+        # Downbeat, plus the half bar in 4/4 and longer bars
+        return t == 0.0 or (beats_per_bar >= 4 and abs(t - beats_per_bar / 2) < 1e-9)
+
     notes = []
     for bar, events in enumerate(plan):
         for t, d, i in events:
@@ -555,9 +629,9 @@ def melody(key: str, scale: str | None = None, bars: int = 4, low: str | int = "
                 continue
             i = min(len(pool) - 1, max(0, i))
             pitch = pool[i]
-            beat = bar * 4 + t
+            beat = bar * beats_per_bar + t
             tones = chord_at(beat)
-            if tones and t in (0.0, 2.0) and pitch % 12 not in tones:
+            if tones and strong(t) and pitch % 12 not in tones:
                 candidates = [p for p in pool if p % 12 in tones]
                 if candidates:
                     pitch = min(candidates, key=lambda p: abs(p - pitch))
@@ -585,7 +659,7 @@ def transpose(notes: list[dict], semitones: int) -> list[dict]:
 
 
 def transpose_in_scale(notes: list[dict], steps: int, key: str,
-                       scale: str | None = None) -> list[dict]:
+                       scale: str | Iterable[int] | None = None) -> list[dict]:
     root, intervals = parse_key(key, scale)
     pool = scale_pitches(root, intervals, 0, 127)
     out = _copy(notes)
@@ -692,10 +766,193 @@ def dedupe(notes: list[dict]) -> list[dict]:
     return out
 
 
-def constrain_to_scale(notes: list[dict], key: str, scale: str | None = None) -> list[dict]:
+def constrain_to_scale(notes: list[dict], key: str,
+                       scale: str | Iterable[int] | None = None) -> list[dict]:
     root, intervals = parse_key(key, scale)
     pool = scale_pitches(root, intervals, 0, 127)
     out = _copy(notes)
     for n in out:
         n["pitch"] = min(pool, key=lambda p: (abs(p - n["pitch"]), p))
     return out
+
+
+# ── Harmony analysis ─────────────────────────────────────────────────────────
+
+# Krumhansl–Kessler key profiles (tonic first)
+KEY_PROFILES = {
+    "major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+    "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
+}
+
+# Chord qualities tried when naming notes, all readable by parse_chord so a
+# detected progression can be fed straight back into the generators.
+ANALYSIS_QUALITIES = ["", "m", "dim", "aug", "sus2", "sus4", "5", "7", "maj7", "m7",
+                      "m7b5", "dim7", "6", "m6", "7sus4", "mmaj7", "add9", "madd9"]
+_MINOR_QUALITIES = {"m", "dim", "m7", "m7b5", "dim7", "m6", "mmaj7", "madd9"}
+_NUMERAL_SUFFIX = {"": "", "m": "", "dim": "°", "aug": "+", "sus2": "sus2", "sus4": "sus4",
+                   "5": "5", "7": "7", "maj7": "maj7", "m7": "7", "m7b5": "ø7", "dim7": "°7",
+                   "6": "6", "m6": "6", "7sus4": "7sus4", "mmaj7": "maj7", "add9": "add9",
+                   "madd9": "add9"}
+_PRESENT = 0.04  # share of a window's weight for a pitch class to count as sounding
+
+
+def pitch_class_weights(notes: Iterable[dict], start: float | None = None,
+                        end: float | None = None) -> list[float]:
+    """How much each pitch class sounds (duration × loudness), optionally in [start, end)."""
+    weights = [0.0] * 12
+    for n in notes:
+        s, e = n["start_time"], n["start_time"] + n["duration"]
+        if start is not None:
+            s, e = max(s, start), min(e, end)
+        if e <= s or n.get("mute"):
+            continue
+        weights[n["pitch"] % 12] += (e - s) * (0.5 + n.get("velocity", 100) / 254.0)
+    return weights
+
+
+def _pearson(a: list[float], b: list[float]) -> float:
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = sum((x - ma) ** 2 for x in a) ** 0.5
+    vb = sum((y - mb) ** 2 for y in b) ** 0.5
+    return cov / (va * vb) if va and vb else 0.0
+
+
+def estimate_key(notes: Iterable[dict]) -> dict | None:
+    """Key of a set of notes (Krumhansl–Schmuckler). None when nothing sounds."""
+    weights = pitch_class_weights(notes)
+    if not any(weights):
+        return None
+    best = None
+    for tonic in range(12):
+        for mode, profile in KEY_PROFILES.items():
+            expected = [profile[(pc - tonic) % 12] for pc in range(12)]
+            r = _pearson(weights, expected)
+            if best is None or r > best[0] + 1e-12:
+                best = (r, tonic, mode)
+    r, tonic, mode = best
+    return {"key": f"{NOTE_NAMES[tonic]} {mode}", "tonic": tonic, "mode": mode,
+            "confidence": round(r, 2)}
+
+
+def identify_chord(weights: list[float], bass_pc: int | None = None) -> dict | None:
+    """Best chord for a pitch-class weighting. None for fewer than two pitch classes."""
+    total = sum(weights)
+    if total <= 0:
+        return None
+    share = [w / total for w in weights]
+    if sum(1 for s in share if s >= _PRESENT) < 2:
+        return None
+    best = None
+    for root in range(12):
+        for quality in ANALYSIS_QUALITIES:
+            tones = {(root + i) % 12 for i in CHORD_QUALITIES[quality]}
+            covered = sum(share[pc] for pc in tones)
+            missing = sum(1 for pc in tones if share[pc] < _PRESENT) / len(tones)
+            # Explain what sounds, don't invent tones, prefer the simpler chord
+            score = covered - 0.3 * missing - 0.01 * (len(tones) - 3)
+            if bass_pc is not None:
+                if bass_pc == root:
+                    score += 0.08
+                elif bass_pc not in tones:
+                    score -= 0.05
+            if best is None or score > best[0] + 1e-9:
+                best = (score, root, quality, tones)
+    score, root, quality, tones = best
+    symbol = NOTE_NAMES[root] + quality
+    if bass_pc is not None and bass_pc != root and bass_pc in tones:
+        symbol += "/" + NOTE_NAMES[bass_pc]
+    return {"symbol": symbol, "root_pc": root, "quality": quality, "score": round(score, 3)}
+
+
+def roman_numeral(root_pc: int, quality: str, tonic: int, mode: str) -> str:
+    """Roman numeral of a chord in a major or (natural) minor key: "V7", "bVII", "#vii°"."""
+    scale = SCALES["minor" if mode == "minor" else "major"]
+    offset = (root_pc - tonic) % 12
+    if offset in scale:
+        prefix, degree = "", scale.index(offset)
+    elif offset == 1:
+        prefix, degree = "b", 1  # Neapolitan bII in either mode
+    elif mode == "minor" and (offset - 1) in scale:
+        prefix, degree = "#", scale.index(offset - 1)  # raised 3rd/6th/7th
+    else:
+        prefix, degree = "b", scale.index((offset + 1) % 12)
+    numeral = ["I", "II", "III", "IV", "V", "VI", "VII"][degree]
+    if quality in _MINOR_QUALITIES:
+        numeral = numeral.lower()
+    return prefix + numeral + _NUMERAL_SUFFIX.get(quality, quality)
+
+
+def _bass_pitch(notes: list[dict], start: float, end: float) -> int | None:
+    """Lowest note that sounds for a meaningful part of the window."""
+    span = end - start
+    lowest = None
+    for n in notes:
+        if n.get("mute"):
+            continue
+        overlap = min(end, n["start_time"] + n["duration"]) - max(start, n["start_time"])
+        if overlap >= min(0.125 * span, 0.5 * n["duration"]) and overlap > 0:
+            if lowest is None or n["pitch"] < lowest:
+                lowest = n["pitch"]
+    return lowest
+
+
+def analyze_harmony(notes: list[dict], beats_per_bar: float = 4.0,
+                    segment: float | None = None, length: float | None = None,
+                    key: str | None = None, scale: str | Iterable[int] | None = None) -> dict:
+    """Chords per window, the key, roman numerals, and a progression the
+    generators accept (with bars_per_chord) so new parts can follow it.
+
+    segment: window length in beats (default one bar). key/scale: analyse
+    against this key instead of estimating it from the notes.
+    """
+    segment = segment or beats_per_bar
+    sounding = [n for n in notes if not n.get("mute")]
+    end = length or max((n["start_time"] + n["duration"] for n in sounding), default=0.0)
+    if key is not None:
+        tonic, intervals = parse_key(key, scale)
+        key_info = {"key": f"{NOTE_NAMES[tonic]} {'minor' if is_minor(intervals) else 'major'}",
+                    "tonic": tonic, "mode": "minor" if is_minor(intervals) else "major",
+                    "source": "given"}
+    else:
+        key_info = estimate_key(sounding)
+        if key_info:
+            key_info["source"] = "estimated from the notes"
+    windows = []
+    t = 0.0
+    while t < end - 1e-9:
+        stop = min(t + segment, end)
+        weights = pitch_class_weights(sounding, t, stop)
+        bass = _bass_pitch(sounding, t, stop)
+        chord = identify_chord(weights, bass % 12 if bass is not None else None)
+        entry = {"start": round(t, 4), "bar": int(t // beats_per_bar) + 1,
+                 "beat": round(t % beats_per_bar + 1, 3),
+                 "chord": chord["symbol"] if chord else "N.C.",
+                 "notes": [NOTE_NAMES[pc] for pc in range(12)
+                           if sum(weights) and weights[pc] / sum(weights) >= _PRESENT]}
+        if chord and key_info:
+            entry["roman"] = roman_numeral(chord["root_pc"], chord["quality"],
+                                           key_info["tonic"], key_info["mode"])
+        windows.append(entry)
+        t += segment
+
+    named = [w["chord"] for w in windows]
+    first = next((c for c in named if c != "N.C."), None)
+    progression, previous = [], first
+    for chord in named:
+        previous = chord if chord != "N.C." else previous
+        progression.append(previous)
+    runs: list[dict] = []
+    for w in windows:
+        if runs and runs[-1]["chord"] == w["chord"]:
+            runs[-1]["beats"] = round(runs[-1]["beats"] + segment, 4)
+        else:
+            runs.append({"chord": w["chord"], "roman": w.get("roman"), "start": w["start"],
+                         "beats": segment})
+    return {
+        "key": key_info,
+        "windows": windows,
+        "changes": runs,
+        "progression": " ".join(progression) if first else None,
+        "bars_per_chord": round(segment / beats_per_bar, 4),
+    }

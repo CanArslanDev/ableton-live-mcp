@@ -214,6 +214,27 @@ class FakeDevice(FakeObj):
                                          parameters=params, can_have_chains=False, **extra)
 
 
+def _compressor():
+    routing = [FakeObj(display_name=n) for n in ("Drums", "Bass", "No Input")]
+    return FakeDevice("Compressor", "Compressor2", [
+        FakeParam("Threshold", 0.85, display=lambda v: "%.2f dB" % (-60 + 60 * v)),
+        FakeParam("Ratio", 0.75, display=lambda v: "%.2f : 1" % (1 + 99 * v)),
+        FakeParam("Attack", 0.4, display=lambda v: "%.2f ms" % (0.01 * 1000 ** v * 10)),
+        FakeParam("Release", 0.2, display=lambda v: "%.1f ms" % (3000 ** v)),
+        FakeParam("Model", 1, 0, 2, items=["Peak", "RMS", "Expand"]),
+        FakeParam("S/C On", 0, 0, 1, items=["Off", "On"]),
+    ], available_input_routing_types=routing, input_routing_type=routing[-1])
+
+
+# What Track.insert_device builds (Live 12.3+), by browser name
+INSERTABLE = {
+    "Compressor": _compressor,
+    "Utility": lambda: FakeDevice("Utility", "StereoGain", [
+        FakeParam("Bass Mono", 0, 0, 1, items=["Off", "On"]),
+        FakeParam("Gain", 0.0, -1.0, 1.0)]),
+}
+
+
 class FakeTrack(FakeObj):
     def __init__(self, name, midi=True, slots=4, devices=None, sends=2):
         mixer = FakeObj(volume=FakeParam("Track Volume", 0.85, display=volume_display),
@@ -227,10 +248,21 @@ class FakeTrack(FakeObj):
             color_index=1, color=0, mixer_device=mixer, devices=list(devices or []),
             clip_slots=[FakeClipSlot() for _ in range(slots)], arrangement_clips=[],
             current_monitoring_state=1, available_input_routing_types=routing,
-            input_routing_type=routing[0])
+            input_routing_type=routing[0], has_audio_output=True,
+            output_meter_left=0.0, output_meter_right=0.0)
 
     def delete_device(self, index):
         del self.devices[index]
+
+    def insert_device(self, name, index=-1):
+        if name not in INSERTABLE:
+            raise RuntimeError("Unknown device name: %s" % name)
+        device = INSERTABLE[name]()
+        if index == -1:
+            self.devices.append(device)
+        else:
+            self.devices.insert(index, device)
+        return device
 
 
 class FakeSong(FakeObj):
@@ -257,7 +289,8 @@ class FakeSong(FakeObj):
             master_track=FakeTrack("Master", sends=0),
             scenes=[FakeObj(name="Intro", tempo=120.0), FakeObj(name="Drop", tempo=120.0)],
             cue_points=[], swing_amount=0.0, metronome=False, record_mode=False,
-            midi_recording_quantization=RecordingQuantization(0))
+            midi_recording_quantization=RecordingQuantization(0),
+            root_note=0, scale_name="Major", scale_intervals=[0, 2, 4, 5, 7, 9, 11])
         object.__setattr__(self, "view", FakeObj(selected_track=tracks[0], detail_clip=None))
         object.__setattr__(self, "undo_log", [])
 
