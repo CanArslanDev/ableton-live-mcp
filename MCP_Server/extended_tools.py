@@ -53,11 +53,13 @@ _NEW_COMMANDS = {"lom_get", "lom_set", "lom_call", "batch", "observe", "unobserv
 
 # ── Plumbing ─────────────────────────────────────────────────────────────────
 
-def send(command: str, params: dict | None = None) -> Any:
+def send(command: str, params: dict | None = None, timeout: float | None = None) -> Any:
     if _get_connection is None:
         raise RuntimeError("extended tools not registered")
     try:
-        return _get_connection().send_command(command, params or {})
+        if timeout is None:
+            return _get_connection().send_command(command, params or {})
+        return _get_connection().send_command(command, params or {}, timeout=timeout)
     except Exception as e:
         if command in _NEW_COMMANDS and "Unknown command" in str(e):
             raise RuntimeError(
@@ -67,8 +69,9 @@ def send(command: str, params: dict | None = None) -> Any:
         raise
 
 
-async def asend(command: str, params: dict | None = None) -> Any:
-    return await asyncio.to_thread(send, command, params)
+async def asend(command: str, params: dict | None = None,
+                timeout: float | None = None) -> Any:
+    return await asyncio.to_thread(send, command, params, timeout)
 
 
 def lom_get(path: str, properties: list[str] | None = None) -> Any:
@@ -1664,10 +1667,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """
         deadline = time.monotonic() + max(0.0, min(60.0, wait_seconds))
         while True:
-            result = await asend("poll_events", {"since": since, "limit": limit})
+            # Remote Script 2.0 holds the request until an event arrives (in
+            # short slices, so other tools are not kept waiting for long);
+            # older scripts ignore "wait" and answer at once.
+            wait = max(0.0, min(2.0, deadline - time.monotonic()))
+            result = await asend("poll_events", {"since": since, "limit": limit, "wait": wait},
+                                 timeout=wait + 15.0)
             if result["events"] or time.monotonic() >= deadline:
                 break
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.05 if wait else 0.25)
         result["observers"] = (await asend("list_observers"))["observers"]
         return to_json(result)
 

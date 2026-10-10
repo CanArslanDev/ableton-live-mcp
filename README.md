@@ -139,8 +139,11 @@ Run only one MCP client against Live at a time. Ask the assistant to call
 versions match.
 
 Environment variables: `ABLETON_MCP_PROFILE=full` (every original tool),
-`ABLETON_MCP_VERBOSE=1` in Live's environment (log every command to Live's
-Log.txt), `ABLETON_HOST` / `ABLETON_PORT` (where the server looks for Live).
+`ABLETON_HOST` / `ABLETON_PORT` (where the server looks for Live),
+`ABLETON_MCP_TOKEN` (the session token, when the server cannot read
+`~/.ableton-mcp/live-session.json`). In Live's environment:
+`ABLETON_MCP_VERBOSE=1` (log every command to Live's Log.txt) and
+`ABLETON_MCP_AUTH=0` (accept clients that do not send the token).
 
 ---
 
@@ -148,15 +151,19 @@ Log.txt), `ABLETON_HOST` / `ABLETON_PORT` (where the server looks for Live).
 
 ```
 AI client ──MCP (stdio)──▶ MCP_Server (Python 3.10+)
-                              │  JSON over TCP 127.0.0.1:9877
+                              │  JSON lines over TCP 127.0.0.1:9877,
+                              │  session token from ~/.ableton-mcp
                               ▼
                      AbletonMCP Remote Script (inside Live)
-                              │  every command on Live's main thread
+                              │  polled on Live's main thread every 10 ms
                               ▼
                        Live Object Model
 ```
 
-The Remote Script runs inside Live's own Python. Besides the original fixed
+The Remote Script runs inside Live's own Python. It polls its socket from
+Live's main thread with Live's own timer, so a command is read, run and
+answered in about 10 ms (the earlier socket-thread design needed ~400 ms,
+because Live only lets background threads run on its 100 ms tick). Besides the original fixed
 commands it serves a small generic protocol — `lom_get`, `lom_set`, `lom_call`,
 `batch`, `observe`/`poll_events`, extended note and envelope editing, and
 setting a parameter by its display value. Most tools are written on the server
@@ -201,8 +208,10 @@ new tracks, clips, notes), so a call that does both can take two Cmd+Z.
   `apply_device_chain` need Live 12.3; the extended note API needs Live 11.
 - Live's API cannot map parameters to rack macros, group tracks, bounce,
   freeze or export.
-- The socket only listens on `127.0.0.1` and is unauthenticated: anything on the
-  machine can drive Live while the script is loaded.
+- The socket only listens on `127.0.0.1` and wants the token Live writes to
+  `~/.ableton-mcp/live-session.json` at every launch (readable only by your
+  user). That keeps other users and web pages out, not other programs running
+  as you.
 
 ## Troubleshooting
 
@@ -215,6 +224,8 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 | New tools answer *"Remote Script … is older than this server"* | Run the installer again and restart Live. If it persists, check that no copy named `AbletonMCP` sits inside the Live app bundle (`…/Contents/App-Resources/MIDI Remote Scripts/`) — it shadows the User Library copy, and Live updates have been seen to restore an old one there. |
 | Claude Desktop: *"AbletonMCP didn't respond within 2 minutes"* | On macOS, check for a pending *"uv wants to access files in your Documents folder"* prompt and allow it, then restart the client. |
 | *"Could not connect to Ableton"* | Live must be running with AbletonMCP selected as a Control Surface; check that port 9877 is free. |
+| *"Authentication required"* | The MCP server is older than the Remote Script (2.0 wants a session token). Update the server, or point your client at this version. |
+| *"Invalid session token"* | Live restarted and wrote a new token; the server reads it again on the next call. If the server runs as another user or in a container, set `ABLETON_MCP_TOKEN`. |
 | Live's log | `~/Library/Preferences/Ableton/Live <version>/Log.txt` — lines tagged `(AbletonMCP)` |
 
 ## Development

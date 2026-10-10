@@ -6,10 +6,12 @@ Guidance for AI coding agents working in this repository.
 
 An MCP server (`MCP_Server/`, Python 3.10+, FastMCP) that controls Ableton Live
 through a MIDI Remote Script (`AbletonMCP_Remote_Script/__init__.py`) running
-inside Live's embedded Python. They talk JSON over TCP on `127.0.0.1:9877`: one
-JSON object per request, one per response, no framing (the reader parses until
-the buffer is valid JSON). Forked from `ahujasid/ableton-mcp`, whose remote is
-`upstream`.
+inside Live's embedded Python. They talk JSON over TCP on `127.0.0.1:9877`,
+protocol 2: one JSON object per line each way, requests carry an `id` the reply
+echoes, and the first request is `hello` with the per-launch token Live writes
+to `~/.ableton-mcp/live-session.json` (mode 600). Bare objects without a
+newline (protocol 1, older clients) are still parsed, but need the token too.
+Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 
 ## Layout
 
@@ -17,7 +19,8 @@ the buffer is valid JSON). Forked from `ahujasid/ableton-mcp`, whose remote is
 |---|---|
 | `AbletonMCP_Remote_Script/__init__.py` | The Live-side script. Single file: the installer copies only this file. |
 | `MCP_Server/bundled_ableton_remote_script/AbletonMCP_init.py` | **Byte-identical copy** of the script, shipped in the wheel. |
-| `MCP_Server/server.py` | Connection handling and the original tools; registers `extended_tools` at the bottom. |
+| `MCP_Server/server.py` | The shared connection and the original tools; registers `extended_tools` at the bottom. |
+| `MCP_Server/connection.py` | `AbletonConnection`: hello + token, line framing, reply ids, fallback to protocol 1 for scripts before 2.0. |
 | `MCP_Server/extended_tools.py` | All newer tools, written in terms of the generic commands (`lom_get/set/call`, `batch`, …). |
 | `MCP_Server/tooling.py` | `register_tool`: annotations, profiles (`ABLETON_MCP_PROFILE`), sync tools off the event loop, errors as MCP tool errors. |
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
@@ -54,30 +57,38 @@ uv run ableton-mcp-doctor                      # diagnose versions, copies, conn
    checks every handler is advertised).
 3. **Register commands in the handler table** (`_command_handlers` /
    `_lom_command_handlers`). Never add `if/elif` dispatch.
-4. **Every LOM access runs on Live's main thread.** `_process_command` marshals
-   everything except `OFF_THREAD_COMMANDS` (which must not touch the LOM). Long
-   operations go in `LONG_RUNNING_COMMANDS` *and* in the server's
-   `long_running_commands` with a slightly larger value.
+4. **There are no threads.** The sockets are non-blocking and polled on Live's
+   main thread (a `Live.Base.Timer` every 10 ms, `update_display` as fallback);
+   a command runs inside that poll, so a handler must never block or wait for
+   Live to change. Waiting belongs to the server (poll again) or to a deferred
+   reply like `poll_events` with `wait`. Commands that can take long get a
+   larger timeout in `connection.LONG_RUNNING_COMMANDS` on the server.
+   `hello` and waiting `poll_events` are handled by the transport
+   (`_handle_request`) because they act on the connection.
 5. **Read-only commands go in `READ_ONLY_COMMANDS`**, read-only LOM methods in
    `READ_ONLY_METHODS` (methods named `get_*`/`is_*` count too), and a batch
-   of read-only steps is read-only. Everything else gets
-   `Song.end_undo_step()` called after it (see Undo below).
+   of read-only steps is read-only. Everything else runs between
+   `Song.begin_undo_step()` and `Song.end_undo_step()` (see Undo below).
 6. **Stay compatible with Live's Python**: no f-strings or Python-3.8+-only
    syntax in the script; it must import with `_Framework` stubbed (tests do this).
-7. **Private names are blocked** in paths (`lom_check_name`); keep it that way —
-   the socket is unauthenticated.
+7. **Private names are blocked** in paths (`lom_check_name`); keep it that way.
+   The token keeps other users and web pages out, not other programs running
+   as this user. A connection whose first byte is not `{` is dropped unanswered
+   (a browser's POST to localhost would otherwise run its JSON body line).
 8. Live loads the script once per launch: changes need a Live restart to take
    effect.
 
 ## Live behaviour verified on Live 12.3.5 (don't "fix" these back)
 
 - **Undo:** Live appends every script change to one open undo step until the
-  user acts, so one Cmd+Z would revert all agent edits. Calling
-  `end_undo_step()` after each modifying command gives one step per command.
-  `begin_undo_step()`/`end_undo_step()` *around* a batch split it into two steps
-  instead, so batches don't use it. Parameter changes (volume, tempo, mute) are
-  always a separate step from structural ones (name, color, create) — that is
-  Live, not a bug.
+  user acts, so one Cmd+Z would revert all agent edits. From a
+  `schedule_message` callback, `end_undo_step()` after each command was enough;
+  from a `Live.Base.Timer` callback (12.3.8) it is not, and only
+  `begin_undo_step()` before plus `end_undo_step()` after each modifying
+  command keeps one step per command. Parameter changes (volume, tempo, mute)
+  are always a separate step from structural ones (name, color, create), and
+  Live may still merge two changes of the *same* parameter made within a few
+  hundred ms (like a knob turn) — that is Live, not a bug.
 - **Value objects outside `Live.*`:** `RoutingType` reports module `Track` and has
   no `_live_ptr`; `_lom_value` turns any non-builtin object into a `$ref`.
 - **Vector types:** some lists are Live vector classes, not tuples;
@@ -98,9 +109,13 @@ Measured on Live 12.3.8:
   dBFS = 76 × meter − 70 (a 0 dBFS sine reads 0.921; 0 → −70 dB, 1 → +6 dB).
   They show smoothed peaks, and their listeners fire only when the value
   changes.
-- **Latency:** a main-thread command takes ~410 ms round trip, an off-thread
-  one ~200 ms: Live's Python only lets the socket thread run on its ~100 ms
-  tick. Batch steps instead of making several calls.
+- **Latency:** with the socket polled by a 10 ms `Live.Base.Timer` on the main
+  thread (script 2.0) a command takes ~10 ms round trip (`get_session_overview`
+  ~20 ms). The old socket-thread design took ~410 ms: Live's Python only lets a
+  background thread run on its ~100 ms tick. Changing the set from the timer
+  callback works. Batching still saves round trips.
+- `Live.Base.Timer(callback=..., interval=<ms>, repeat=True).start()` exists in
+  Live 12 (Ableton's Move and MxDCore scripts use it).
 - `Track.insert_device(name[, index])` inserts a native device by its browser
   name and returns the Device; `create_audio_track`/`create_midi_track`
   return the new Track.

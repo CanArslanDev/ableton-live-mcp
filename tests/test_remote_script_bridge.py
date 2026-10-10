@@ -14,6 +14,7 @@ stubbed and the class is instantiated without ``__init__`` (which would open a
 socket). No Ableton, no network.
 """
 
+import errno
 import importlib.util
 import json
 import sys
@@ -95,42 +96,65 @@ def test_repo_and_bundled_copies_are_identical():
 
 # ------------------------------------------------------------------ framing
 
-class FakeClient(object):
-    """Hands out prepared chunks, then EOF. Records what was written back."""
+class FakeSocket(object):
+    """A non-blocking client socket: one prepared chunk per recv(), then
+    "would block" (or EOF with eof=True). Records what the script sent."""
 
-    def __init__(self, chunks):
-        self._chunks = list(chunks)
-        self.sent = []
+    def __init__(self, chunks=(), eof=True, allowance=None):
+        self.chunks = list(chunks)
+        self.eof = eof
+        # Bytes the kernel would take before send() blocks (None: unlimited)
+        self.allowance = allowance
+        self.sent = bytearray()
         self.closed = False
 
-    def settimeout(self, _timeout):
-        pass
-
     def recv(self, _size):
-        return self._chunks.pop(0) if self._chunks else b""
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.eof:
+            return b""
+        raise BlockingIOError(errno.EAGAIN, "would block")
 
-    def sendall(self, data):
-        self.sent.append(data)
+    def send(self, data):
+        count = len(data)
+        if self.allowance is not None:
+            if not self.allowance:
+                raise BlockingIOError(errno.EAGAIN, "would block")
+            count = min(count, self.allowance)
+            self.allowance -= count
+        self.sent += bytes(data[:count])
+        return count
 
     def close(self):
         self.closed = True
 
+    def replies(self):
+        return [json.loads(line) for line in bytes(self.sent).split(b"\n") if line.strip()]
 
-def _serve(script_module, chunks):
-    """Run one client session and decode whatever it wrote back."""
+
+def make_transport(script_module, token=None, echo=True):
+    """An instance with the transport set up but no listening socket."""
     inst = make_instance(script_module)
+    inst._transport_init()
     inst.running = True
+    inst._session_token = token
+    inst.client_type = script_module._Client
     received = []
+    if echo:
+        def _process(command):
+            received.append(command)
+            return {"status": "success", "result": {"echo": command.get("type")}}
+        inst._process_command = _process
+    return inst, received
 
-    def _process(command):
-        received.append(command)
-        return {"status": "success", "result": {"echo": command.get("type")}}
 
-    inst._process_command = _process
-    client = FakeClient(chunks)
-    inst._handle_client(client)
-    replies = [json.loads(frame.decode("utf-8")) for frame in client.sent]
-    return received, replies
+def serve(inst, sock, polls=3):
+    """Poll a client the way Live's timer would."""
+    client = inst.client_type(sock, ("127.0.0.1", 50000))
+    inst._clients.append(client)
+    for _ in range(polls):
+        inst._poll_sockets()
+    return client
 
 
 def test_command_split_mid_utf8_character_still_parses(script_module):
@@ -147,31 +171,53 @@ def test_command_split_mid_utf8_character_still_parses(script_module):
     split = payload.index(b"\xc3") + 1  # between the two bytes of 'é'
     assert payload[:split].endswith(b"\xc3")
 
-    received, replies = _serve(script_module, [payload[:split], payload[split:]])
+    inst, received = make_transport(script_module)
+    sock = FakeSocket([payload[:split], payload[split:]])
+    serve(inst, sock)
 
     assert len(received) == 1
     assert received[0]["params"]["name"] == "café été"
-    assert replies == [{"status": "success", "result": {"echo": "set_clip_name"}}]
+    assert sock.replies() == [{"status": "success", "result": {"echo": "set_clip_name"}}]
 
 
 def test_command_split_across_many_chunks_parses_once(script_module):
     payload = json.dumps({"type": "get_session_info", "params": {}}).encode("utf-8")
     chunks = [payload[i:i + 3] for i in range(0, len(payload), 3)]
 
-    received, replies = _serve(script_module, chunks)
+    inst, received = make_transport(script_module)
+    sock = FakeSocket(chunks)
+    serve(inst, sock)
 
     assert len(received) == 1
-    assert len(replies) == 1
+    assert len(sock.replies()) == 1
 
 
 def test_back_to_back_commands_each_get_one_reply(script_module):
     first = json.dumps({"type": "start_playback", "params": {}}).encode("utf-8")
     second = json.dumps({"type": "stop_playback", "params": {}}).encode("utf-8")
 
-    received, replies = _serve(script_module, [first, second])
-
+    # Protocol 1: bare objects in separate chunks
+    inst, received = make_transport(script_module)
+    sock = FakeSocket([first, second])
+    serve(inst, sock)
     assert [c["type"] for c in received] == ["start_playback", "stop_playback"]
-    assert len(replies) == 2
+    assert len(sock.replies()) == 2
+
+    # Protocol 2: several lines in one chunk
+    inst, received = make_transport(script_module)
+    sock = FakeSocket([first + b"\n" + second + b"\n"])
+    serve(inst, sock)
+    assert [c["type"] for c in received] == ["start_playback", "stop_playback"]
+    assert len(sock.replies()) == 2
+
+
+def test_replies_end_with_a_newline_and_echo_the_request_id(script_module):
+    inst, _received = make_transport(script_module)
+    request = json.dumps({"id": 41, "type": "lom_get", "params": {}}).encode("utf-8")
+    sock = FakeSocket([request + b"\n"])
+    serve(inst, sock)
+    assert bytes(sock.sent).endswith(b"\n")
+    assert sock.replies() == [{"status": "success", "result": {"echo": "lom_get"}, "id": 41}]
 
 
 def test_oversized_request_is_refused_instead_of_buffered_forever(
@@ -180,11 +226,155 @@ def test_oversized_request_is_refused_instead_of_buffered_forever(
     monkeypatch.setattr(script_module, "MAX_REQUEST_BYTES", 1024)
     junk = b'{"type": "' + b"x" * 4096
 
-    received, replies = _serve(script_module, [junk, junk])
+    inst, received = make_transport(script_module)
+    sock = FakeSocket([junk, junk], eof=False)
+    serve(inst, sock)
 
     assert received == []
-    assert len(replies) == 1
-    assert replies[0]["status"] == "error"
+    replies = sock.replies()
+    assert len(replies) == 1 and replies[0]["status"] == "error"
+    assert sock.closed
+
+
+def test_a_chunk_ending_in_a_brace_mid_command_waits_for_the_rest(script_module):
+    """A "}" that closes a nested object mid-command must not be mistaken for
+    the end of the request."""
+    command = {"type": "lom_get", "params": {"path": "live_set", "properties": ["tempo"]}}
+    payload = json.dumps(command).encode("utf-8")
+    cut = payload.index(b"}") + 1  # right after the inner object closes
+
+    inst, received = make_transport(script_module)
+    sock = FakeSocket([payload[:cut], payload[cut:]])
+    serve(inst, sock)
+    assert received == [command]
+    assert len(sock.replies()) == 1
+
+
+def test_a_connection_that_does_not_send_json_is_dropped_unanswered(script_module):
+    """A web page can make a browser POST to localhost; with line framing the
+    JSON body would otherwise run as a command."""
+    body = json.dumps({"type": "lom_call", "params": {"path": "live_set",
+                                                       "method": "stop_playing"}})
+    http = ("POST / HTTP/1.1\r\nHost: 127.0.0.1:9877\r\nContent-Type: text/plain\r\n\r\n"
+            + body + "\n").encode("utf-8")
+    inst, received = make_transport(script_module)
+    sock = FakeSocket([http], eof=False)
+    serve(inst, sock)
+    assert received == []
+    assert bytes(sock.sent) == b""
+    assert sock.closed
+
+
+def test_commands_wait_for_hello_with_the_session_token(script_module):
+    def line(command_type, **params):
+        return json.dumps({"type": command_type, "params": params}).encode("utf-8") + b"\n"
+
+    inst, received = make_transport(script_module, token="s3cret")
+    inst._get_script_info = lambda: {"script_version": "test"}
+    sock = FakeSocket([line("get_script_info"), line("lom_get", path="live_set"),
+                       line("hello", token="s3cret"), line("lom_get", path="live_set")],
+                      eof=False)
+    serve(inst, sock)
+    replies = sock.replies()
+    assert replies[0] == {"status": "success", "result": {"echo": "get_script_info"}}
+    assert replies[1]["status"] == "error" and "Authentication required" in replies[1]["message"]
+    assert replies[2] == {"status": "success", "result": {"script_version": "test"}}
+    assert replies[3] == {"status": "success", "result": {"echo": "lom_get"}}
+    assert [c["type"] for c in received] == ["get_script_info", "lom_get"]
+
+
+def test_a_wrong_token_closes_the_connection(script_module):
+    inst, received = make_transport(script_module, token="s3cret")
+    hello = json.dumps({"type": "hello", "params": {"token": "guess"}}).encode("utf-8")
+    after = json.dumps({"type": "lom_get", "params": {}}).encode("utf-8")
+    sock = FakeSocket([hello + b"\n" + after + b"\n"], eof=False)
+    serve(inst, sock)
+    replies = sock.replies()
+    assert len(replies) == 1 and "Invalid session token" in replies[0]["message"]
+    assert received == []
+    assert sock.closed
+
+
+def test_partial_sends_are_finished_on_later_polls(script_module):
+    inst, _received = make_transport(script_module)
+    request = json.dumps({"id": 1, "type": "x" * 100, "params": {}}).encode("utf-8")
+    sock = FakeSocket([request + b"\n"], eof=False, allowance=16)
+    client = serve(inst, sock, polls=1)
+    assert len(sock.sent) == 16 and client.outbox
+    for _ in range(20):
+        sock.allowance = 16  # the client read some
+        inst._poll_sockets()
+    assert sock.replies()[0]["id"] == 1 and not client.outbox
+
+
+def test_a_request_sent_just_before_closing_still_runs(script_module):
+    inst, received = make_transport(script_module)
+    sock = FakeSocket([b'{"type": "stop_playback", "params": {}}'], eof=True)
+    client = serve(inst, sock, polls=2)
+    assert [c["type"] for c in received] == ["stop_playback"]
+    assert sock.closed and client not in inst._clients
+
+
+def test_poll_events_can_wait_for_the_next_event(script_module):
+    inst, _received = make_transport(script_module, echo=False)
+    inst._lom_init()
+    request = json.dumps({"id": 7, "type": "poll_events",
+                          "params": {"since": 0, "wait": 5}}).encode("utf-8")
+    sock = FakeSocket([request + b"\n"], eof=False)
+    client = serve(inst, sock, polls=2)
+    assert sock.replies() == [] and client.waiting is not None
+    inst._push_event({"observer_id": 1, "property": "tempo", "value": 99.0})
+    inst._poll_sockets()
+    reply = sock.replies()[0]
+    assert reply["id"] == 7 and reply["result"]["events"][0]["value"] == 99.0
+
+
+def test_poll_events_wait_ends_without_events(script_module):
+    import time as _time
+
+    inst, _received = make_transport(script_module, echo=False)
+    inst._lom_init()
+    request = json.dumps({"type": "poll_events", "params": {"since": 0, "wait": 0.05}})
+    sock = FakeSocket([request.encode("utf-8") + b"\n"], eof=False)
+    serve(inst, sock, polls=1)
+    assert sock.replies() == []
+    _time.sleep(0.06)
+    inst._poll_sockets()
+    assert sock.replies()[0]["result"]["events"] == []
+
+
+def test_split_messages_handles_both_framings(script_module):
+    split = script_module.split_messages
+    assert split(b'{"a": 1}\n{"b": 2}\n{"c"') == ([b'{"a": 1}', b'{"b": 2}'], b'{"c"')
+    assert split(b'{"a": {"b": 1}') == ([], b'{"a": {"b": 1}')
+    assert split(b'  {"a": 1}  ') == ([b'{"a": 1}'], b"")
+    assert split(b"\n\n") == ([], b"")
+
+
+def test_the_session_file_is_private_and_removed_on_disconnect(script_module, tmp_path,
+                                                                 monkeypatch):
+    import os
+    import stat
+
+    session = tmp_path / "sub" / "live-session.json"
+    monkeypatch.setattr(script_module, "SESSION_FILE", str(session))
+    inst, _received = make_transport(script_module)
+    token = inst._publish_session()
+    data = json.loads(session.read_text())
+    assert data["token"] == token and len(token) == 32
+    assert data["port"] == script_module.DEFAULT_PORT
+    if os.name == "posix":
+        assert stat.S_IMODE(session.stat().st_mode) == 0o600
+        assert stat.S_IMODE(session.parent.stat().st_mode) == 0o700
+    inst._session_token = token
+    inst._withdraw_session()
+    assert not session.exists()
+
+
+def test_auth_can_be_switched_off(script_module, monkeypatch):
+    monkeypatch.setattr(script_module, "AUTH_REQUIRED", False)
+    inst, _received = make_transport(script_module)
+    assert inst._publish_session() is None
 
 
 # ------------------------------------------------------------- browser tree
@@ -234,38 +424,3 @@ def test_browser_tree_caps_a_huge_folder_and_flags_it(script_module):
 
     assert len(category["children"]) == 64
     assert category["has_more"] is True
-
-
-
-def test_a_chunk_ending_in_a_brace_mid_command_waits_for_the_rest(script_module):
-    """Parsing is skipped until the buffer ends with "}", and a "}" that closes
-    a nested object mid-command must not be mistaken for the end."""
-    inst = make_instance(script_module)
-    command = {"type": "lom_get", "params": {"path": "live_set", "properties": ["tempo"]}}
-    payload = json.dumps(command).encode("utf-8")
-    cut = payload.index(b"}") + 1  # right after the inner object closes
-    inst.running = True
-    seen = []
-    inst._process_command = lambda c: seen.append(c) or {"status": "success", "result": {}}
-
-    class Client(object):
-        def __init__(self, chunks):
-            self.chunks = list(chunks)
-            self.sent = []
-
-        def settimeout(self, _value):
-            pass
-
-        def recv(self, _size):
-            return self.chunks.pop(0) if self.chunks else b""
-
-        def sendall(self, data):
-            self.sent.append(data)
-
-        def close(self):
-            pass
-
-    client = Client([payload[:cut], payload[cut:]])
-    inst._handle_client(client)
-    assert seen == [command]
-    assert len(client.sent) == 1

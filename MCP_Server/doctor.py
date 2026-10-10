@@ -8,12 +8,16 @@ it never changes the set or any file.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import plistlib
 import re
-import socket
+import stat
 import sys
+import time
 from pathlib import Path
+
+from .connection import AbletonConnection, read_session, session_file
 
 from .remote_script_install import (
     EXPECTED_REMOTE_SCRIPT_VERSION,
@@ -121,54 +125,79 @@ def live_versions() -> list[str]:
     return versions
 
 
-def _request(sock: socket.socket, command: str, params: dict | None = None) -> dict:
-    sock.sendall(json.dumps({"type": command, "params": params or {}}).encode("utf-8"))
-    buffer = b""
-    while True:
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise ConnectionError("Live closed the connection")
-        buffer += chunk
-        if not buffer.rstrip().endswith(b"}"):
-            continue
+def check_session() -> dict:
+    """The file where Live publishes the session token (Remote Script 2.0+)."""
+    path = session_file()
+    info = read_session()
+    if info is None:
+        return _check("session", "info", f"No session file at {path}: Remote Script 2.0 "
+                      "is not running, or Live runs with ABLETON_MCP_AUTH=0")
+    detail = f"{path} (Live pid {info.get('pid')}, script v{info.get('script_version')})"
+    if os.name == "posix":
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            return _check("session", "warn", f"{detail} is readable by other users "
+                          f"(mode {mode:o})", f"chmod 600 {path}")
+    pid = info.get("pid")
+    if isinstance(pid, int) and os.name == "posix":
         try:
-            return json.loads(buffer.decode("utf-8"))
-        except ValueError:
-            continue
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return _check("session", "warn", f"{detail} is left over: that Live is not running",
+                          "Start Live; it writes a fresh file.")
+        except PermissionError:
+            pass
+    return _check("session", "ok", detail)
 
 
 def check_connection(host: str, port: int) -> tuple[list[dict], dict | None]:
-    """Connection and script version checks, plus Live's dialog/CPU state."""
-    try:
-        sock = socket.create_connection((host, port), timeout=3.0)
-    except OSError as e:
-        return [_check("connection", "fail", f"Nothing answers on {host}:{port} ({e})",
-                       "Start Live and select AbletonMCP as a Control Surface "
-                       "(Settings → Link, Tempo & MIDI), Input/Output None.")], None
+    """Connection and script version checks, round-trip time, and Live's
+    dialog/CPU state."""
+    connection = AbletonConnection(host=host, port=port)
+    if not connection.connect():
+        reason = connection.last_error or "unknown error"
+        if reason.startswith("Nothing answers"):
+            return [_check("connection", "fail", reason,
+                           "Start Live and select AbletonMCP as a Control Surface "
+                           "(Settings → Link, Tempo & MIDI), Input/Output None.")], None
+        return [_check("connection", "fail", f"Live refused the connection: {reason}",
+                       "Restart Live so it writes a fresh token, and run the server as "
+                       "the same user as Live (or set ABLETON_MCP_TOKEN).")], None
     checks: list[dict] = []
     state = None
     try:
-        sock.settimeout(15.0)
-        info = _request(sock, "get_script_info").get("result") or {}
+        info = connection.send_command("get_script_info")
         version = info.get("script_version")
         if version == EXPECTED_REMOTE_SCRIPT_VERSION:
             checks.append(_check("connection", "ok",
-                                 f"Remote Script v{version} on {host}:{port}"))
+                                 f"Remote Script v{version} on {host}:{port}, protocol "
+                                 f"{connection.protocol}, token "
+                                 f"{'checked' if info.get('auth_required') else 'not required'}"))
         else:
             checks.append(_check("connection", "warn",
                                  f"Live runs Remote Script v{version}, this server expects "
                                  f"v{EXPECTED_REMOTE_SCRIPT_VERSION}",
                                  "Run `ableton-mcp-install-script` and restart Live. If the "
                                  "version does not change, see the bundle_copy check."))
-        reply = _request(sock, "lom_get", {"path": "live_app", "properties": [
-            "open_dialog_count", "current_dialog_message", "average_process_usage",
-            "peak_process_usage"]})
-        state = reply.get("result") if reply.get("status") == "success" else None
+        timings = []
+        for _ in range(5):
+            started = time.perf_counter()
+            state = connection.send_command("lom_get", {"path": "live_app", "properties": [
+                "open_dialog_count", "current_dialog_message", "average_process_usage",
+                "peak_process_usage"]})
+            timings.append((time.perf_counter() - started) * 1000)
+        timings.sort()
+        transport = info.get("transport") or "socket thread (before 2.0)"
+        checks.append(_check("latency", "warn" if timings[2] > 250 else "ok",
+                             f"{timings[2]:.0f} ms per command (median of 5; {transport})",
+                             None if timings[2] <= 250 else
+                             "Update the Remote Script to 2.0 (polled on Live's main "
+                             "thread) and restart Live."))
     except Exception as e:
         checks.append(_check("connection", "fail", f"Connected, but the script did not "
                              f"answer properly: {e}", "Restart Live; then check live_log."))
     finally:
-        sock.close()
+        connection.disconnect()
     if state:
         dialogs = state.get("open_dialog_count")
         if isinstance(dialogs, int) and dialogs > 0:
@@ -228,6 +257,7 @@ def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
     versions = live_versions()
     if versions:
         checks.append(_check("live", "info", ", ".join(versions)))
+    checks.append(check_session())
     connection, _state = check_connection(host, port)
     checks += connection
     checks.append(check_live_log())
@@ -238,7 +268,6 @@ def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
-    import os
 
     parser = argparse.ArgumentParser(description="Diagnose the Ableton MCP setup.")
     parser.add_argument("--host", default=os.environ.get("ABLETON_HOST", "127.0.0.1"))

@@ -163,7 +163,7 @@ def test_batch_runs_in_one_undo_step_and_stops_on_error(script):
         {"type": "lom_get", "params": {"path": "live_set tracks 99"}},
         {"type": "lom_set", "params": {"path": "live_set", "property": "tempo", "value": 90}},
     ])
-    assert script._song.undo_log == ["end"]  # the whole batch is one undo step
+    assert script._song.undo_log == ["begin", "end"]  # the whole batch is one undo step
     assert result["completed"] == 2 and result["failed"] == 1
     assert script._song.tracks[-1].name == "Pad"
     assert script._song.tempo == 120.0  # never reached
@@ -176,7 +176,7 @@ def test_batch_can_continue_past_errors_and_rejects_nesting(script):
     ])
     assert result["results"][0]["status"] == "error"
     assert script._song.tempo == 90.0
-    assert script._song.undo_log == ["end"]
+    assert script._song.undo_log == ["begin", "end"]
 
 
 # ── Observers ───────────────────────────────────────────────────────────────
@@ -286,14 +286,33 @@ def test_every_new_command_is_advertised(script):
 # ── End to end: MCP tools → TCP → Remote Script → fake Live ─────────────────
 
 @pytest.fixture
-def live_server(script):
+def live_server(script, tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
     module = script.module
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     module.DEFAULT_PORT = port
-    script.client_threads = []
+    session = tmp_path / "live-session.json"
+    module.SESSION_FILE = str(session)
+    monkeypatch.setenv("ABLETON_MCP_SESSION_FILE", str(session))
+    script._transport_init()
     script.start_server()
+    assert script._session_token, "the script should publish a session token"
+
+    # Stand-in for Live.Base.Timer: poll the sockets from one "main" thread
+    ticking = threading.Event()
+    ticking.set()
+
+    def tick():
+        while ticking.is_set():
+            script._poll_sockets()
+            _time.sleep(0.002)
+
+    ticker = threading.Thread(target=tick, daemon=True)
+    ticker.start()
     from MCP_Server.server import AbletonConnection
     connection = AbletonConnection(host="127.0.0.1", port=port)
 
@@ -313,9 +332,14 @@ def live_server(script):
             return text
 
     yield script, call
-    script.running = False
-    script.server.close()
     connection.disconnect()
+    ticking.clear()
+    ticker.join()
+    script.disconnect = lambda: None
+    script.running = False
+    for client in list(script._clients):
+        script._drop_client(client)
+    script.server.close()
 
 
 def test_tools_mixer_tracks_and_scenes(live_server):
@@ -467,7 +491,7 @@ def test_value_objects_outside_the_live_module_become_references(script):
     assert all("$id" in i for i in items)
 
 
-def test_each_modifying_command_closes_its_undo_step(script):
+def test_each_modifying_command_is_its_own_undo_step(script):
     run(script, "lom_get", path="live_set", properties=["tempo"])
     assert script._song.undo_log == []
     run(script, "lom_set", path="live_set", property="tempo", value=99)
@@ -475,7 +499,7 @@ def test_each_modifying_command_closes_its_undo_step(script):
         {"type": "lom_set", "params": {"path": "live_set", "property": "tempo", "value": 98}},
         {"type": "lom_set", "params": {"path": "live_set", "property": "swing_amount",
                                        "value": 0.1}}])
-    assert script._song.undo_log == ["end", "end"]
+    assert script._song.undo_log == ["begin", "end", "begin", "end"]
 
 
 def test_generators_follow_the_sets_meter_and_key(live_server):
@@ -657,7 +681,7 @@ def test_reading_never_closes_an_undo_step(script):
     run(script, "batch", commands=[
         {"type": "lom_get", "params": {"path": "live_set", "properties": ["tempo"]}},
         {"type": "lom_set", "params": {"path": "live_set", "property": "tempo", "value": 97}}])
-    assert script._song.undo_log == ["end"]
+    assert script._song.undo_log == ["begin", "end"]
 
 
 def test_bad_requests_are_not_logged_as_crashes(script):
@@ -692,3 +716,31 @@ def test_a_refused_command_keeps_the_connection(live_server):
     assert connection.sock is sock
     assert connection.send_command("lom_get", {"path": "live_set",
                                                "properties": ["tempo"]})["tempo"] == 120.0
+
+
+def test_doctor_checks_the_session_and_the_round_trip(live_server):
+    from MCP_Server import doctor
+
+    script, _call = live_server
+    session = doctor.check_session()
+    assert session["status"] == "ok", session
+    checks, state = doctor.check_connection("127.0.0.1", script.module.DEFAULT_PORT)
+    by_name = {c["check"]: c for c in checks}
+    assert "protocol 2" in by_name["connection"]["detail"]
+    assert "token checked" in by_name["connection"]["detail"]
+    assert by_name["latency"]["status"] == "ok"
+    assert state is not None
+
+
+def test_get_live_events_waits_on_the_script(live_server):
+    import threading
+
+    script, call = live_server
+    since = call("watch_live", path="live_set", property="tempo")["events_since"]
+    timer = threading.Timer(0.3, lambda: setattr(script._song, "tempo", 99.0))
+    timer.start()
+    try:
+        events = call("get_live_events", since=since, wait_seconds=5)
+    finally:
+        timer.join()
+    assert [e["value"] for e in events["events"]] == [99.0]

@@ -2,18 +2,15 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 from _Framework.ControlSurface import ControlSurface
+import binascii
+import errno
+import hmac
 import os
 import socket
 import json
 import threading
 import time
 import traceback
-
-# Change queue import for Python 2
-try:
-    import Queue as queue  # Python 2
-except ImportError:
-    import queue  # Python 3
 
 # Constants for socket communication
 DEFAULT_PORT = 9877
@@ -38,10 +35,35 @@ MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
 # Bumped whenever the TCP command surface changes; the MCP server compares
 # this to EXPECTED_REMOTE_SCRIPT_VERSION.
-SCRIPT_VERSION = "1.9.0"
-PROTOCOL_VERSION = 1
+SCRIPT_VERSION = "2.0.0"
+# 2: newline-terminated JSON, request ids echoed, hello with a session token.
+# Requests without a newline (protocol 1 clients) are still understood.
+PROTOCOL_VERSION = 2
+
+# Where the script publishes its port and a token made fresh at every launch.
+# A client must send {"type": "hello", "params": {"token": ...}} before any
+# other command; only this user can read the file. Set ABLETON_MCP_AUTH=0 in
+# Live's environment to accept clients that cannot send hello.
+SESSION_FILE = os.environ.get("ABLETON_MCP_SESSION_FILE") or os.path.join(
+    os.path.expanduser("~"), ".ableton-mcp", "live-session.json")
+AUTH_REQUIRED = os.environ.get("ABLETON_MCP_AUTH", "1").lower() not in ("0", "false", "no")
+
+# Sockets are polled on Live's main thread: by a Live.Base.Timer every
+# TIMER_INTERVAL_MS, and on every update_display (~100 ms) as a fallback.
+# A command is read, run and answered in the same callback, instead of
+# waiting for a socket thread that Live only lets run on its 100 ms tick.
+TIMER_INTERVAL_MS = 10
+# Stop starting new commands this long into one poll, so Live's UI keeps up
+# with a client that floods the socket.
+POLL_BUDGET_SECONDS = 0.05
+MAX_CLIENTS = 8
+# A client that stops reading its responses is dropped past this backlog.
+MAX_RESPONSE_BACKLOG = 64 * 1024 * 1024
+# Longest a poll_events request may wait for an event
+MAX_EVENT_WAIT_SECONDS = 30.0
 
 SCRIPT_CAPABILITIES = [
+    "hello",
     "get_session_info",
     "get_track_info",
     "get_script_info",
@@ -500,7 +522,7 @@ class LomMixin(object):
             command_type = command.get("type", "")
             handler = handlers.get(command_type)
             if handler is None or command_type in ("batch",) \
-                    or command_type in self.OFF_THREAD_COMMANDS:
+                    or command_type in self.UNBATCHED_COMMANDS:
                 outcome = {"index": index, "type": command_type, "status": "error",
                            "message": "Command not allowed in a batch: " + command_type}
             else:
@@ -875,6 +897,57 @@ class LomMixin(object):
         return result
 
 
+def _would_block(error):
+    """True when a non-blocking socket call simply had nothing to do."""
+    return getattr(error, "errno", None) in (
+        errno.EAGAIN, errno.EWOULDBLOCK, getattr(errno, "WSAEWOULDBLOCK", 10035))
+
+
+def split_messages(buffer):
+    """Split received bytes into complete requests: (list of bytes, rest).
+
+    Protocol 2 clients end every request with a newline. A protocol 1 client
+    sends one bare JSON object, complete once it ends with "}" and parses (no
+    prefix of a JSON object is itself a complete object, so this cannot fire
+    early).
+    """
+    messages = []
+    while True:
+        newline = buffer.find(b"\n")
+        if newline < 0:
+            break
+        line, buffer = buffer[:newline].strip(), buffer[newline + 1:]
+        if line:
+            messages.append(line)
+    tail = buffer.strip()
+    if tail.endswith(b"}"):
+        try:
+            json.loads(tail.decode("utf-8"))
+        except ValueError:  # includes UnicodeDecodeError: not all here yet
+            pass
+        else:
+            messages.append(tail)
+            buffer = b""
+    return messages, buffer
+
+
+class _Client(object):
+    """One connection. Everything about it happens on Live's main thread."""
+
+    def __init__(self, sock, address):
+        self.sock = sock
+        self.address = address
+        self.inbox = b""
+        self.outbox = bytearray()
+        self.requests = []
+        self.checked_first_byte = False
+        self.authenticated = False
+        self.eof = False
+        self.closing = False
+        # A poll_events that waits for an event: (request id, params, deadline)
+        self.waiting = None
+
+
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
     return AbletonMCP(c_instance)
@@ -891,10 +964,7 @@ class AbletonMCP(LomMixin, ControlSurface):
         )
         
         # Socket server for communication
-        self.server = None
-        self.client_threads = []
-        self.server_thread = None
-        self.running = False
+        self._transport_init()
         
         # Cache the song reference for easier access
         self._song = self.song()
@@ -927,6 +997,7 @@ class AbletonMCP(LomMixin, ControlSurface):
         """Called when Ableton closes or the control surface is removed"""
         self.log_message("AbletonMCP disconnecting...")
         self.running = False
+        self._stop_timer()
 
         try:
             self._teardown_passive_listeners()
@@ -937,174 +1008,321 @@ class AbletonMCP(LomMixin, ControlSurface):
             self._teardown_observers()
         except Exception as e:
             self.log_message("Observer teardown error: " + str(e))
-        
-        # Stop the server
+
+        for client in list(self._clients):
+            self._drop_client(client)
         if self.server:
             try:
                 self.server.close()
-            except:
+            except Exception:
                 pass
-        
-        # Wait for the server thread to exit
-        if self.server_thread and self.server_thread.is_alive():
-            self.server_thread.join(1.0)
-            
-        # Clean up any client threads
-        for client_thread in self.client_threads[:]:
-            if client_thread.is_alive():
-                # We don't join them as they might be stuck
-                self.log_message("Client thread still alive during disconnect")
-        
+            self.server = None
+        self._withdraw_session()
+
         ControlSurface.disconnect(self)
         self.log_message("AbletonMCP disconnected")
-    
+
+    # ── Transport: non-blocking sockets polled on Live's main thread ─────────
+    #
+    # Live's Python lets a background thread run only on its ~100 ms tick, so
+    # the old design (socket thread → schedule_message → main thread → queue →
+    # socket thread) spent three or four ticks, about 410 ms, on every command.
+    # Here the main thread itself accepts, reads, runs and answers, every
+    # TIMER_INTERVAL_MS. No threads, so no locks around the Live Object Model.
+
+    def _transport_init(self):
+        self.server = None
+        self.running = False
+        self._clients = []
+        self._polling = False
+        self._timer = None
+        self._session_token = None
+
     def start_server(self):
-        """Start the socket server in a separate thread"""
+        """Listen on the port and start polling it from Live's main thread."""
         try:
             self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server.bind((HOST, DEFAULT_PORT))
-            self.server.listen(5)  # Allow up to 5 pending connections
-            
+            self.server.listen(5)
+            self.server.setblocking(False)
             self.running = True
-            self.server_thread = threading.Thread(target=self._server_thread)
-            self.server_thread.daemon = True
-            self.server_thread.start()
-            
             self.log_message("Server started on port " + str(DEFAULT_PORT))
         except Exception as e:
             self.log_message("Error starting server: " + str(e))
             self.show_message("AbletonMCP: Error starting server - " + str(e))
-    
-    def _server_thread(self):
-        """Server thread implementation - handles client connections"""
+            return
+        self._session_token = self._publish_session()
+        self._start_timer()
+
+    def _start_timer(self):
+        """Poll every TIMER_INTERVAL_MS with Live's own timer (Live 12 has one;
+        Ableton's scripts use it). Without it, update_display polls every ~100 ms."""
+        self._timer = None
         try:
-            self.log_message("Server thread started")
-            # Set a timeout to allow regular checking of running flag
-            self.server.settimeout(1.0)
-            
-            while self.running:
-                try:
-                    # Accept connections with timeout
-                    client, address = self.server.accept()
-                    self.log_message("Connection accepted from " + str(address))
-                    self.show_message("AbletonMCP: Client connected")
-                    
-                    # Handle client in a separate thread
-                    client_thread = threading.Thread(
-                        target=self._handle_client,
-                        args=(client,)
-                    )
-                    client_thread.daemon = True
-                    client_thread.start()
-                    
-                    # Keep track of client threads
-                    self.client_threads.append(client_thread)
-                    
-                    # Clean up finished client threads
-                    self.client_threads = [t for t in self.client_threads if t.is_alive()]
-                    
-                except socket.timeout:
-                    # No connection yet, just continue
-                    continue
-                except Exception as e:
-                    if self.running:  # Only log if still running
-                        self.log_message("Server accept error: " + str(e))
-                    time.sleep(0.5)
-            
-            self.log_message("Server thread stopped")
+            import Live
+            timer = Live.Base.Timer(callback=self._on_timer, interval=TIMER_INTERVAL_MS,
+                                    repeat=True)
+            timer.start()
         except Exception as e:
-            self.log_message("Server thread error: " + str(e))
-    
-    def _handle_client(self, client):
-        """Handle communication with a connected client"""
-        self.log_message("Client handler started")
-        client.settimeout(None)  # No timeout for client socket
-        # Accumulate raw bytes, never per-chunk text. A multi-byte UTF-8
-        # character (an accented clip name, an emoji) can straddle two recv()
-        # boundaries; decoding each chunk on its own raises there, and the old
-        # code answered that with an error frame pushed into a stream the
-        # client was still reading a real response from — desynchronising the
-        # connection for good.
-        buffer = b''
+            self.log_message("No Live.Base.Timer (%s); polling every ~100 ms" % e)
+            return
+        self._timer = timer
+        self.log_message("Polling the socket every %d ms" % TIMER_INTERVAL_MS)
 
-        try:
-            while self.running:
-                try:
-                    # Receive data
-                    data = client.recv(8192)
-
-                    if not data:
-                        # Client disconnected
-                        self.log_message("Client disconnected")
-                        break
-
-                    buffer += data
-
-                    if len(buffer) > MAX_REQUEST_BYTES:
-                        buffer = b''
-                        raise ValueError(
-                            "Request exceeded %d bytes without a complete JSON command"
-                            % MAX_REQUEST_BYTES)
-
-                    # A command is one JSON object, so it can only be complete
-                    # once the buffer ends with "}". Parsing the whole buffer
-                    # after every chunk made large requests quadratic.
-                    if not buffer.rstrip().endswith(b'}'):
-                        continue
-                    try:
-                        # Only a fully received command decodes and parses.
-                        # Either error means "not all here yet", so wait.
-                        command = json.loads(buffer.decode('utf-8'))
-                    except (ValueError, UnicodeDecodeError):
-                        continue
-
-                    buffer = b''  # Clear buffer after successful parse
-
-                    if VERBOSE:
-                        self.log_message("Received command: " + str(command.get("type", "unknown")))
-
-                    # Process the command and get response
-                    response = self._process_command(command)
-
-                    # Send the response with explicit encoding
-                    client.sendall(json.dumps(response).encode('utf-8'))
-
-                except Exception as e:
-                    self.log_message("Error handling client data: " + str(e))
-                    self.log_message(traceback.format_exc())
-
-                    # Every error that reaches here leaves the request/response
-                    # stream in an unknown state, so report it and close rather
-                    # than carry on out of step with the client.
-                    error_response = {
-                        "status": "error",
-                        "message": str(e)
-                    }
-                    try:
-                        client.sendall(json.dumps(error_response).encode('utf-8'))
-                    except Exception:
-                        pass
-                    break
-        except Exception as e:
-            self.log_message("Error in client handler: " + str(e))
-        finally:
+    def _stop_timer(self):
+        timer, self._timer = getattr(self, "_timer", None), None
+        if timer is not None:
             try:
-                client.close()
-            except:
-                pass
-            self.log_message("Client handler stopped")
-    
-    # Commands that touch no Live state and may answer from the socket thread.
-    # Everything else is marshalled onto Live's main thread: the Live Object
-    # Model is not thread-safe, reads included.
-    OFF_THREAD_COMMANDS = frozenset([
-        "get_script_info",
-        "drain_passive_events",
-        "poll_events",
-    ])
+                timer.stop()
+            except Exception as e:
+                self.log_message("Timer stop failed: " + str(e))
 
-    DEFAULT_MAIN_THREAD_TIMEOUT = 10.0
+    def _on_timer(self, *_args):
+        self._poll_sockets()
+
+    def update_display(self):
+        """Live calls this every ~100 ms: keeps _Framework's tasks running and
+        polls the sockets in case the timer is missing."""
+        ControlSurface.update_display(self)
+        self._poll_sockets()
+
+    def _poll_sockets(self):
+        """Accept, read, run and answer whatever is ready, without blocking."""
+        if self._polling or not self.running:
+            return
+        self._polling = True
+        try:
+            self._accept_clients()
+            deadline = time.time() + POLL_BUDGET_SECONDS
+            for client in list(self._clients):
+                self._service_client(client, deadline)
+        except Exception as e:
+            self.log_message("Socket poll failed: " + str(e))
+            self.log_message(traceback.format_exc())
+        finally:
+            self._polling = False
+
+    def _accept_clients(self):
+        while self.server is not None:
+            try:
+                sock, address = self.server.accept()
+            except socket.error as e:
+                if not _would_block(e):
+                    self.log_message("Accept failed: " + str(e))
+                return
+            if len(self._clients) >= MAX_CLIENTS:
+                self.log_message("Refusing a connection: %d clients already connected"
+                                 % len(self._clients))
+                sock.close()
+                continue
+            # Whether accept() hands back a non-blocking socket is OS-dependent
+            sock.setblocking(False)
+            self._clients.append(_Client(sock, address))
+            self.log_message("Connection accepted from " + str(address))
+
+    def _service_client(self, client, deadline):
+        if not (client.eof or client.closing):
+            self._receive(client)
+        if client.sock is None:
+            return
+        if client.waiting is not None:
+            self._answer_waiting_poll(client)
+        while (client.requests and client.waiting is None and not client.closing
+               and time.time() < deadline):
+            self._handle_request(client, client.requests.pop(0))
+        if client.closing:
+            client.requests = []  # nothing more runs on a connection being closed
+        self._flush(client)
+        if client.sock is None:
+            return
+        finished = not (client.outbox or client.requests or client.waiting)
+        if (client.closing or client.eof) and finished:
+            self._drop_client(client)
+
+    def _receive(self, client):
+        """Read what has arrived and queue every complete request."""
+        while True:
+            try:
+                data = client.sock.recv(65536)
+            except socket.error as e:
+                if not _would_block(e):
+                    self._drop_client(client)
+                    return
+                break
+            if not data:
+                # The client is gone: run what it sent, then close
+                client.eof = True
+                client.waiting = None
+                break
+            client.inbox += data
+            if not client.checked_first_byte and client.inbox.strip():
+                client.checked_first_byte = True
+                if not client.inbox.lstrip().startswith(b"{"):
+                    # Not this protocol (e.g. an HTTP request a web page sent
+                    # to localhost): run nothing from it.
+                    self.log_message("Dropped a connection that does not send JSON")
+                    self._drop_client(client)
+                    return
+            if b"\n" in data or data.rstrip().endswith(b"}"):
+                messages, client.inbox = split_messages(client.inbox)
+                client.requests.extend(messages)
+            if len(client.inbox) > MAX_REQUEST_BYTES:
+                client.inbox = b""
+                self._reply(client, None, {
+                    "status": "error",
+                    "message": "Request exceeded %d bytes without a complete JSON command"
+                               % MAX_REQUEST_BYTES})
+                client.closing = True
+                return
+
+    # Answered before a client has authenticated
+    OPEN_COMMANDS = frozenset(["hello", "get_script_info"])
+
+    def _handle_request(self, client, raw):
+        try:
+            command = json.loads(raw.decode("utf-8"))
+            if not isinstance(command, dict):
+                raise ValueError("a request must be a JSON object")
+        except ValueError as e:
+            # Out of step with the client: say why, then close
+            self._reply(client, None, {"status": "error", "message": "Invalid request: " + str(e)})
+            client.closing = True
+            return
+        request_id = command.get("id")
+        command_type = command.get("type", "")
+        params = command.get("params") or {}
+        if VERBOSE:
+            self.log_message("Received command: " + str(command_type))
+        if command_type == "hello":
+            response = self._hello(client, params)
+        elif (self._session_token and not client.authenticated
+              and command_type not in self.OPEN_COMMANDS):
+            response = {"status": "error", "message": (
+                "Authentication required: send hello with the token from %s first "
+                "(the ableton-mcp server does this from version 1.7)." % SESSION_FILE)}
+        elif command_type == "poll_events" and params.get("wait"):
+            self._wait_for_events(client, request_id, params)
+            return
+        else:
+            response = self._process_command(command)
+        self._reply(client, request_id, response)
+
+    def _hello(self, client, params):
+        """Authenticate the connection with the token from SESSION_FILE."""
+        token = params.get("token")
+        if self._session_token is not None:
+            if not isinstance(token, string_types) or not hmac.compare_digest(
+                    token.encode("utf-8"), self._session_token.encode("utf-8")):
+                client.closing = True
+                return {"status": "error", "message": (
+                    "Invalid session token. Live writes a new one to %s at every "
+                    "launch; read it again." % SESSION_FILE)}
+        client.authenticated = True
+        return {"status": "success", "result": self._get_script_info()}
+
+    def _wait_for_events(self, client, request_id, params):
+        """poll_events with wait > 0: answer as soon as there is an event."""
+        try:
+            wait = min(max(float(params.get("wait") or 0), 0.0), MAX_EVENT_WAIT_SECONDS)
+        except (TypeError, ValueError):
+            wait = 0.0
+        client.waiting = (request_id, params, time.time() + wait)
+        self._answer_waiting_poll(client)
+
+    def _answer_waiting_poll(self, client):
+        request_id, params, deadline = client.waiting
+        response = self._invoke_handler(self._cmd_poll_events, params)
+        if (response["status"] != "success" or response["result"]["events"]
+                or time.time() >= deadline):
+            client.waiting = None
+            self._reply(client, request_id, response)
+
+    def _reply(self, client, request_id, response):
+        if request_id is not None:
+            response = dict(response, id=request_id)
+        try:
+            data = json.dumps(response)
+        except (TypeError, ValueError) as e:
+            data = json.dumps({"status": "error", "id": request_id,
+                               "message": "The result could not be encoded: " + str(e)})
+        client.outbox += data.encode("utf-8") + b"\n"
+
+    def _flush(self, client):
+        while client.outbox:
+            try:
+                sent = client.sock.send(client.outbox[:262144])
+            except socket.error as e:
+                if not _would_block(e):
+                    self._drop_client(client)
+                    return
+                break
+            if not sent:
+                break
+            del client.outbox[:sent]
+        if len(client.outbox) > MAX_RESPONSE_BACKLOG:
+            self.log_message("Dropped a client that stopped reading its responses")
+            self._drop_client(client)
+
+    def _drop_client(self, client):
+        if client.sock is not None:
+            try:
+                client.sock.close()
+            except Exception:
+                pass
+            client.sock = None
+            self.log_message("Client disconnected")
+        if client in self._clients:
+            self._clients.remove(client)
+
+    def _publish_session(self):
+        """Write the port and a fresh token to SESSION_FILE, readable only by
+        this user. Returns the token, or None when clients need none."""
+        if not AUTH_REQUIRED:
+            self.log_message("ABLETON_MCP_AUTH=0: accepting clients without a token")
+            return None
+        token = binascii.hexlify(os.urandom(16)).decode("ascii")
+        payload = {"port": DEFAULT_PORT, "token": token, "pid": os.getpid(),
+                   "script_version": SCRIPT_VERSION, "protocol_version": PROTOCOL_VERSION}
+        temp = SESSION_FILE + ".tmp"
+        try:
+            folder = os.path.dirname(SESSION_FILE)
+            if folder and not os.path.isdir(folder):
+                os.makedirs(folder, 0o700)
+            handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(handle, json.dumps(payload).encode("utf-8"))
+            finally:
+                os.close(handle)
+            os.chmod(temp, 0o600)
+            replace = getattr(os, "replace", None)
+            if replace is None:  # Python 2
+                if os.path.exists(SESSION_FILE):
+                    os.remove(SESSION_FILE)
+                replace = os.rename
+            replace(temp, SESSION_FILE)
+        except Exception as e:
+            self.log_message("Could not write %s (%s): accepting clients without a token"
+                             % (SESSION_FILE, e))
+            return None
+        return token
+
+    def _withdraw_session(self):
+        """Remove SESSION_FILE if it still holds this instance's token."""
+        token = getattr(self, "_session_token", None)
+        if not token:
+            return
+        try:
+            with open(SESSION_FILE) as handle:
+                if json.load(handle).get("token") == token:
+                    os.remove(SESSION_FILE)
+        except Exception:
+            pass
+    
+    # Commands that may not run inside a batch
+    UNBATCHED_COMMANDS = frozenset([
+        "batch", "hello", "get_script_info", "drain_passive_events", "poll_events",
+    ])
 
     # Commands that never change the set; everything else closes its undo step.
     READ_ONLY_COMMANDS = frozenset([
@@ -1112,20 +1330,8 @@ class AbletonMCP(LomMixin, ControlSurface):
         "get_browser_items_at_path", "get_arrangement_clips", "get_clip_notes",
         "get_device_parameters", "get_session_snapshot", "inspect_rack", "lom_get",
         "clip_get_notes", "get_session_overview", "list_observers", "observe", "unobserve",
+        "hello", "get_script_info", "drain_passive_events", "poll_events",
     ])
-
-    # Main-thread budget for commands that legitimately take longer. The MCP
-    # server's socket timeout for these must stay above the value here.
-    LONG_RUNNING_COMMANDS = {
-        "create_audio_clip": 60.0,
-        "batch": 120.0,
-        "get_browser_tree": 30.0,
-        "get_browser_items_at_path": 30.0,
-        "get_browser_item": 30.0,
-        "get_session_snapshot": 30.0,
-        "load_browser_item": 30.0,
-        "load_instrument_or_effect": 30.0,
-    }
 
     def _command_handlers(self):
         """Command name → callable(params). Built once per instance."""
@@ -1198,7 +1404,8 @@ class AbletonMCP(LomMixin, ControlSurface):
         return handlers
 
     def _process_command(self, command):
-        """Process a command from the client and return a response"""
+        """Run one command and return its response. Called on Live's main
+        thread, inside the component guard like any script callback."""
         command_type = command.get("type", "")
         params = command.get("params") or {}
 
@@ -1206,13 +1413,18 @@ class AbletonMCP(LomMixin, ControlSurface):
         if handler is None:
             return {"status": "error", "message": "Unknown command: " + command_type}
 
-        if command_type in self.OFF_THREAD_COMMANDS:
-            return self._invoke_handler(handler, params)
-
-        timeout = self.LONG_RUNNING_COMMANDS.get(
-            command_type, self.DEFAULT_MAIN_THREAD_TIMEOUT)
-        closes_undo_step = not self._is_read_only(command_type, params)
-        return self._invoke_on_main_thread(handler, params, timeout, closes_undo_step)
+        modifies = not self._is_read_only(command_type, params)
+        if modifies:
+            self._undo_step("begin")
+        guard = getattr(self, "component_guard", None)
+        if guard is None:
+            response = self._invoke_handler(handler, params)
+        else:
+            with guard():
+                response = self._invoke_handler(handler, params)
+        if modifies:
+            self._undo_step("end")
+        return response
 
     # LOM methods that only read: calling them must not touch the undo history
     READ_ONLY_METHODS = frozenset([
@@ -1236,20 +1448,23 @@ class AbletonMCP(LomMixin, ControlSurface):
                 for c in commands)
         return False
 
-    def _close_undo_step(self):
-        """Seal this command's changes as their own undo step.
+    def _undo_step(self, edge):
+        """Open ("begin") or seal ("end") the undo step of one command.
 
         Live otherwise keeps appending every script-made change to one open
         undo step until the user does something, so a single Cmd+Z would wipe
-        all agent edits since then. Measured on Live 12.3: end_undo_step()
-        after each command keeps every command in its own undo step(s).
+        all agent edits since then. Measured on Live 12.3.8: from a
+        Live.Base.Timer callback, end_undo_step() alone does not close the
+        step (later commands still merge into it); begin_undo_step() before
+        and end_undo_step() after each command gives every command its own
+        step(s).
         """
         try:
-            end = getattr(self._song, "end_undo_step", None)
-            if end is not None:
-                end()
+            method = getattr(self._song, edge + "_undo_step", None)
+            if method is not None:
+                method()
         except Exception as e:
-            self.log_message("end_undo_step failed: " + str(e))
+            self.log_message("%s_undo_step failed: %s" % (edge, e))
 
     def _invoke_handler(self, handler, params):
         try:
@@ -1264,27 +1479,6 @@ class AbletonMCP(LomMixin, ControlSurface):
             self.log_message(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
-    def _invoke_on_main_thread(self, handler, params, timeout, closes_undo_step=False):
-        response_queue = queue.Queue()
-
-        def main_thread_task():
-            response = self._invoke_handler(handler, params)
-            if closes_undo_step:
-                self._close_undo_step()
-            response_queue.put(response)
-
-        try:
-            self.schedule_message(0, main_thread_task)
-        except AssertionError:
-            # Already on the main thread
-            main_thread_task()
-
-        try:
-            return response_queue.get(timeout=timeout)
-        except queue.Empty:
-            return {"status": "error",
-                    "message": "Timeout waiting for operation to complete"}
-    
     # Command implementations
 
     def _get_script_info(self):
@@ -1297,6 +1491,8 @@ class AbletonMCP(LomMixin, ControlSurface):
             "capabilities": list(SCRIPT_CAPABILITIES),
             "snapshot_schema": "ableton_mcp_snapshot_v2",
             "passive_listeners": True,
+            "transport": "timer" if getattr(self, "_timer", None) else "update_display",
+            "auth_required": bool(getattr(self, "_session_token", None)),
         }
     
     def _safe_song_property(self, attr, cast, default):
@@ -2519,11 +2715,12 @@ class AbletonMCP(LomMixin, ControlSurface):
                     clip_index=clip_index,
                 )
 
-            for add_name, cb in [
-                ("add_name_listener", on_name),
-                ("add_notes_listener", on_notes),
-                ("add_playing_status_listener", on_playing),
-            ]:
+            listeners = [("add_name_listener", on_name),
+                         ("add_playing_status_listener", on_playing)]
+            # Audio clips have no notes; asking logs an error for each one
+            if getattr(clip, "is_midi_clip", False):
+                listeners.append(("add_notes_listener", on_notes))
+            for add_name, cb in listeners:
                 cb._passive_target = clip
                 if self._safe_add_listener(clip, add_name, cb):
                     if bindings is not None:
