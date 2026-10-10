@@ -1,0 +1,19 @@
+{
+  "name": "ableton-live",
+  "version": "1.8.0",
+  "description": "Control Ableton Live from Claude Code: the whole Live Object Model, music generators, mixing and audio analysis, with skills for mixing, composing, Turkish makams and setup.",
+  "author": {
+    "name": "Can Arslan",
+    "url": "https://github.com/CanArslanDev"
+  },
+  "homepage": "https://github.com/CanArslanDev/ableton-live-mcp",
+  "repository": "https://github.com/CanArslanDev/ableton-live-mcp",
+  "license": "MIT",
+  "keywords": ["ableton", "ableton-live", "music", "midi", "mixing", "mcp"],
+  "mcpServers": {
+    "ableton": {
+      "command": "uv",
+      "args": ["run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--frozen", "--no-dev", "ableton-mcp"]
+    }
+  }
+}

@@ -898,7 +898,9 @@ def test_build_arrangement_lays_out_sections_with_locators(live_server):
         {"name": "Outro", "bars": 1, "clips": {"Bass": "Bass B"}}])
     assert result["ok"] and result["end_bar"] == 8
     assert [s["bar"] for s in result["sections"]] == [1, 3, 7]
-    starts = lambda track: [(c.start_time, c.name) for c in track.arrangement_clips]
+    def starts(track):
+        return [(c.start_time, c.name) for c in track.arrangement_clips]
+
     assert starts(drums) == [(8.0, "Beat"), (12.0, "Beat"), (16.0, "Beat"), (20.0, "Beat")]
     assert starts(bass)[:3] == [(0.0, "Bass A"), (8.0, "Bass A"), (16.0, "Bass A")]
     # Outro: 4 beats of a 3-beat MIDI clip → one copy plus an exact 1-beat cut

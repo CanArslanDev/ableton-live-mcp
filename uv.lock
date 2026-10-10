@@ -26,6 +26,10 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "soundfile" },
+]
+
+[package.optional-dependencies]
+dataset = [
     { name = "supabase" },
 ]
 
@@ -36,8 +40,9 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "soundfile", specifier = ">=0.12" },
-    { name = "supabase", specifier = ">=2.0.0" },
+    { name = "supabase", marker = "extra == 'dataset'", specifier = ">=2.0.0" },
 ]
+provides-extras = ["dataset"]
 
 [[package]]
 name = "annotated-types"

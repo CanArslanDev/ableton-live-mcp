@@ -75,13 +75,15 @@ def check_installed_scripts() -> dict:
     if not found:
         return _check("installed_script", "fail",
                       "No AbletonMCP Remote Script in any User Library",
-                      "Run `ableton-mcp-install-script`, restart Live, then select "
+                      "Call the install_remote_script tool (or run "
+                      "`ableton-mcp-install-script`), restart Live, then select "
                       "AbletonMCP under Settings → Link, Tempo & MIDI → Control Surface.")
     stale = [(p, v) for p, v in found if v != EXPECTED_REMOTE_SCRIPT_VERSION]
     listing = "; ".join(f"{p.parent} (v{v})" for p, v in found)
     if stale:
         return _check("installed_script", "warn", f"Outdated copy: {listing}",
-                      "Run `ableton-mcp-install-script`, then restart Live.")
+                      "Call install_remote_script (or run `ableton-mcp-install-script`), "
+                      "then restart Live.")
     return _check("installed_script", "ok", listing)
 
 
@@ -177,7 +179,8 @@ def check_connection(host: str, port: int) -> tuple[list[dict], dict | None]:
             checks.append(_check("connection", "warn",
                                  f"Live runs Remote Script v{version}, this server expects "
                                  f"v{EXPECTED_REMOTE_SCRIPT_VERSION}",
-                                 "Run `ableton-mcp-install-script` and restart Live. If the "
+                                 "Call install_remote_script (or run "
+                                 "`ableton-mcp-install-script`) and restart Live. If the "
                                  "version does not change, see the bundle_copy check."))
         timings = []
         for _ in range(5):

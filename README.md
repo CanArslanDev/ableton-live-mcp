@@ -67,7 +67,7 @@ while testing against Live 12.3.
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-63 tools in the default profile (85 with `ABLETON_MCP_PROFILE=full`), plus
+64 tools in the default profile (86 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -98,23 +98,41 @@ them back.
 
 ## Install
 
-**Requirements:** Ableton Live 11 or 12, [uv](https://docs.astral.sh/uv/getting-started/installation/) (`brew install uv`).
+**Requirements:** Ableton Live 11 or 12 (the Trial works),
+[uv](https://docs.astral.sh/uv/getting-started/installation/) (`brew install uv`).
 
-### 1. Install the Remote Script into Live
-
-```bash
-uvx --from git+https://github.com/CanArslanDev/ableton-live-mcp ableton-mcp-install-script
-```
-
-This copies the script to `<User Library>/Remote Scripts/AbletonMCP`
-(`~/Music/Ableton/User Library` on macOS, `Documents\Ableton\User Library` on
-Windows). Then in Live: **Settings → Link, Tempo & MIDI → Control Surface →
-AbletonMCP**, Input and Output **None**. Restart Live after every script update.
-
-### 2. Add the server to your MCP client
+### 1. Add the server to your client
 
 <details open>
-<summary><b>Claude Desktop</b> — Settings → Developer → Edit Config</summary>
+<summary><b>Claude Desktop</b> — one-click extension</summary>
+
+Download `ableton-live-mcp-<version>.mcpb` from the
+[Releases](https://github.com/CanArslanDev/ableton-live-mcp/releases) page and
+open it, or drag it into Settings → Extensions. Claude Desktop installs the
+Python dependencies with uv the first time it starts the server. To build the
+file yourself: `uv run python packaging/build_mcpb.py` (needs Node.js).
+</details>
+
+<details>
+<summary><b>Claude Code</b> — plugin with skills</summary>
+
+```
+/plugin install ableton-live --marketplace CanArslanDev/ableton-live-mcp
+```
+
+(Before Claude Code 2.1.275: `/plugin marketplace add CanArslanDev/ableton-live-mcp`,
+then `/plugin install ableton-live@ableton-live-mcp`.) Besides the MCP server,
+the plugin brings five skills Claude uses when they fit: working in Live, mixing
+and mastering, composing and arranging, Turkish makams and usuls, and setup and
+troubleshooting. Only the MCP server, without the skills:
+
+```bash
+claude mcp add ableton -- uvx --from git+https://github.com/CanArslanDev/ableton-live-mcp ableton-mcp
+```
+</details>
+
+<details>
+<summary><b>Claude Desktop (config file) and other MCP clients</b></summary>
 
 ```json
 {
@@ -129,24 +147,31 @@ AbletonMCP**, Input and Output **None**. Restart Live after every script update.
 </details>
 
 <details>
-<summary><b>Claude Code</b></summary>
-
-```bash
-claude mcp add ableton -- uvx --from git+https://github.com/CanArslanDev/ableton-live-mcp ableton-mcp
-```
-</details>
-
-<details>
 <summary><b>From a local clone</b> (for development)</summary>
 
 ```bash
 git clone https://github.com/CanArslanDev/ableton-live-mcp
 cd ableton-live-mcp && uv sync
-uv run ableton-mcp-install-script
 ```
 
-Point the client at `uv --directory /path/to/ableton-live-mcp run ableton-mcp`.
+Point the client at `uv --directory /path/to/ableton-live-mcp run ableton-mcp`,
+or load the plugin from disk with `claude --plugin-dir /path/to/ableton-live-mcp`.
 </details>
+
+### 2. Install the Remote Script into Live
+
+Ask the assistant to *install the Ableton remote script* (the
+`install_remote_script` tool), or run it from a terminal:
+
+```bash
+uvx --from git+https://github.com/CanArslanDev/ableton-live-mcp ableton-mcp-install-script
+```
+
+This copies the script to `<User Library>/Remote Scripts/AbletonMCP`
+(`~/Music/Ableton/User Library` on macOS, `Documents\Ableton\User Library` on
+Windows). Restart Live, then choose **Settings → Link, Tempo & MIDI → Control
+Surface → AbletonMCP**, Input and Output **None**. Restart Live after every
+script update.
 
 Run only one MCP client against Live at a time. Ask the assistant to call
 `doctor` (or `get_remote_script_info`) to confirm the server and the script
@@ -247,8 +272,16 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 229 tests, no Live required
+uv run --with pytest pytest -q            # 241 tests, no Live required
+uvx ruff check .
+uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb
+claude plugin validate .                  # the Claude Code plugin and its skills
 ```
+
+CI (`.github/workflows/ci.yml`) runs the tests on macOS and Linux with Python
+3.10 and 3.13 (Windows reports without blocking), lint, and builds the wheel,
+the sdist and the `.mcpb`. Pushing a `v<version>` tag publishes them as a GitHub
+release.
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the
 end-to-end tests run the real Remote Script TCP server and the real MCP tools

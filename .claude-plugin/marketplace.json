@@ -1,0 +1,20 @@
+{
+  "name": "ableton-live-mcp",
+  "owner": {
+    "name": "Can Arslan",
+    "url": "https://github.com/CanArslanDev"
+  },
+  "metadata": {
+    "description": "Ableton Live control for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "ableton-live",
+      "source": "./",
+      "description": "Control Ableton Live from Claude Code: the whole Live Object Model, music generators, mixing and audio analysis.",
+      "version": "1.8.0",
+      "category": "music",
+      "keywords": ["ableton", "music", "midi", "mixing"]
+    }
+  ]
+}

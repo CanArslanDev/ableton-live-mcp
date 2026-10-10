@@ -62,7 +62,6 @@ MCP_Server/config.py
 supabase/
 DATA_COLLECTION.md
 tools_operator/
-MANIFEST.in
 
 # Export output — contains collected user session data
 *.jsonl

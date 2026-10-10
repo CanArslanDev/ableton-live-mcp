@@ -96,7 +96,8 @@ def send(command: str, params: dict | None = None, timeout: float | None = None)
         if command in _NEW_COMMANDS and "Unknown command" in str(e):
             raise RuntimeError(
                 "The AbletonMCP Remote Script loaded in Live is older than this server "
-                "(missing '%s'). Run `ableton-mcp-install-script`, then restart Live." % command
+                "(missing '%s'). Call install_remote_script (or run "
+                "`ableton-mcp-install-script`), then restart Live." % command
             ) from e
         raise
 
@@ -2512,6 +2513,33 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         host = os.environ.get("ABLETON_HOST", "127.0.0.1")
         port = int(os.environ.get("ABLETON_PORT", "9877"))
         return to_json(diagnostics.run("127.0.0.1" if host == "localhost" else host, port))
+
+    @tool(idempotent=True)
+    def install_remote_script() -> str:
+        """Install or update the AbletonMCP Remote Script (the part that runs
+        inside Live) in every User Library's Remote Scripts folder, as
+        `ableton-mcp-install-script` does from a terminal. Use it when doctor
+        reports the script missing or outdated. A copy that differs from this
+        server's version is backed up first.
+
+        Live loads Remote Scripts when it starts: afterwards the user must
+        restart Live and, the first time, choose AbletonMCP under Settings →
+        Link, Tempo & MIDI → Control Surface.
+        """
+        from .remote_script_install import install_remote_script as install
+
+        results = install(force=True)
+        if all(r["status"] == "error" for r in results):
+            raise RuntimeError("; ".join(r["detail"] for r in results))
+        changed = any(r["status"] in ("installed", "updated") for r in results)
+        return to_json({
+            "results": results,
+            "next": ("Restart Live (it loads Remote Scripts at launch), then choose AbletonMCP "
+                     "under Settings → Link, Tempo & MIDI → Control Surface if it is not "
+                     "selected yet." if changed else
+                     "Already up to date. If Live still reports an older version, restart "
+                     "Live, or run doctor to find a copy inside the Live application."),
+        })
 
     # ── Live events ──────────────────────────────────────────────────────────
 

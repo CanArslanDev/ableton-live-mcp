@@ -6,7 +6,6 @@ import logging
 import os
 import threading
 import time
-from typing import Any
 
 from .recorder import dataset_enabled, get_recorder
 from .snapshot import fetch_snapshot

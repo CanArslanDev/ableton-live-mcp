@@ -1,0 +1,4 @@
+# Upstream's telemetry credentials: never in the sdist, and so never in the
+# wheel that `uv build` makes from it. (exclude-package-data in pyproject.toml
+# only covers data files, not modules.)
+exclude MCP_Server/config.py

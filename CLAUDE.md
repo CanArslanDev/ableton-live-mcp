@@ -38,6 +38,9 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
 | `MCP_Server/telemetry*.py`, `MCP_Server/dataset/` | Inherited from upstream. Inactive without the unshipped `MCP_Server/config.py`. |
 | `tests/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums). |
+| `packaging/build_mcpb.py`, `packaging/mcpb/` | Claude Desktop extension: manifest template, icon, build script (fills in version and tools). |
+| `.claude-plugin/`, `skills/` | Claude Code plugin (MCP server + skills) and its marketplace entry. |
+| `.github/workflows/` | CI (tests, lint, wheel/sdist/.mcpb) and tag-triggered GitHub releases. |
 
 ## Commands
 
@@ -48,6 +51,9 @@ uv run ableton-mcp-install-script              # copy script into Live's User Li
 uv run ableton-mcp-install-script --sync-bundle  # copy repo script → bundled copy
 uv run ableton-mcp                             # run the MCP server (stdio)
 uv run ableton-mcp-doctor                      # diagnose versions, copies, connection, Live log
+uvx ruff check .                               # lint (rules in pyproject.toml)
+uv run python packaging/build_mcpb.py          # dist/ableton-live-mcp-<version>.mcpb (needs Node.js)
+claude plugin validate .                       # plugin manifest + skills
 ```
 
 ## Rules when changing the Remote Script
@@ -199,6 +205,21 @@ Measured on Live 12.3.8:
   complete for clients without Apps. `tests/test_ui.py` checks serving,
   wiring and (with node) that every panel's script parses; check the look in
   a real or mock host (headless Chrome) after changing a panel.
+
+## Packaging and releases
+
+- One version, three places: `pyproject.toml`, `.claude-plugin/plugin.json` and
+  the plugin entry in `.claude-plugin/marketplace.json` (a test checks they
+  agree). The `.mcpb` manifest takes it from pyproject at build time.
+- The `.mcpb` is a "uv" bundle: source, `pyproject.toml` and `uv.lock`, which
+  Claude Desktop installs with uv. The wheel's packages come from
+  `packages.find` (`MCP_Server*`), so new subpackages ship by themselves.
+- Skills name tools as `` `tool_name(...)` ``; a test fails when a skill names
+  a tool that no longer exists. `claude plugin validate .` warns that
+  CLAUDE.md at the plugin root is not plugin context: expected, it is for this
+  repo.
+- A `v<version>` tag publishes a GitHub release (wheel, sdist, .mcpb). Nothing
+  goes to PyPI: `ableton-live-mcp` is taken there.
 
 ## Testing
 

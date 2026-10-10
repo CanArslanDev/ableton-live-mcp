@@ -1,0 +1,51 @@
+{
+  "manifest_version": "0.4",
+  "name": "ableton-live-mcp",
+  "display_name": "Ableton Live MCP",
+  "version": "0.0.0",
+  "description": "Control Ableton Live from Claude: the whole Live Object Model, music generators, mixing and audio analysis.",
+  "long_description": "Talks to Ableton Live through a MIDI Remote Script, which the server copies into Live's User Library the first time it starts. In Live, pick **AbletonMCP** under Settings → Link, Tempo & MIDI → Control Surface, then ask Claude to look at your set.\n\n- Mixer, routing, tracks, scenes, clips, notes and automation, plus generic access to everything in the Live Object Model\n- Chord progressions, drum grooves, basslines, arpeggios, melodies, Euclidean rhythms, Live 12's MIDI Tools, Turkish makams and usuls\n- Listening: renders a section and measures loudness, true peak, tonal balance and stereo; mix doctor, stems, reference matching, snapshots with A/B\n- Interactive panels (mixer, meters, piano roll, drum pads, reference curve) in clients that support MCP Apps\n\nEverything stays on your computer: the server only connects to Live on 127.0.0.1. Unofficial; not affiliated with Ableton.",
+  "author": {
+    "name": "Can Arslan",
+    "url": "https://github.com/CanArslanDev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CanArslanDev/ableton-live-mcp.git"
+  },
+  "homepage": "https://github.com/CanArslanDev/ableton-live-mcp",
+  "documentation": "https://github.com/CanArslanDev/ableton-live-mcp#readme",
+  "support": "https://github.com/CanArslanDev/ableton-live-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "--frozen", "--no-dev", "main.py"],
+      "env": {
+        "ABLETON_MCP_PROFILE": "${user_config.profile}"
+      }
+    }
+  },
+  "tools": [],
+  "tools_generated": true,
+  "prompts_generated": true,
+  "keywords": ["ableton", "ableton live", "music production", "midi", "mixing", "audio analysis", "daw"],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  },
+  "user_config": {
+    "profile": {
+      "type": "string",
+      "title": "Tool set",
+      "description": "core: one tool per job (recommended). full: also the original tools that newer ones replace, for prompts written against them.",
+      "default": "core",
+      "required": false
+    }
+  }
+}
