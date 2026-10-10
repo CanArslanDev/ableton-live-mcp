@@ -109,7 +109,14 @@ def scale_intervals(scale: str | Iterable[int]) -> list[int]:
     key = scale.strip().lower().replace(" ", "_").replace("-", "_")
     key = _SCALE_ALIASES.get(key, key)
     if key not in SCALES:
-        raise ValueError(f"Unknown scale {scale!r}. Known: {', '.join(sorted(SCALES))}")
+        from . import turkish
+
+        makam = turkish.find_makam(scale)
+        if makam is not None:
+            # A Turkish makam, its comma degrees rounded to semitones
+            return turkish.intervals_12tet(makam)
+        raise ValueError(f"Unknown scale {scale!r}. Known: {', '.join(sorted(SCALES))}, "
+                         f"or a Turkish makam ({', '.join(sorted(turkish.MAKAMS))})")
     return SCALES[key]
 
 

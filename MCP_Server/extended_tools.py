@@ -472,6 +472,34 @@ def drum_mapping_from_rack(track: int | str) -> dict[str, int]:
     return mapping
 
 
+DARBUKA_WORDS = {"düm": ("doum", "dum", "düm", "doom"), "tek": ("tek", "tak", "tik"),
+                 "ka": ("ka", "slap", "pop"), "ke": ("ke",), "te": ("te",)}
+
+
+def darbuka_pads(track: int | str) -> dict[str, int]:
+    """Stroke → pad for a darbuka/doumbek kit whose pads are named after the
+    strokes (doum, tek, ka). Empty for an ordinary drum kit."""
+    devices = lom_get(f"{track_path(track)} devices", ["class_name"])["items"]
+    rack = next((i for i, d in enumerate(devices) if d.get("class_name") == "DrumGroupDevice"),
+                None)
+    if rack is None:
+        return {}
+    pads = lom_get(f"{track_path(track)} devices {rack} drum_pads",
+                   ["note", "name", "chains"])["items"]
+    found: dict[str, int] = {}
+    for pad in pads:
+        if not pad.get("chains"):
+            continue
+        words = re.findall(r"[a-zçğıöşü]+", str(pad.get("name", "")).lower())
+        for stroke, names in DARBUKA_WORDS.items():
+            if stroke not in found and any(w in names for w in words):
+                found[stroke] = int(pad["note"])
+    if "ka" in found:
+        found.setdefault("ke", found["ka"])
+        found.setdefault("te", found["ka"])
+    return found if "düm" in found and "tek" in found else {}
+
+
 # ── Envelope shapes ──────────────────────────────────────────────────────────
 
 def envelope_points(shape: str, start: float, end: float, low: float, high: float,
@@ -1286,6 +1314,97 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     int(v["pulses"]), int(v["steps"]), int(v.get("rotation", 0))))}
                 for v in resolved],
             "time_signature": context["time_signature"], "length_beats": total})
+
+    @tool(idempotent=True)
+    def turkish_makam(name: str | None = None, tonic: str | None = None,
+                      tuning_file: bool = False) -> str:
+        """Turkish makams (Arel-Ezgi-Uzdilek system, 53 commas per octave) and
+        usuls. Without a name: every makam and usul. With a name (rast, uşşak,
+        hicaz, hüseynî, kürdî, saba, segâh, hüzzam, nihavend, karcığar, …):
+        its steps in commas, degrees in cents, karar (tonic) and güçlü, and the
+        12-tone approximation on `tonic` (default: its karar).
+
+        Every generator and scale tool accepts a makam as the scale
+        (scale="hicaz", key="A"), using that 12-tone approximation.
+        tuning_file=True also writes an .ascl tuning to Live's User Library ›
+        Tunings that moves the makam's degrees to their true comma pitches;
+        double-click it in Live's browser (Tunings) to hear the real intervals
+        on the same notes.
+        """
+        from . import turkish
+
+        if name is None:
+            return to_json({
+                "makams": {key: {"karar": karar, "guclu": guclu, "built_from": built,
+                                 "steps_commas": steps}
+                           for key, (steps, karar, guclu, built) in turkish.MAKAMS.items()},
+                "usuls": {key: f"{n}/{d}: {vocal}"
+                          for key, (n, d, _strokes, vocal) in turkish.USULS.items()},
+                "comma_cents": round(turkish.COMMA_CENTS, 2)})
+        info = turkish.makam(name)
+        root = music.parse_pitch_class(tonic or info["karar"])
+        info["tonic"] = music.NOTE_NAMES[root]
+        info["notes_12tet"] = [music.NOTE_NAMES[(root + i) % 12]
+                               for i in info["intervals_12tet"]]
+        info["offsets_from_12tet_cents"] = [
+            round(c - round(c / 100.0) * 100.0, 1) for c in info["degrees_cents"]]
+        info["use_as_scale"] = f'key="{info["tonic"]}", scale="{info["makam"]}"'
+        if tuning_file:
+            file_name, text = turkish.ascl(info["makam"], root, music.NOTE_NAMES)
+            folder = turkish.tuning_folder()
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / file_name
+            target.write_text(text, encoding="utf-8")
+            info["tuning_file"] = str(target)
+            info["load_it"] = ("In Live's browser open Tunings (or User Library › Tunings) "
+                               f"and double-click '{file_name}'. Live's API cannot load "
+                               "tunings itself.")
+        return to_json(info)
+
+    @tool(destructive=True)
+    def generate_usul(track: int | str, usul: str = "aksak", cycles: int = 4,
+                      clip_index: int | None = 0, arrangement_time: float | None = None,
+                      mapping: dict[str, int | str] | None = None, velocity: int = 110,
+                      ornament: float = 0.0, seed: int | None = None,
+                      set_meter: bool = False, replace: bool = True,
+                      clip_name: str | None = None) -> str:
+        """Write a Turkish usul (rhythmic cycle) as MIDI on a drum track.
+
+        usul: nim_sofyan 2/4, semai 3/4, sofyan 4/4, turk_aksagi 5/8,
+        yuruk_semai 6/8, devr_i_hindi 7/8, devr_i_turan 7/8, duyek 8/8,
+        musemmen 8/8, aksak 9/8, aksak_semai 10/8, curcuna 10/16.
+        Strokes: düm (low) → the kick pad, tek (high) → snare, te/ke/ka
+        (light) → rim — or pads named doum/dum, tek/tak, ka/slap on a darbuka
+        kit. mapping overrides: {"düm": "C1", "tek": 38, "ke": "C#1"}.
+        - ornament 0..1: fill long strokes with light te/ke hits
+        - set_meter: also set the set's time signature to the usul's meter
+        Length: `cycles` cycles of the usul.
+        """
+        from . import turkish
+
+        info = turkish.usul(usul)
+        roles = dict(music.GM_DRUMS, **drum_mapping_from_rack(track))
+        pads = {stroke: roles.get(role, music.GM_DRUMS[role])
+                for stroke, (role, _weight) in turkish.STROKES.items()}
+        pads.update(darbuka_pads(track))
+        for stroke, note in (mapping or {}).items():
+            key = turkish.normalize(stroke).replace("dum", "düm")
+            if key not in turkish.STROKES:
+                raise ValueError(f"Unknown stroke {stroke!r}: use düm, tek, te, ke or ka")
+            pads[key] = music.parse_note(note)
+        notes = turkish.usul_notes(info["usul"], cycles, pads, velocity, ornament, seed)
+        length = cycles * info["units"] * 4.0 / info["denominator"]
+        if set_meter:
+            batch([op_set("live_set", "signature_numerator", info["numerator"]),
+                   op_set("live_set", "signature_denominator", info["denominator"])])
+        path = prepare_clip(track, clip_index, length, arrangement_time,
+                            clip_name or f"{info['usul'].replace('_', ' ').title()} "
+                                          f"{info['meter']}")
+        written = write_notes(path, notes, "replace" if replace else "add")
+        return generated_result(path, notes, written, {
+            "usul": info["usul"], "meter": info["meter"], "vocal": info["vocal"],
+            "pads": {stroke: music.note_name(note) for stroke, note in pads.items()},
+            "length_beats": length, "meter_set": set_meter})
 
     @tool(destructive=True)
     def generate_bassline(track: int | str, progression: str | None = None,

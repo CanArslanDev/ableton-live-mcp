@@ -965,3 +965,37 @@ def test_generate_euclidean_on_drum_pads(live_server):
     kicks = sorted(n.start_time for n in notes if n.pitch == 36)
     assert kicks == [0.0, 0.75, 1.5, 2.0, 2.75, 3.5]
     assert {n.pitch for n in notes} == {36, 42}
+
+
+def test_generate_usul_sets_the_meter_and_finds_darbuka_pads(live_server):
+    script, call = live_server
+    song = script._song
+    result = call("generate_usul", track="Drums", usul="aksak", cycles=2, clip_index=2,
+                  set_meter=True)
+    assert result["meter"] == "9/8" and result["length_beats"] == 9.0
+    assert (song.signature_numerator, song.signature_denominator) == (9, 8)
+    assert result["pads"]["düm"] == "C1"                 # the kit's kick pad
+    # A darbuka kit named after its strokes is used as such
+    kit = song.tracks[0].devices[0]
+    kit.drum_pads[0].name, kit.drum_pads[1].name = "Doum", "Tek"
+    kit.drum_pads[2].name = "Ka Slap"
+    darbuka = call("generate_usul", track="Drums", usul="sofyan", cycles=1, clip_index=3)
+    assert darbuka["pads"] == {"düm": "C1", "tek": "D1", "te": "F#1", "ke": "F#1",
+                               "ka": "F#1"}
+
+
+def test_turkish_makam_info_and_tuning_file(live_server, tmp_path, monkeypatch):
+    from MCP_Server import turkish
+
+    monkeypatch.setattr(turkish, "tuning_folder", lambda: tmp_path / "Tunings")
+    script, call = live_server
+    listing = call("turkish_makam")
+    assert "hicaz" in listing["makams"] and "aksak" in listing["usuls"]
+    info = call("turkish_makam", name="Hicaz", tonic="D", tuning_file=True)
+    assert info["notes_12tet"] == ["D", "D#", "F#", "G", "A", "B", "C"]
+    assert info["use_as_scale"] == 'key="D", scale="hicaz"'
+    written = (tmp_path / "Tunings" / "Makam Hicaz (D).ascl").read_text(encoding="utf-8")
+    assert "! @ABL REFERENCE_PITCH 3 2 293.665" in written
+    chords = call("generate_chord_progression", track="Bass", clip_index=2,
+                  progression="i II", key="D", scale="hicaz")
+    assert chords["scale"] == "hicaz"

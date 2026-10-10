@@ -29,6 +29,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
 | `MCP_Server/snapshots.py` | Capture / compare / restore mixer and device parameters (A/B), stored in `~/.ableton-mcp/snapshots`. |
 | `MCP_Server/music.py` | Pure music theory + generators + note transforms over note dicts. No Live access. |
+| `MCP_Server/turkish.py` | Makams (AEU commas, 12-tone approximation, `.ascl` tunings) and usuls (düm/tek cycles). Pure. |
 | `MCP_Server/audio_analysis.py` | numpy/scipy/soundfile analysis (BS.1770 LUFS, spectrum, stereo, tempo, key). |
 | `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
@@ -145,6 +146,10 @@ Measured on Live 12.3.8:
   a cue at the *old* position (and would delete a cue there). Move the
   playhead in one call, toggle in the next (`place_locators`); the script's
   `create_locator` toggles on the next update via `schedule_message`.
+- **Tunings:** `Song.tuning_system` is None until a tuning is loaded, and
+  `browser.load_item` on an `.ascl` in User Library › Tunings does not load it
+  (12.4) — the user double-clicks it. Live picks up new files there after a
+  few seconds.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
 

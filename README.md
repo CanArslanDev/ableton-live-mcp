@@ -33,6 +33,7 @@ while testing against Live 12.3.
 - *"Play the drop and tell me which tracks are too hot."*
 - *"Put a vocal chain on the Vox track and duck the bass from the kick."*
 - *"Build me an 808 kit from my own samples and write a trap beat on it."*
+- *"Aksak usulünde bir darbuka ritmi ve Hicaz makamında bir melodi yaz."*
 - *"Save a snapshot, make the mix brighter, then let me A/B the two."*
 - *"Which parts are fighting in my drop? Compare it with this reference track."*
 
@@ -52,6 +53,7 @@ while testing against Live 12.3.
 | **Devices & racks** | `set_device_parameter_by_name` accepts what Live displays (`"800 Hz"`, `"-6 dB"`, `"25L"`, `"Lowpass"`), `manage_device`, `rack_control` (macros, variations), `get_drum_pads` |
 | **Song & transport** | `set_song_properties` (time signature, swing, loop, Live 12 key/scale, quantization), `transport` (undo/redo, capture MIDI, cues), `select_in_live` |
 | **Generators** | `music_theory`, `generate_chord_progression`, `generate_drum_pattern` (maps your Drum Rack pads by name), `generate_bassline`, `generate_arpeggio`, `generate_melody`, `generate_euclidean` (Euclidean rhythms per pad) — they follow the set's time signature and, unless told otherwise, its Key & Scale (Live 12) |
+| **Turkish makam & usul** | `turkish_makam` gives 24 makams in the Arel-Ezgi-Uzdilek system (steps in commas, karar, güçlü) and writes an `.ascl` tuning that plays their true comma pitches in Live 12; every generator takes a makam as its scale (`scale="hicaz"`); `generate_usul` writes usuls (sofyan, türk aksağı, yürük semai, devr-i hindi, düyek, aksak, aksak semai, curcuna, …) on a drum or darbuka kit |
 | **Harmony** | `analyze_harmony` names the chords in a clip (key, roman numerals, changes) and returns a progression the generators accept, so new parts follow existing ones |
 | **MIDI files** | `import_midi_file` (whole file, one track or one channel), `export_clip_to_midi` (with the set's tempo and meter) |
 | **Device chains** | `add_device` inserts any of Live's own devices by name with settings; `apply_device_chain` adds ready-made chains (vocal, drum bus, bass, pad, master, sidechain duck) — Live 12.3+ |
@@ -64,7 +66,7 @@ while testing against Live 12.3.
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-61 tools in the default profile (83 with `ABLETON_MCP_PROFILE=full`), plus
+63 tools in the default profile (85 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -242,7 +244,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q        # 209 tests, no Live required
+uv run --with pytest pytest -q        # 219 tests, no Live required
 ```
 
 `tests/fake_live.py` is an in-memory imitation of the Live Object Model; the
