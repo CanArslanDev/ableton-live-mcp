@@ -242,3 +242,125 @@ def test_estimate_key_and_empty_input():
              for i, p in enumerate([62, 64, 66, 67, 69, 71, 73, 74, 62, 66, 69])]
     assert music.estimate_key(scale)["key"] == "D major"
     assert music.analyze_harmony([], 4.0)["progression"] is None
+
+
+# ── MIDI Tools ───────────────────────────────────────────────────────────────
+
+def _n(pitch, start, duration=1.0, velocity=100, note_id=None):
+    note = {"pitch": pitch, "start_time": start, "duration": duration, "velocity": velocity,
+            "mute": False}
+    if note_id is not None:
+        note["note_id"] = note_id
+    return note
+
+
+C_MAJOR_CHORD = [_n(60, 0, 2, note_id=1), _n(64, 0, 2, note_id=2), _n(67, 0, 2, note_id=3)]
+
+
+def test_strum_spreads_chords_and_keeps_ends():
+    up = music.strum(C_MAJOR_CHORD, amount=0.05)
+    assert [(n["pitch"], n["start_time"]) for n in up] == [(60, 0.0), (64, 0.05), (67, 0.1)]
+    assert all(abs(n["start_time"] + n["duration"] - 2.0) < 1e-9 for n in up)
+    two = C_MAJOR_CHORD + [_n(60, 2, 2), _n(64, 2, 2), _n(67, 2, 2)]
+    alt = music.strum(two, amount=0.05, direction="alternate")
+    second = sorted((n for n in alt if n["start_time"] >= 2), key=lambda n: n["start_time"])
+    assert [n["pitch"] for n in second] == [67, 64, 60]
+    assert {n["note_id"] for n in up} == {1, 2, 3}
+
+
+def test_ornament_adds_new_flams_and_scale_graces():
+    snare = [_n(38, 1.0, 0.25, 110, note_id=7), _n(38, 0.0, 0.25, 110, note_id=8)]
+    flams = music.ornament(snare, "flam", spacing=0.0625, velocity=0.5)
+    added = [n for n in flams if "note_id" not in n]
+    assert [(n["pitch"], n["start_time"], n["velocity"]) for n in added] == [(38, 0.9375, 55)]
+    grace = music.ornament([_n(64, 1, note_id=1)], "grace", step=-1, key="C", scale="major")
+    assert sorted(n["pitch"] for n in grace) == [62, 64]   # E's lower neighbour in C is D
+
+
+def test_chop_makes_ratchets_with_decay():
+    out = music.chop([_n(36, 0, 1.0, 100, note_id=5)], parts=4, velocity_decay=0.25)
+    assert [n["start_time"] for n in out] == [0.0, 0.25, 0.5, 0.75]
+    assert [n["velocity"] for n in out] == [100, 75, 56, 42]
+    assert out[0]["note_id"] == 5 and all("note_id" not in n for n in out[1:])
+
+
+def test_connect_walks_the_scale_into_the_next_note():
+    line = [_n(60, 0, 0.5), _n(67, 2, 0.5)]
+    out = music.connect(line, "C", "major", rate=0.25)
+    passing = sorted((n for n in out if n["start_time"] not in (0, 2)),
+                     key=lambda n: n["start_time"])
+    assert [n["pitch"] for n in passing] == [62, 64, 65]
+    assert passing[-1]["start_time"] == 1.75
+
+
+def test_time_warp_keeps_the_edges_and_bends_the_middle():
+    grid = [_n(60, t, 0.25) for t in (0.0, 1.0, 2.0, 3.0)]
+    fast = music.time_warp(grid, 4.0, amount=0.5, mode="accelerando")
+    gaps = [b["start_time"] - a["start_time"] for a, b in zip(fast, fast[1:])]
+    assert fast[0]["start_time"] == 0.0 and gaps == sorted(gaps, reverse=True)
+    slow = music.time_warp(grid, 4.0, amount=0.5, mode="ritardando")
+    gaps = [b["start_time"] - a["start_time"] for a, b in zip(slow, slow[1:])]
+    assert gaps == sorted(gaps)
+
+
+def test_velocity_shapes():
+    grid = [_n(60, t, 0.5) for t in (0, 1, 2, 3)]
+    assert [n["velocity"] for n in music.velocity_shape(grid, "ramp_up", 40, 120, 4)] == \
+        [40, 60, 80, 100]
+    # velocity 0 would be a note-off, so the floor is 1
+    assert [n["velocity"] for n in music.velocity_shape(grid, "swell", 0, 100, 4)][:3] == \
+        [1, 50, 100]
+    offbeats = [_n(60, 0), _n(60, 0.5)]
+    assert [n["velocity"] for n in music.velocity_shape(offbeats, "accent", 50, 110)] == \
+        [110, 50]
+
+
+def test_recombine_moves_pitches_over_the_same_rhythm():
+    line = [_n(p, t, note_id=i) for i, (p, t) in enumerate([(60, 0), (62, 1), (64, 2)])]
+    rotated = sorted(music.recombine(line, "rotate", 1), key=lambda n: n["start_time"])
+    assert [n["pitch"] for n in rotated] == [62, 64, 60]
+    assert [n["note_id"] for n in rotated] == [0, 1, 2]       # same notes, new pitches
+    reversed_ = sorted(music.recombine(line, "reverse"), key=lambda n: n["start_time"])
+    assert [n["pitch"] for n in reversed_] == [64, 62, 60]
+    # A single note can take over a chord's pitch set (one new note added)
+    mixed = [_n(60, 0, note_id=1), _n(64, 0, note_id=2), _n(72, 1, note_id=3)]
+    swapped = music.recombine(mixed, "reverse")
+    at_one = sorted(n["pitch"] for n in swapped if n["start_time"] == 1)
+    assert at_one == [60, 64] and sum("note_id" not in n for n in swapped) == 1
+
+
+def test_span_modes():
+    line = [_n(60, 0, 0.1), _n(62, 1, 0.1), _n(64, 3, 0.1)]
+    assert [n["duration"] for n in music.span(line, "percent", 0.5, length=4)] == \
+        [0.5, 1.0, 0.5]
+    assert [n["duration"] for n in music.span(line, "fixed", 0.25)] == [0.25] * 3
+    assert [n["duration"] for n in music.span(line, "legato", length=4)] == [1.0, 2.0, 1.0]
+
+
+def test_arpeggiate_plays_chords_across_their_length():
+    out = sorted(music.arpeggiate(C_MAJOR_CHORD, "updown", rate=0.25),
+                 key=lambda n: n["start_time"])
+    assert [n["pitch"] for n in out] == [60, 64, 67, 64, 60, 64, 67, 64]
+    assert [n.get("note_id") for n in out[:3]] == [1, 2, 3]
+    assert all("note_id" not in n for n in out[3:])
+    two_octaves = music.arpeggiate(C_MAJOR_CHORD, "up", rate=0.5, octaves=2)
+    assert [n["pitch"] for n in sorted(two_octaves, key=lambda n: n["start_time"])] == \
+        [60, 64, 67, 72]
+
+
+def test_euclidean_rhythms():
+    def show(p):
+        return "".join("x" if hit else "." for hit in p)
+
+    # Toussaint's canonical forms
+    assert show(music.euclidean(3, 8)) == "x..x..x."        # tresillo
+    assert show(music.euclidean(5, 8)) == "x.xx.xx."        # cinquillo
+    assert show(music.euclidean(4, 9)) == "x.x.x.x.."       # aksak 2+2+2+3
+    assert show(music.euclidean(2, 5)) == "x.x.."           # 2+3
+    assert show(music.euclidean(4, 4)) == "xxxx" and show(music.euclidean(0, 3)) == "..."
+    assert music.euclidean(3, 8, rotation=1)[0] is False
+    notes = music.euclidean_notes([{"pitch": 36, "pulses": 3, "steps": 8, "accent": 120},
+                                   {"pitch": 42, "pulses": 4, "steps": 4}], length=4.0)
+    kicks = [n["start_time"] for n in notes if n["pitch"] == 36]
+    assert kicks == [0.0, 0.75, 1.5, 2.0, 2.75, 3.5]
+    assert [n["velocity"] for n in notes if n["pitch"] == 36][:2] == [120, 100]

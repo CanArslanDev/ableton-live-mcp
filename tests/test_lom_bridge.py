@@ -920,3 +920,48 @@ def test_create_locator_toggles_after_the_playhead_moved(script):
     assert song.current_song_time == 4.0
     run(script, "create_locator", name="Big Drop", time=16.0)   # renames, never toggles off
     assert [(c.name, c.time) for c in song.cue_points] == [("Big Drop", 16.0)]
+
+
+def test_midi_tools_add_modify_and_remove_notes_in_place(live_server):
+    script, call = live_server
+    clip = fake_live.FakeClip(name="Keys", length=4.0)
+    clip.add_new_notes([fake_live.MidiNoteSpecification(pitch=p, start_time=0.0, duration=2.0,
+                                                        velocity=100, mute=False)
+                        for p in (60, 64, 67)])
+    keys = script._song.tracks[1]
+    keys.clip_slots[3].clip, keys.clip_slots[3].has_clip = clip, True
+    ids_before = {n.note_id for n in clip._notes}
+
+    strummed = call("apply_midi_tool", track="Bass", clip_index=3, tool="strum",
+                    settings={"amount": 0.1})
+    assert strummed["notes_modified"] == 3 and strummed["notes_added"] == 0
+    assert sorted(n.start_time for n in clip._notes) == [0.0, 0.1, 0.2]
+
+    # A strummed chord no longer starts together; arpeggiate a fresh one
+    clip._notes[:] = []
+    clip.add_new_notes([fake_live.MidiNoteSpecification(pitch=p, start_time=0.0, duration=2.0,
+                                                        velocity=100, mute=False)
+                        for p in (60, 64, 67)])
+    ids_before = {n.note_id for n in clip._notes}
+    arp = call("apply_midi_tool", track="Bass", clip_index=3, tool="arpeggiate",
+               settings={"style": "up", "rate": 0.5})
+    assert arp["notes_modified"] == 3 and arp["notes_added"] == 1
+    assert {n.note_id for n in clip._notes} >= ids_before      # the chord's notes live on
+    assert sorted((n.start_time, n.pitch) for n in clip._notes)[:4] == [
+        (0.0, 60), (0.5, 64), (1.0, 67), (1.5, 60)]
+
+    with pytest.raises(Exception, match="does not take"):
+        call("apply_midi_tool", track="Bass", clip_index=3, tool="chop",
+             settings={"amount": 2})
+
+
+def test_generate_euclidean_on_drum_pads(live_server):
+    script, call = live_server
+    result = call("generate_euclidean", track="Drums", clip_index=1, bars=1, voices=[
+        {"pad": "kick", "pulses": 3, "steps": 8},
+        {"pad": "closed_hat", "pulses": 5, "steps": 8, "rotation": 2}])
+    assert [v["pattern"] for v in result["voices"]] == ["x..x..x.", "xx.xx.x."]
+    notes = script._song.tracks[0].clip_slots[1].clip._notes
+    kicks = sorted(n.start_time for n in notes if n.pitch == 36)
+    assert kicks == [0.0, 0.75, 1.5, 2.0, 2.75, 3.5]
+    assert {n.pitch for n in notes} == {36, 42}

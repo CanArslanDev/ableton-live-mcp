@@ -776,6 +776,321 @@ def constrain_to_scale(notes: list[dict], key: str,
     return out
 
 
+# ── MIDI Tools (Live 12's Transformations and Generators, as functions) ─────
+#
+# Notes keep their "note_id" when they are the same note moved or changed, and
+# new notes have none, so the caller can modify, add and remove in place.
+
+def _new(note: dict, **changes) -> dict:
+    """A new note (no id) based on `note`."""
+    fresh = {k: v for k, v in note.items() if k != "note_id"}
+    fresh.update(changes)
+    return fresh
+
+
+def chords(notes: list[dict], tolerance: float = 0.02) -> list[list[dict]]:
+    """Notes grouped by shared start time (within tolerance), in time order."""
+    groups: list[list[dict]] = []
+    for n in sorted(notes, key=lambda n: (n["start_time"], n["pitch"])):
+        if groups and abs(n["start_time"] - groups[-1][0]["start_time"]) <= tolerance:
+            groups[-1].append(n)
+        else:
+            groups.append([n])
+    return groups
+
+
+def strum(notes: list[dict], amount: float = 0.04, direction: str = "up") -> list[dict]:
+    """Spread each chord in time like a strummed guitar, `amount` beats between
+    strings: up (low to high), down, or alternate (up, down, up, …). Note ends
+    stay put."""
+    if direction not in ("up", "down", "alternate"):
+        raise ValueError("direction must be up, down or alternate")
+    out = []
+    for k, chord in enumerate(chords(_copy(notes))):
+        order = sorted(chord, key=lambda n: n["pitch"])
+        if direction == "down" or (direction == "alternate" and k % 2):
+            order.reverse()
+        for i, n in enumerate(order):
+            end = n["start_time"] + n["duration"]
+            n["start_time"] = round(n["start_time"] + i * amount, 6)
+            n["duration"] = round(max(0.01, end - n["start_time"]), 6)
+            out.append(n)
+    return out
+
+
+def ornament(notes: list[dict], kind: str = "flam", spacing: float = 0.0625,
+             velocity: float = 0.6, step: int = -1, key: str | None = None,
+             scale: str | Iterable[int] | None = None) -> list[dict]:
+    """Decorate the top note of every chord (or single note): "flam" adds a
+    softer hit of the same pitch `spacing` beats before it, "grace" a short
+    neighbour note leading in (`step` semitones, or scale steps when a key is
+    given). Notes too close to the clip start are left alone."""
+    if kind not in ("flam", "grace"):
+        raise ValueError("kind must be flam or grace")
+    pool = scale_pitches(*parse_key(key, scale), 0, 127) if key else None
+    out = _copy(notes)
+    for chord in chords(notes):
+        top = max(chord, key=lambda n: n["pitch"])
+        start = top["start_time"] - spacing
+        if start < -1e-9:
+            continue
+        pitch = top["pitch"]
+        if kind == "grace":
+            if pool:
+                here = min(range(len(pool)), key=lambda i: abs(pool[i] - pitch))
+                pitch = pool[min(len(pool) - 1, max(0, here + step))]
+            else:
+                pitch = min(127, max(0, pitch + step))
+        out.append(_new(top, pitch=pitch, start_time=round(max(0.0, start), 6),
+                        duration=round(spacing * 0.9, 6),
+                        velocity=int(max(1, round(top["velocity"] * velocity)))))
+    return out
+
+
+def chop(notes: list[dict], parts: int = 2, velocity_decay: float = 0.0) -> list[dict]:
+    """Split every note into `parts` equal repeats (ratchets); each repeat is
+    `velocity_decay` (0..1) softer than the one before."""
+    parts = max(1, int(parts))
+    out = []
+    for n in _copy(notes):
+        piece = n["duration"] / parts
+        for i in range(parts):
+            vel = int(max(1, round(n["velocity"] * (1 - velocity_decay) ** i)))
+            values = dict(start_time=round(n["start_time"] + i * piece, 6),
+                          duration=round(piece, 6), velocity=vel)
+            out.append(dict(n, **values) if i == 0 else _new(n, **values))
+    return out
+
+
+def connect(notes: list[dict], key: str, scale: str | Iterable[int] | None = None,
+            rate: float = 0.25, max_notes: int = 8) -> list[dict]:
+    """Fill the gaps of a melodic line with scale steps that walk from each
+    note towards the next (passing notes), `rate` beats apart, ending right
+    before the next note."""
+    root, intervals = parse_key(key, scale)
+    line = sorted(_copy(notes), key=lambda n: n["start_time"])
+    added = []
+    for a, b in zip(line, line[1:]):
+        gap = b["start_time"] - (a["start_time"] + a["duration"])
+        room = min(max_notes, int(gap / rate + 1e-9))
+        if room < 1:
+            continue
+        low, high = sorted((a["pitch"], b["pitch"]))
+        pool = scale_pitches(root, intervals, max(0, low - 12), min(127, high + 12))
+        up = b["pitch"] >= a["pitch"]
+        between = [p for p in pool if low < p < high]
+        if not between:
+            # Same or neighbouring notes: lean in from the scale step beyond the target
+            beyond = [p for p in pool if (p < b["pitch"] if up else p > b["pitch"])]
+            between = [max(beyond)] if up and beyond else ([min(beyond)] if beyond else [])
+        walk = between if up else list(reversed(between))
+        walk = walk[-room:]
+        velocity = int(round((a["velocity"] + b["velocity"]) / 2 * 0.8))
+        for j, pitch in enumerate(walk):
+            start = b["start_time"] - (len(walk) - j) * rate
+            added.append(_new(a, pitch=pitch, start_time=round(start, 6),
+                              duration=round(rate * 0.9, 6), velocity=max(1, velocity)))
+    return line + added
+
+
+def time_warp(notes: list[dict], length: float, amount: float = 0.5,
+              mode: str = "accelerando") -> list[dict]:
+    """Bend time inside the clip: "accelerando" crowds notes towards the end
+    (speeding up), "ritardando" towards the start; amount 0..1. The first and
+    last moments of the clip stay where they are."""
+    if mode not in ("accelerando", "ritardando"):
+        raise ValueError("mode must be accelerando or ritardando")
+    power = 1 + 2 * max(0.0, min(1.0, amount))
+
+    def warp(x: float) -> float:
+        x = max(0.0, min(1.0, x))
+        return 1 - (1 - x) ** power if mode == "accelerando" else x ** power
+
+    out = _copy(notes)
+    for n in out:
+        start = warp(n["start_time"] / length) * length
+        end = warp((n["start_time"] + n["duration"]) / length) * length
+        n["start_time"], n["duration"] = round(start, 6), round(max(0.01, end - start), 6)
+    return out
+
+
+def velocity_shape(notes: list[dict], shape: str = "ramp_up", low: int = 40, high: int = 120,
+                   length: float | None = None, cycles: float = 1.0,
+                   seed: int | None = None) -> list[dict]:
+    """Shape velocities over time (Live's Velocity Shaper): ramp_up,
+    ramp_down, swell (up then down), dip (down then up), sine (`cycles` over
+    the clip), random (between low and high), accent (on-beat notes high,
+    the rest low)."""
+    import math
+
+    out = _copy(notes)
+    if not out:
+        return out
+    total = length or max(n["start_time"] + n["duration"] for n in out) or 1.0
+    rng = random.Random(seed)
+    curves = {
+        "ramp_up": lambda x: x, "ramp_down": lambda x: 1 - x,
+        "swell": lambda x: 1 - abs(2 * x - 1), "dip": lambda x: abs(2 * x - 1),
+        "sine": lambda x: 0.5 + 0.5 * math.sin(2 * math.pi * cycles * x - math.pi / 2),
+    }
+    for n in out:
+        x = n["start_time"] / total
+        if shape == "random":
+            level = rng.random()
+        elif shape == "accent":
+            level = 1.0 if abs(n["start_time"] - round(n["start_time"])) < 0.01 else 0.0
+        elif shape in curves:
+            level = curves[shape](min(1.0, max(0.0, x)))
+        else:
+            raise ValueError(f"Unknown shape {shape!r}. Known: {', '.join(curves)}, random, accent")
+        n["velocity"] = int(min(127, max(1, round(low + (high - low) * level))))
+    return out
+
+
+def recombine(notes: list[dict], mode: str = "rotate", amount: int = 1,
+              seed: int | None = None, part: str = "pitch") -> list[dict]:
+    """Deal the clip's pitches (or velocities, or lengths) out again over the
+    same rhythm (Live's Recombine). Chords move as units. mode: rotate (by
+    `amount` positions), reverse, shuffle (seed). part: pitch | velocity |
+    duration."""
+    if part not in ("pitch", "velocity", "duration"):
+        raise ValueError("part must be pitch, velocity or duration")
+    groups = chords(_copy(notes))
+    if len(groups) < 2:
+        return [n for g in groups for n in g]
+    values = [[n[part] for n in sorted(g, key=lambda n: n["pitch"])] for g in groups]
+    if mode == "rotate":
+        k = amount % len(values)
+        values = values[k:] + values[:k]
+    elif mode == "reverse":
+        values = values[::-1]
+    elif mode == "shuffle":
+        random.Random(seed).shuffle(values)
+    else:
+        raise ValueError("mode must be rotate, reverse or shuffle")
+    out = []
+    for group, new in zip(groups, values):
+        group = sorted(group, key=lambda n: n["pitch"])
+        if part != "pitch":
+            for i, n in enumerate(group):
+                n[part] = new[min(i, len(new) - 1)]
+            out += group
+            continue
+        # A chord can take over a pitch set of another size
+        for i, pitch in enumerate(new):
+            if i < len(group):
+                group[i]["pitch"] = pitch
+                out.append(group[i])
+            else:
+                out.append(_new(group[0], pitch=pitch))
+    return out
+
+
+def span(notes: list[dict], mode: str = "percent", value: float = 0.5,
+         length: float | None = None) -> list[dict]:
+    """Set note lengths (Live's Span): "fixed" (value beats), "percent" (value
+    × the time to the next note, the last one to the clip end), "legato" (to
+    the next note), "scale" (value × current length)."""
+    out = sorted(_copy(notes), key=lambda n: n["start_time"])
+    starts = sorted({n["start_time"] for n in out})
+    end = length or (max(n["start_time"] + n["duration"] for n in out) if out else 0.0)
+    for n in out:
+        later = [s for s in starts if s > n["start_time"] + 1e-9]
+        room = (later[0] if later else end) - n["start_time"]
+        if mode == "fixed":
+            duration = value
+        elif mode == "percent":
+            duration = room * value
+        elif mode == "legato":
+            duration = room
+        elif mode == "scale":
+            duration = n["duration"] * value
+        else:
+            raise ValueError("mode must be fixed, percent, legato or scale")
+        n["duration"] = round(max(0.01, duration), 6)
+    return out
+
+
+def arpeggiate(notes: list[dict], style: str = "up", rate: float = 0.25, gate: float = 0.9,
+               octaves: int = 1, seed: int | None = None) -> list[dict]:
+    """Play every chord as an arpeggio over its own length: up, down, updown,
+    downup, random (seed), played (lowest first, as voiced). `octaves` > 1
+    adds the chord an octave up, `gate` is note length as a share of `rate`.
+    Single notes are left alone."""
+    rng = random.Random(seed)
+    out = []
+    for chord in chords(_copy(notes)):
+        if len(chord) == 1:
+            out += chord
+            continue
+        start = chord[0]["start_time"]
+        end = max(n["start_time"] + n["duration"] for n in chord)
+        base = sorted({n["pitch"] for n in chord})
+        pitches = [p + 12 * o for o in range(max(1, octaves)) for p in base if p + 12 * o <= 127]
+        if style == "up" or style == "played":
+            order = pitches
+        elif style == "down":
+            order = pitches[::-1]
+        elif style == "updown":
+            order = pitches + pitches[-2:0:-1]
+        elif style == "downup":
+            order = pitches[::-1] + pitches[1:-1]
+        elif style == "random":
+            order = None
+        else:
+            raise ValueError("style must be up, down, updown, downup, random or played")
+        velocity = int(round(sum(n["velocity"] for n in chord) / len(chord)))
+        count = max(1, int((end - start) / rate + 1e-9))
+        for k in range(count):
+            pitch = rng.choice(pitches) if order is None else order[k % len(order)]
+            values = dict(pitch=pitch, start_time=round(start + k * rate, 6),
+                          duration=round(rate * gate, 6), velocity=velocity)
+            # The chord's own notes become the first steps; the rest are new
+            out.append(dict(chord[k], **values) if k < len(chord) else _new(chord[0], **values))
+    return out
+
+
+def euclidean(pulses: int, steps: int, rotation: int = 0) -> list[bool]:
+    """`pulses` hits spread as evenly as possible over `steps` (Toussaint's
+    Euclidean rhythms: E(3,8) tresillo, E(5,8) cinquillo, E(4,9) aksak),
+    rotated left by `rotation` steps."""
+    if steps < 1 or not 0 <= pulses <= steps:
+        raise ValueError("Need 0 <= pulses <= steps and steps >= 1")
+    # Bjorklund: deal the leftover groups onto the others until at most one is left
+    groups = [[True]] * pulses + [[False]] * (steps - pulses)
+    hits, rest = groups[:pulses], groups[pulses:]
+    while len(rest) > 1 and hits:
+        k = min(len(hits), len(rest))
+        hits, rest = ([hits[i] + rest[i] for i in range(k)],
+                      hits[k:] if len(hits) > k else rest[k:])
+    pattern = [x for group in hits + rest for x in group]
+    k = rotation % steps
+    return pattern[k:] + pattern[:k]
+
+
+def euclidean_notes(voices: list[dict], length: float, step: float = 0.25) -> list[dict]:
+    """Notes for Euclidean voices over `length` beats. Each voice:
+    {"pitch": 36, "pulses": 3, "steps": 8, "rotation": 0, "velocity": 100,
+    "accent": 120} — accent (optional) is the velocity of each cycle's first
+    hit. A cycle of `steps` × `step` beats repeats regardless of bar lines,
+    so voices with different step counts drift against each other."""
+    notes = []
+    for voice in voices:
+        pattern = euclidean(int(voice["pulses"]), int(voice["steps"]),
+                            int(voice.get("rotation", 0)))
+        velocity = int(voice.get("velocity", 100))
+        accent = voice.get("accent")
+        total = int(round(length / step))
+        for i in range(total):
+            position = i % len(pattern)
+            if not pattern[position]:
+                continue
+            first = position == pattern.index(True)
+            notes.append(_note(int(voice["pitch"]), i * step, step * 0.9,
+                               accent if accent is not None and first else velocity))
+    return notes
+
+
 # ── Harmony analysis ─────────────────────────────────────────────────────────
 
 # Krumhansl–Kessler key profiles (tonic first)

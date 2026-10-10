@@ -259,6 +259,43 @@ def write_notes(path: str, notes: list[dict], mode: str = "replace", **extra: An
                                          **extra))
 
 
+def apply_note_edit(path: str, notes: list[dict], chosen: list[dict],
+                    changed: list[dict]) -> dict:
+    """Write `changed` in place of `chosen` as one batch (one undo step).
+
+    Notes that kept a note_id are modified in place (Live 11+: ids and the
+    per-note expression the API cannot read survive), chosen notes whose id
+    is gone are removed, notes without an id are added. Without note ids
+    (Live 10) the clip is rewritten.
+    """
+    if notes and all("note_id" in n for n in notes):
+        kept = {n["note_id"] for n in changed if "note_id" in n}
+        doomed = [n["note_id"] for n in chosen if n["note_id"] not in kept]
+        modified = [n for n in changed if "note_id" in n]
+        added = [n for n in changed if "note_id" not in n]
+        steps = []
+        if doomed:
+            steps.append({"type": "clip_write_notes", "params": {
+                "clip_path": path, "notes": [], "mode": "remove_ids", "note_ids": doomed}})
+        for mode, group in (("modify", modified), ("add", added)):
+            if group:
+                steps.append({"type": "clip_write_notes", "params": {
+                    "clip_path": path, "notes": group, "mode": mode}})
+        if steps:
+            result = batch(steps)
+            if result.get("failed"):
+                raise RuntimeError("Live refused the note edit: "
+                                   + to_json(batch_summary(result)))
+        return {"notes_modified": len(modified), "notes_added": len(added),
+                "notes_removed": len(doomed),
+                "notes_in_clip": len(notes) - len(doomed) + len(added)}
+    chosen_ids = {id(n) for n in chosen}
+    final = [n for n in notes if id(n) not in chosen_ids] + changed
+    for n in final:
+        n.pop("note_id", None)
+    return {"notes_in_clip": write_notes(path, final, "replace").get("written")}
+
+
 def prepare_clip(track: int | str, clip_index: int | None, length: float,
                  arrangement_time: float | None = None, name: str | None = None) -> str:
     """Return a path to a MIDI clip at least `length` beats long, creating it if needed."""
@@ -1029,25 +1066,75 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             raise ValueError(f"Unknown operation {operation!r}. Known: {', '.join(ops)}")
         changed = ops[op](chosen)
         summary = {"operation": op, "notes_affected": len(chosen)}
-        if chosen and all("note_id" in n for n in notes):
-            if op in ("dedupe", "delete"):
-                survivors = {n["note_id"] for n in changed}
-                doomed = [n["note_id"] for n in chosen if n["note_id"] not in survivors]
-                if doomed:
-                    write_notes(cp, [], "remove_ids", note_ids=doomed)
-                summary["notes_removed"] = len(doomed)
-            else:
-                result = write_notes(cp, changed, "modify")
-                summary["notes_modified"] = result.get("modified")
-            summary["notes_in_clip"] = len(notes) - summary.get("notes_removed", 0)
-            return to_json(summary)
-        # No note ids (Live 10): rewrite the clip
-        chosen_ids = {id(n) for n in chosen}
-        final = [n for n in notes if id(n) not in chosen_ids] + changed
-        for n in final:
-            n.pop("note_id", None)
-        result = write_notes(cp, final, "replace")
-        summary["notes_in_clip"] = result.get("written")
+        summary.update(apply_note_edit(cp, notes, chosen, changed))
+        return to_json(summary)
+
+    MIDI_TOOLS: dict[str, tuple[Callable, set[str]]] = {
+        "strum": (music.strum, {"amount", "direction"}),
+        "ornament": (music.ornament, {"kind", "spacing", "velocity", "step", "key", "scale"}),
+        "chop": (music.chop, {"parts", "velocity_decay"}),
+        "connect": (music.connect, {"rate", "max_notes", "key", "scale"}),
+        "time_warp": (music.time_warp, {"amount", "mode"}),
+        "velocity_shaper": (music.velocity_shape, {"shape", "low", "high", "cycles", "seed"}),
+        "recombine": (music.recombine, {"mode", "part", "amount", "seed"}),
+        "span": (music.span, {"mode", "value"}),
+        "arpeggiate": (music.arpeggiate, {"style", "rate", "gate", "octaves", "seed"}),
+    }
+
+    @tool(destructive=True)
+    def apply_midi_tool(track: int | str, tool: str, clip_index: int | None = None,
+                        arrangement_clip_index: int | None = None,
+                        settings: dict[str, Any] | None = None,
+                        pitch_low: int | str | None = None,
+                        pitch_high: int | str | None = None,
+                        time_start: float | None = None,
+                        time_end: float | None = None) -> str:
+        """Live 12's MIDI Tools (Transformations) on a clip's notes — all of
+        them, or those within a pitch and/or time range. One undo step; notes
+        that survive keep their ids and MPE.
+
+        tool → settings (defaults):
+        - strum: amount (0.04 beats between strings), direction up|down|alternate
+        - ornament: kind flam|grace, spacing (0.0625 beats), velocity (0.6 ×),
+          step (-1; grace notes move by scale steps in the set's key)
+        - chop: parts (2), velocity_decay (0..1, 0) — ratchets
+        - connect: rate (0.25), max_notes (8) — scale passing notes between notes
+        - time_warp: mode accelerando|ritardando, amount (0..1, 0.5)
+        - velocity_shaper: shape ramp_up|ramp_down|swell|dip|sine|random|accent,
+          low (40), high (120), cycles (1), seed
+        - recombine: mode rotate|reverse|shuffle, part pitch|velocity|duration,
+          amount (1), seed — new order over the same rhythm
+        - span: mode percent|fixed|legato|scale, value (0.5)
+        - arpeggiate: style up|down|updown|downup|random|played, rate (0.25),
+          gate (0.9), octaves (1), seed — chords become arpeggios
+        e.g. tool="strum", settings={"amount": 0.03, "direction": "alternate"}.
+        transform_clip_notes has transpose, quantize, humanize and more.
+        """
+        name = tool.strip().lower()
+        if name not in MIDI_TOOLS:
+            raise ValueError(f"Unknown tool {tool!r}. Known: {', '.join(MIDI_TOOLS)}")
+        function, allowed = MIDI_TOOLS[name]
+        options = dict(settings or {})
+        unknown = set(options) - allowed
+        if unknown:
+            raise ValueError(f"{name} does not take {sorted(unknown)}; it takes "
+                             f"{sorted(allowed)}")
+        cp = clip_path(track, clip_index, arrangement_clip_index)
+        data = read_notes(cp)
+        notes = data["notes"]
+        lo = music.parse_note(pitch_low) if pitch_low is not None else 0
+        hi = music.parse_note(pitch_high) if pitch_high is not None else 127
+        t0 = time_start if time_start is not None else float("-inf")
+        t1 = time_end if time_end is not None else float("inf")
+        chosen = [n for n in notes if lo <= n["pitch"] <= hi and t0 <= n["start_time"] < t1]
+        if name == "connect" or (name == "ornament" and options.get("kind") == "grace"):
+            options["key"], options["scale"] = resolve_key(options.get("key"),
+                                                           options.get("scale"), song_context())
+        if name in ("time_warp", "velocity_shaper", "span"):
+            options["length"] = float(data["length"])
+        changed = function(chosen, **options)
+        summary = {"tool": name, "notes_affected": len(chosen)}
+        summary.update(apply_note_edit(cp, notes, chosen, changed))
         return to_json(summary)
 
     # ── Generators ───────────────────────────────────────────────────────────
@@ -1157,6 +1244,48 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "pad_mapping": pads or "General MIDI defaults",
             "pads_used": [music.note_name(p) for p in used],
             "time_signature": context["time_signature"], "length_beats": bars * bar})
+
+    @tool(destructive=True)
+    def generate_euclidean(track: int | str, voices: list[dict], bars: int = 2,
+                           step: float | str = "1/16", clip_index: int | None = 0,
+                           arrangement_time: float | None = None, replace: bool = True,
+                           clip_name: str | None = None) -> str:
+        """Euclidean rhythms (Live 12's Euclidean generator): each voice spreads
+        `pulses` hits as evenly as possible over `steps`, and its cycle repeats
+        regardless of bar lines, so voices of different lengths drift apart.
+
+        voices: [{"pad": "kick", "pulses": 3, "steps": 8, "rotation": 0,
+        "velocity": 100, "accent": 120}, …] — pad is a role found on the
+        track's Drum Rack (kick, snare, closed_hat, …), a note name ("C1") or a
+        MIDI number; accent (optional) is the velocity of each cycle's first hit.
+        step: length of one step, "1/16" (0.25 beat), "1/8", "1/8T", or beats.
+        Classics: E(3,8) tresillo, E(5,8) cinquillo, E(7,16), E(5,16) bossa;
+        E(4,9) = 2+2+2+3, the Turkish aksak.
+        """
+        grids = {"1/4": 1.0, "1/8": 0.5, "1/8t": 1 / 3, "1/16": 0.25, "1/16t": 1 / 6,
+                 "1/32": 0.125}
+        length = float(grids[str(step).lower()]) if str(step).lower() in grids \
+            else float(step)
+        context = song_context()
+        pads = dict(music.GM_DRUMS, **drum_mapping_from_rack(track))
+        resolved = []
+        for voice in voices:
+            pad = voice.get("pad", voice.get("pitch", "kick"))
+            pitch = pads[str(pad).lower()] if str(pad).lower() in pads \
+                else music.parse_note(pad)
+            resolved.append(dict(voice, pitch=pitch))
+        total = bars * context["beats_per_bar"]
+        notes = music.euclidean_notes(resolved, total, length)
+        path = prepare_clip(track, clip_index, total, arrangement_time,
+                            clip_name or "Euclid " + " ".join(
+                                f"E({v['pulses']},{v['steps']})" for v in voices))
+        written = write_notes(path, notes, "replace" if replace else "add")
+        return generated_result(path, notes, written, {
+            "voices": [{"pad": music.note_name(v["pitch"]), "pattern": "".join(
+                "x" if hit else "." for hit in music.euclidean(
+                    int(v["pulses"]), int(v["steps"]), int(v.get("rotation", 0))))}
+                for v in resolved],
+            "time_signature": context["time_signature"], "length_beats": total})
 
     @tool(destructive=True)
     def generate_bassline(track: int | str, progression: str | None = None,
