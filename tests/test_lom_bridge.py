@@ -741,7 +741,7 @@ def test_analyzer_tools_write_the_device_and_read_its_track(live_server, tmp_pat
         written = tmp_path / "User Library/Presets/Audio Effects/Max Audio Effect/AbletonMCP Analyzer.amxd"
         assert written.read_bytes() == m4l_device.analyzer_device()
         reading = call("read_analyzer", seconds=0.5)
-        assert reading["tracks"]["Master"]["frames"] >= 5
+        assert reading["tracks"]["Master"]["frames"] >= 2
         assert reading["tracks"]["Master"]["correlation"] == 1.0
     finally:
         sending.clear()

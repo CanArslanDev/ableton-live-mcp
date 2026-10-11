@@ -1989,9 +1989,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                          "files": [str(f) for f in embed_files],
                                          "out": str(out), "model": ml.CLAP_MODEL},
                                ml_progress(ctx))
-            data = np.load(out)
-            vectors = data["files"] if "files" in data else np.zeros((0, 512), np.float32)
-            text_vector = data["texts"][0] if text else None
+            # np.load keeps the file open; Windows cannot delete the folder until it closes
+            with np.load(out) as data:
+                vectors = (np.array(data["files"]) if "files" in data
+                           else np.zeros((0, 512), np.float32))
+                text_vector = np.array(data["texts"][0]) if text else None
         if batch:
             index.add(batch, vectors[len(embed_files) - len(batch):])
             await asyncio.to_thread(index.save)

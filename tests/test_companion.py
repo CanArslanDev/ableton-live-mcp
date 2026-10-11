@@ -65,6 +65,12 @@ class FakeCompanion:
                 stream.flush()
 
     def close(self):
+        # On Linux, close() alone leaves a thread blocked in accept() serving
+        # the port; shutdown() wakes it (macOS refuses shutdown on a listener)
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.sock.close()
 
 

@@ -195,9 +195,11 @@ class SoundIndex:
             return
         import numpy as np
         try:
-            data = np.load(self.path, allow_pickle=False)
-            for path, size, mtime, vector in zip(data["paths"], data["sizes"], data["mtimes"],
-                                                 data["vectors"]):
+            # Closed again right away: save() replaces this file, which Windows
+            # refuses while it is open
+            with np.load(self.path, allow_pickle=False) as data:
+                columns = [np.array(data[k]) for k in ("paths", "sizes", "mtimes", "vectors")]
+            for path, size, mtime, vector in zip(*columns):
                 self.entries[str(path)] = (int(size), float(mtime), vector)
         except Exception as e:  # damaged index: start again
             logger.warning("Ignoring the sound index %s: %s", self.path, e)

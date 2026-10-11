@@ -1438,8 +1438,10 @@ class AbletonMCP(LomMixin, ControlSurface):
             return
         try:
             with open(SESSION_FILE) as handle:
-                if json.load(handle).get("token") == token:
-                    os.remove(SESSION_FILE)
+                mine = json.load(handle).get("token") == token
+            # Closed first: Windows cannot delete a file that is open
+            if mine:
+                os.remove(SESSION_FILE)
         except Exception:
             pass
     
