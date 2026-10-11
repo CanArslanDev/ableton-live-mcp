@@ -107,6 +107,14 @@ claude plugin validate .                       # plugin manifest + skills
   are always a separate step from structural ones (name, color, create), and
   Live may still merge two changes of the *same* parameter made within a few
   hundred ms (like a knob turn) — that is Live, not a bug.
+- **Undo history** (12.4, probes with a marker change before each case):
+  one command (a batch too) leaves one step for its parameter changes
+  (device parameters, mixer, tempo, mute) and one for everything else
+  (names, colors, clips, notes, devices, tracks), so a batch mixing both
+  takes two undos. A value set to what it already was leaves no step, and
+  neither do transport, the playhead, selection, loop, metronome, arm or
+  solo. `journal.undo_steps` and the fake's undo (`fake_live.FakeSong`)
+  follow these rules; verified end to end with `agent_changes(undo=1)`.
 - **Value objects outside `Live.*`:** `RoutingType` reports module `Track` and has
   no `_live_ptr`; `_lom_value` turns any non-builtin object into a `$ref`.
 - **Vector types:** some lists are Live vector classes, not tuples;
@@ -274,11 +282,11 @@ Measured on Live 12.3.8:
   smaller than objects). Keep docstrings to what the model needs to call the
   tool right; tools a newer one replaces belong in the `full` profile.
 - **Safety net.** `journal.py` gives each tool call an entry (a contextvar
-  set in `register_tool`); `AbletonConnection.send_command` counts the
-  modifying commands sent inside it (`journal.is_read_only` mirrors the
-  script's READ_ONLY_COMMANDS/METHODS; a test keeps them equal). Measured on
-  Live 12.4: N modifying commands = N undo steps, so `agent_changes(undo=N)`
-  undoes exactly that. Parameter tools call `auto_snapshot` first (the last
+  set in `register_tool`); `AbletonConnection.send_command` reports every
+  command with its result, and `journal.undo_steps` counts the steps Live
+  recorded by the rules under "Undo history" below (`journal.is_read_only`
+  mirrors the script's READ_ONLY_COMMANDS/METHODS; a test keeps them equal),
+  so `agent_changes(undo=N)` undoes exactly the last N calls. Parameter tools call `auto_snapshot` first (the last
   10 are kept; tests write them to a temp folder via conftest).
   `@tool(..., preview=True)` + a `preview` parameter: `PREVIEW` makes
   `prepare_clip`/`write_notes` no-ops and `send` refuse any change. Deletes

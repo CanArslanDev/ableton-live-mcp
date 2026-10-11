@@ -6,7 +6,9 @@
 
 - **Safety net.** `agent_changes` lists what the assistant changed in this
   session and, with `undo=N`, takes back exactly the undo steps those changes
-  made (verified on Live 12.4: one step per modifying command). Parameter
+  made, counted the way Live 12.4 records them (parameter and other changes
+  are separate steps; unchanged values, transport, selection, arm and solo
+  make none). Parameter
   changes leave an automatic snapshot (the last 10), which still works after
   the user edited the set. The seven generators, `transform_clip_notes` and
   `apply_midi_tool` take `preview=true`. Deleting a track, scene, clip or

@@ -1,11 +1,20 @@
 """What the agent changed in Live during this server's life, to list and undo.
 
-The Remote Script runs every modifying command as its own step in Live's undo
-history (begin/end_undo_step around it; a batch is one command). Measured on
-Live 12.4: a tool call that sent N modifying commands is taken back by exactly
-N undos, mixer, notes, devices and chains alike. So `register_tool` opens an
-entry for each tool call, the connection counts the modifying commands sent
-inside it, and agent_changes(undo=N) undoes exactly those steps.
+The Remote Script wraps every modifying command (a batch is one command) in
+begin/end_undo_step. Measured on Live 12.4, what that leaves in Live's undo
+history:
+
+- one step for the command's parameter changes (device parameters, mixer,
+  tempo, mute) and one for its other changes (names, colors, clips, notes,
+  devices, tracks): a batch mixing both takes two undos;
+- no step for a value set to what it already was, nor for transport, the
+  playhead, selection, loop, metronome, arm or solo.
+
+`register_tool` opens an entry for each tool call, the connection reports each
+command with its result (`note_command`), `undo_steps` counts the steps by
+those rules, and agent_changes(undo=N) undoes exactly that many. Live also
+merges two changes of one parameter made within a few hundred ms (a knob
+turn); tool calls are further apart than that.
 
 Live's undo history is shared with the user, so an undo after the user edited
 something takes their edit back first; tools that change parameters also keep
@@ -39,6 +48,29 @@ READ_ONLY_METHODS = frozenset([
 ])
 
 
+# Properties and methods whose changes Live keeps out of the undo history
+# (measured on 12.4: transport, playhead, selection, loop, metronome, arm,
+# solo; the other view state by the same rule)
+NO_UNDO_PROPERTIES = frozenset([
+    "is_playing", "current_song_time", "loop", "metronome", "arm", "solo",
+    "selected_track", "selected_scene", "selected_parameter", "selected_chain",
+    "selected_drum_pad", "detail_clip", "highlighted_clip_slot", "follow_song", "draw_mode",
+])
+NO_UNDO_METHODS = frozenset([
+    "start_playing", "stop_playing", "continue_playing", "stop_all_clips", "play_selection",
+    "fire", "stop", "set_fire_button_state", "jump_by", "scrub_by", "jump_to_next_cue",
+    "jump_to_prev_cue", "preview_item", "stop_preview", "select_device", "undo", "redo",
+    "show_view", "hide_view", "focus_view", "scroll_view", "zoom_view",
+])
+NO_UNDO_COMMANDS = frozenset([
+    "fire_clip", "stop_clip", "start_playback", "stop_playback",
+    "switch_to_arrangement_view", "set_current_song_time",
+])
+# Changes Live files as parameter changes (a step apart from the others)
+PARAMETER_PROPERTIES = frozenset(["value", "tempo", "mute"])
+PARAMETER_COMMANDS = frozenset(["param_set_display", "set_tempo", "set_device_parameter"])
+
+
 def is_read_only(command: str, params: dict | None) -> bool:
     """Whether the Remote Script runs this command without an undo step."""
     params = params or {}
@@ -53,6 +85,43 @@ def is_read_only(command: str, params: dict | None) -> bool:
             isinstance(c, dict) and c.get("type") != "batch"
             and is_read_only(c.get("type", ""), c.get("params") or {}) for c in commands)
     return False
+
+
+def undo_steps(command: str, params: dict | None, result: Any = None) -> int:
+    """How many steps one command left in Live's undo history (0, 1 or 2)."""
+    kinds: set[str] = set()
+    _change_kinds(command, params or {}, result, kinds)
+    return len(kinds)
+
+
+def _change_kinds(command: str, params: dict, result: Any, kinds: set[str]) -> None:
+    if command in NO_UNDO_COMMANDS or is_read_only(command, params):
+        return
+    outcome = result if isinstance(result, dict) else {}
+    if command == "batch":
+        steps = [s for s in params.get("commands") or [] if isinstance(s, dict)]
+        ran = outcome.get("results")
+        for index, step in enumerate(steps):
+            done = ran[index] if isinstance(ran, list) and index < len(ran) else None
+            if isinstance(ran, list) and (not isinstance(done, dict)
+                                          or done.get("status") != "success"):
+                continue  # refused, or never ran after an earlier failure
+            _change_kinds(str(step.get("type", "")), step.get("params") or {},
+                          (done or {}).get("result"), kinds)
+        return
+    if command == "lom_set":
+        prop = str(params.get("property") or "")
+        if prop in NO_UNDO_PROPERTIES:
+            return
+        if "old_value" in outcome and outcome.get("old_value") == outcome.get("value"):
+            return  # set to what it already was
+        kinds.add("parameter" if prop in PARAMETER_PROPERTIES else "other")
+        return
+    if command == "param_set_display" and "old" in outcome and outcome.get("old") == outcome.get("new"):
+        return
+    if command == "lom_call" and str(params.get("method") or "") in NO_UNDO_METHODS:
+        return
+    kinds.add("parameter" if command in PARAMETER_COMMANDS else "other")
 
 
 @dataclass
@@ -111,11 +180,11 @@ def not_recorded() -> Iterator[None]:
         _current.reset(token)
 
 
-def note_command(command: str, params: dict | None) -> None:
+def note_command(command: str, params: dict | None, result: Any = None) -> None:
     """Called by the connection after Live ran a command."""
     entry = _current.get()
-    if entry is not None and not is_read_only(command, params):
-        entry.steps += 1
+    if entry is not None:
+        entry.steps += undo_steps(command, params, result)
 
 
 def attach_snapshot(name: str) -> None:

@@ -136,7 +136,7 @@ class AbletonConnection:
                 timeout = LONG_RUNNING_COMMANDS.get(command_type, DEFAULT_TIMEOUT)
             try:
                 result = self._exchange(command_type, params or {}, timeout)
-                journal.note_command(command_type, params)
+                journal.note_command(command_type, params, result)
                 return result
             except AbletonCommandError:
                 raise

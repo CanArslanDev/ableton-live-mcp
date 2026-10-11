@@ -183,3 +183,54 @@ def test_note_rows_keep_every_field_and_drop_defaults():
                      "notes": [[3, 60, "C3", 0, 0.25, 100], [4, 64, "E3", 0.1235, 0.5, 90.5]],
                      "note_extras": {"1": {"mute": True, "probability": 0.5}}}
     assert note_table([])["notes"] == []
+
+
+def test_undo_steps_follow_what_live_records():
+    """Measured on Live 12.4 (one probe per row): parameter changes and other
+    changes are separate steps; same values, transport and selection none."""
+    from MCP_Server.journal import undo_steps
+
+    def put(prop, old=0, new=1, path="live_set tracks 0"):
+        return ("lom_set", {"path": path, "property": prop, "value": new},
+                {"property": prop, "old_value": old, "value": new})
+
+    def batch(*steps):
+        return ("batch", {"commands": [{"type": c, "params": p} for c, p, _ in steps]},
+                {"results": [{"status": "success", "result": r} for _, _, r in steps]})
+
+    volume, pan = put("value", 0.85, 0.5), put("value", 0.0, 0.3)
+    rename, color = put("name", "A", "B"), put("color_index", 1, 5)
+    mute, solo = put("mute", False, True), put("solo", False, True)
+    cases = {
+        "tempo": (put("tempo", 120.0, 121.0), 1),
+        "same tempo again": (put("tempo", 121.0, 121.0), 0),
+        "solo": (solo, 0), "arm": (put("arm", False, True), 0),
+        "loop": (put("loop", False, True), 0), "metronome": (put("metronome", False, True), 0),
+        "playhead": (put("current_song_time", 0.0, 8.0), 0),
+        "selection": (put("selected_track", {"$ref": "id 1"}, {"$ref": "id 2"}), 0),
+        "start_playing": (("lom_call", {"path": "live_set", "method": "start_playing"}, {}), 0),
+        "fire": (("lom_call", {"path": "live_set tracks 0 clip_slots 0", "method": "fire"}, {}), 0),
+        "create_clip": (("lom_call", {"path": "live_set tracks 0 clip_slots 0",
+                                      "method": "create_clip", "args": [4]}, {}), 1),
+        "volume + pan": (batch(volume, pan), 1),
+        "rename + color": (batch(rename, color), 1),
+        "volume + rename": (batch(volume, rename), 2),
+        "mute + rename": (batch(mute, rename), 2),
+        "mute + solo + volume": (batch(mute, solo, volume), 1),
+        "same values": (batch(put("name", "A", "A"), put("tempo", 121.0, 121.0)), 0),
+        "display unchanged": (("param_set_display", {"path": "id 3", "value": "-6 dB"},
+                               {"old": "-6.0 dB", "new": "-6.0 dB"}), 0),
+        "display changed": (("param_set_display", {"path": "id 3", "value": "-8 dB"},
+                             {"old": "-6.0 dB", "new": "-8.0 dB"}), 1),
+        "fire_clip": (("fire_clip", {"track_index": 0, "clip_index": 0}, {}), 0),
+        "read": (("lom_get", {"path": "live_set", "properties": ["tempo"]}, {}), 0),
+    }
+    for label, ((command, params, result), steps) in cases.items():
+        assert undo_steps(command, params, result) == steps, label
+    # A batch step that failed, or never ran after one that did, changed nothing
+    command, params, result = batch(volume, rename)
+    result["results"][1] = {"status": "error", "message": "no"}
+    assert undo_steps(command, params, result) == 1
+    result["results"].pop()
+    assert undo_steps(command, params, result) == 1
+
