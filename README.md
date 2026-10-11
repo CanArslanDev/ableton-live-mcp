@@ -63,13 +63,14 @@ while testing against Live 12.3.
 | **Snapshots & A/B** | `snapshot` saves the mixer and every device parameter (racks included), shows what changed in Live's own units, and restores it in one undo step; automated parameters are left alone |
 | **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a Session scene, the clips playing or an Arrangement section and measures it; `analyze_audio_file`, `analyze_clip_audio` |
 | **Mix diagnosis** | `mix_doctor` records every track and the master in one pass and reports masking (which parts fight in which band, how often, what to do), stray low end, phase, overs and the master against a streaming target; `capture_stems` returns the stem files; `compare_to_reference` compares tonal balance, loudness, dynamics and width with a reference track and returns EQ Eight settings that move the mix towards it |
+| **Real-time analyzer** | `install_analyzer` puts the AbletonMCP Analyzer, a Max for Live device this server generates, on a track or the master; `read_analyzer` then reports per track, while the set plays and without recording, octave-band levels, loudness (within ~0.1 LU of an offline BS.1770 measurement in our test), stereo correlation and width, peak and RMS. Needs Max for Live (Suite, Standard with the add-on, or the Trial) |
 | **Machine learning** | `separate_stems` splits a mix into drums, bass, vocals and other with Demucs, optionally onto new tracks where the source clip was; `audio_to_midi` turns a melody, bass line or chords into a MIDI clip with Spotify's Basic Pitch; `find_similar_sounds` finds samples by description ("dusty vinyl kick") or by example with CLAP. Each runs in its own environment that uv sets up the first time (Demucs ~0.5 GB, Basic Pitch ~150 MB, CLAP ~1.2 GB) and leaves the server's memory when done. On an M-series Mac: a 20-second mix separates in ~9 s, a phrase transcribes in ~4 s, a search over indexed sounds takes ~4 s |
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview` and `ableton://events`, pushed to clients that subscribe (both MCP protocol versions) |
 | **Panels** | In clients that support MCP Apps (Claude Desktop, claude.ai), 22 tools show an interactive panel with their result: mixer and Session grid with scene launch, level meters, the mix doctor's masking heat map, the reference curve with a one-click EQ, snapshot A/B buttons, a piano roll of generated clips, a Drum Rack pad grid with sample swapping, and a makam keyboard. Other clients get the same results as text |
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-70 tools in the default profile (92 with `ABLETON_MCP_PROFILE=full`), plus
+72 tools in the default profile (94 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -274,7 +275,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 266 tests, no Live or models required
+uv run --with pytest pytest -q            # 277 tests, no Live or models required
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb
 claude plugin validate .                  # the Claude Code plugin and its skills

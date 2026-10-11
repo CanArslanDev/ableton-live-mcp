@@ -28,6 +28,8 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
 | `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
+| `MCP_Server/m4l_device.py` | Builds the AbletonMCP Analyzer (.amxd) as bytes: the Max patch as JSON. |
+| `MCP_Server/analyzer.py` | UDP/OSC listener for the analyzer's messages; levels, bands, correlation, approximate LUFS. |
 | `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP) in uv-built environments; seconds→beats; the CLAP sound index. |
 | `MCP_Server/ml_worker.py` | The job side: runs in those environments, imports nothing from `MCP_Server`, talks JSON lines. |
 | `MCP_Server/als.py` | Reads Live Set files (.als) without Live: settings, tracks, devices, clips and notes, samples, comparing and finding sets. Never writes them. |
@@ -168,6 +170,25 @@ Measured on Live 12.3.8:
   device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
+
+## Max for Live analyzer (built and checked in Live 12.4 Trial, Max 9)
+
+- An unfrozen .amxd is chunks: `ampf` + uint32 4 + type (`aaaa` audio
+  effect), `meta` + uint32 4 + 4 zero bytes, `ptch` + uint32 length + the
+  patcher JSON ending in NUL (as Live's own `Misc/Max Devices/Max Audio
+  Effect.amxd`; Ableton's devices are encrypted, `ciph`).
+  `project.amxdtype` is the type as a big-endian int.
+- Max's `live.path` ids are not the Remote Script's LOM ids (the first
+  device reported id 1), so the device sends its track's *name*, read with
+  `live.object get name` on every message.
+- `fffb~`'s resonant bands let the bass leak upwards (5–15 dB too much above
+  1 kHz); a chain of `cross~` crossovers at the octave edges matches octave
+  filters within ~1 dB and sums to the full-band power.
+- Live keeps a loaded device's patch when the file changes: the OSC address
+  carries a version (`/ableton-mcp/analyzer/2`), and `install_analyzer`
+  replaces a copy that still sends an older one.
+- The device file is generated, never committed: change `m4l_device.py`,
+  bump `VERSION`, and check in Live (it must load and send).
 
 ## Machine learning (measured on an M-series Mac, 2026-10-11)
 

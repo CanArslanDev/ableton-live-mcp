@@ -47,6 +47,15 @@ Run `mix_doctor` again on the same section and report what changed. The user
 can A/B with `snapshot(action="restore", name="before mix")` and a second
 snapshot of the new state.
 
+## Watching the mix while it plays
+
+With Max for Live available (Suite, or the Trial), `install_analyzer()` puts
+the AbletonMCP Analyzer on the master (or `track=...`), and
+`read_analyzer(seconds=4)` reports octave bands, loudness, correlation and
+width per analyzed track while the set plays, without recording. Use it to
+check a change quickly; use `mix_doctor` and `render_and_analyze` for the
+full, exact picture.
+
 ## 5. Match a reference
 
 `compare_to_reference(reference_path="/path/to/reference.wav")` compares

@@ -3461,6 +3461,128 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             await asend("lom_call", {"path": "live_set", "method": "delete_track",
                                      "args": [index]})
 
+    # ── Max for Live analyzer ────────────────────────────────────────────────
+
+    def analyzer_file() -> Path:
+        from . import als, m4l_device
+        libraries = als._user_libraries()
+        if not libraries:
+            raise RuntimeError("No User Library found to put the analyzer device in")
+        return (libraries[0] / "Presets" / "Audio Effects" / "Max Audio Effect"
+                / f"{m4l_device.NAME}.amxd")
+
+    @tool(idempotent=True)
+    async def install_analyzer(track: int | str = "master") -> str:
+        """Put the AbletonMCP Analyzer on a track (default the master): a Max
+        for Live audio effect that passes audio through and sends this server
+        octave-band levels, stereo correlation and width, levels and an
+        approximate loudness ten times a second, without recording. Read them
+        with read_analyzer. Needs Max for Live (Suite, or Standard with the
+        add-on; the Trial has it). The device file goes into the User Library
+        (Presets › Audio Effects › Max Audio Effect) the first time.
+        """
+        from . import analyzer, m4l_device
+
+        target = analyzer_file()
+        device = m4l_device.analyzer_device()
+        if not target.is_file() or target.read_bytes() != device:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(device)
+        listening = analyzer.listener()
+        tp = track_path(track)
+
+        async def on_track() -> list[dict]:
+            items = (await asend("lom_get", {"path": f"{tp} devices",
+                                             "properties": ["name"]}))["items"]
+            return [d for d in items if d.get("name") == m4l_device.NAME]
+
+        async def load() -> None:
+            # Live notices a new file in the User Library after a moment
+            for _attempt in range(30):
+                try:
+                    item_id, _label = await asyncio.to_thread(browser_item_id, m4l_device.NAME,
+                                                              "user_library")
+                    break
+                except ValueError:
+                    await asyncio.sleep(1.0)
+            else:
+                raise RuntimeError(f"Live's browser does not list {target.name} yet; open the "
+                                   "User Library once in Live's browser, then try again.")
+            result = await asyncio.to_thread(load_items, track, [(None, item_id)])
+            if not result["ok"]:
+                raise RuntimeError(f"Live could not load the analyzer: {result['steps']}")
+
+        async def receiving_from(name: str) -> bool:
+            for _attempt in range(40):  # Max starts a device in a second or two
+                if time.monotonic() - listening.last_seen().get(name, -1e9) < 1.0:
+                    return True
+                await asyncio.sleep(0.25)
+            return False
+
+        replaced = False
+        found = await on_track()
+        if not found:
+            await load()
+            found = await on_track()
+        name = (await asend("lom_get", {"path": tp, "properties": ["name"]}))["name"]
+        receiving = await receiving_from(name)
+        if not receiving and time.monotonic() - listening.outdated_at < 2.0:
+            # A copy from an older build of the device: Live keeps the file it loaded
+            devices = (await asend("lom_get", {"path": f"{tp} devices",
+                                               "properties": ["name"]}))["items"]
+            for index in reversed([i for i, d in enumerate(devices)
+                                   if d.get("name") == m4l_device.NAME]):
+                await asend("lom_call", {"path": tp, "method": "delete_device",
+                                         "args": [index]})
+            await load()
+            found = await on_track()
+            replaced = True
+            receiving = await receiving_from(name)
+        payload = {"device": str(target), "track": track, "on_track": len(found),
+                   "receiving": receiving}
+        if replaced:
+            payload["replaced"] = "an older version of the device"
+        if not receiving:
+            payload["note"] = ("No data from the device yet. If it shows an error in Live, Max "
+                               "for Live may be unavailable; otherwise call read_analyzer while "
+                               "the set plays.")
+        return to_json(payload)
+
+    @tool(read_only=True)
+    async def read_analyzer(seconds: float = 3.0, play: bool = False) -> str:
+        """Listen to every AbletonMCP Analyzer (see install_analyzer) for a few
+        seconds while the set plays, without recording: per track,
+        octave-band levels (31 Hz–16 kHz), approximate loudness (LUFS, about
+        ±1 LU; render_and_analyze measures exactly), peak and RMS, stereo
+        correlation (1 mono, 0 wide, below 0 cancels in mono) and side/mid
+        balance, with notes on what stands out. play: start playback for
+        the reading if the set is stopped (and stop again).
+        """
+        from . import analyzer
+
+        seconds = max(0.5, min(float(seconds), 30.0))
+        listening = analyzer.listener()
+        started_playing = False
+        if play and not (await asend("lom_get", {"path": "live_set",
+                                                 "properties": ["is_playing"]}))["is_playing"]:
+            await asend("lom_call", {"path": "live_set", "method": "start_playing"})
+            started_playing = True
+            await asyncio.sleep(0.3)
+        start = time.monotonic()
+        try:
+            await asyncio.sleep(seconds)
+        finally:
+            if started_playing:
+                await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
+        frames = listening.since(start)
+        if not frames:
+            raise RuntimeError("No analyzer sent anything: put one on a track with "
+                               "install_analyzer (needs Max for Live), and check that the "
+                               "device is on.")
+        tracks = {name: await asyncio.to_thread(analyzer.summary, device_frames)
+                  for name, device_frames in frames.items()}
+        return to_json({"seconds": seconds, "tracks": tracks})
+
     # ── Resources ────────────────────────────────────────────────────────────
 
     @mcp.resource("ableton://session/overview", mime_type="application/json")

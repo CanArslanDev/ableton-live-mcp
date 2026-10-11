@@ -711,6 +711,45 @@ def test_find_similar_sounds_indexes_once_then_searches(live_server, tmp_path, m
         call("find_similar_sounds", folder=str(folder))
 
 
+def test_analyzer_tools_write_the_device_and_read_its_track(live_server, tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
+    from test_analyzer import frame, osc
+
+    from MCP_Server import als, analyzer, m4l_device
+
+    script, call = live_server
+    monkeypatch.setattr(als, "_user_libraries", lambda: [tmp_path / "User Library"])
+    listener = analyzer.Listener(port=0)
+    monkeypatch.setattr(analyzer, "listener", lambda: listener)
+    script._song.master_track.devices.append(
+        fake_live.FakeDevice(m4l_device.NAME, "MxDeviceAudioEffect"))
+    sending = threading.Event()
+    sending.set()
+
+    def device():
+        while sending.is_set():
+            listener.feed(osc(m4l_device.ADDRESS, "Master", 1, *frame()), _time.monotonic())
+            _time.sleep(0.05)
+
+    thread = threading.Thread(target=device, daemon=True)
+    thread.start()
+    try:
+        installed = call("install_analyzer")
+        assert installed["receiving"] and installed["on_track"] == 1
+        written = tmp_path / "User Library/Presets/Audio Effects/Max Audio Effect/AbletonMCP Analyzer.amxd"
+        assert written.read_bytes() == m4l_device.analyzer_device()
+        reading = call("read_analyzer", seconds=0.5)
+        assert reading["tracks"]["Master"]["frames"] >= 5
+        assert reading["tracks"]["Master"]["correlation"] == 1.0
+    finally:
+        sending.clear()
+        thread.join()
+    with pytest.raises(Exception, match="No analyzer sent anything"):
+        call("read_analyzer", seconds=0.5)
+
+
 def test_add_device_inserts_by_name_and_applies_settings(live_server):
     script, call = live_server
     bass = script._song.tracks[1]
