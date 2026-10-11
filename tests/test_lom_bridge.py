@@ -1488,3 +1488,28 @@ def test_tools_do_not_wait_behind_the_watchers_long_poll(live_server):
 
     anyio.run(main)
     assert max(timings) < 0.5, timings
+
+
+def test_memory_in_the_set_and_for_the_user(live_server):
+    from MCP_Server import journal
+
+    journal.clear()
+    script, call = live_server
+    call("memory", action="remember", text="Reference: Burial – Archangel", key="reference")
+    call("memory", action="remember", text="Prefers warm, tape-saturated drums", scope="user")
+    kept = call("memory")
+    assert [n["text"] for n in kept["set"]] == ["Reference: Burial – Archangel"]
+    assert "Prefers warm, tape-saturated drums" in [n["text"] for n in kept["user"]]
+    # Inside the set (Song.set_data), and on the overview
+    assert "Archangel" in script._song.get_data("ableton_mcp_memory", "")
+    overview = call("get_session_overview")
+    assert overview["memory"]["set"] == ["reference: Reference: Burial – Archangel"]
+    # A keyed note is replaced; forgetting by words
+    call("memory", action="remember", text="Reference: Four Tet – Baby", key="reference")
+    assert [n["text"] for n in call("memory")["set"]] == ["Reference: Four Tet – Baby"]
+    assert call("memory", action="forget", text="four tet")["forgot"]
+    assert call("memory")["set"] == []
+    # Not a change Live can undo: the journal stays empty
+    assert call("agent_changes")["changes"] == []
+    with pytest.raises(Exception, match="No set note matches"):
+        call("memory", action="forget", text="nothing like this")

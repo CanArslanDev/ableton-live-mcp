@@ -67,6 +67,7 @@ NO_UNDO_METHODS = frozenset([
     "start_playing", "stop_playing", "continue_playing", "stop_all_clips", "play_selection",
     "fire", "stop", "set_fire_button_state", "jump_by", "scrub_by", "jump_to_next_cue",
     "jump_to_prev_cue", "preview_item", "stop_preview", "select_device", "undo", "redo",
+    "set_data",
     "show_view", "hide_view", "focus_view", "scroll_view", "zoom_view",
 ])
 NO_UNDO_COMMANDS = frozenset([

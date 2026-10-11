@@ -32,7 +32,7 @@ from mcp.server.mcpserver.resolve import Elicit, Resolve
 
 from pydantic import BaseModel, Field
 
-from . import journal, music, transitions
+from . import journal, memory as notes_store, music, transitions
 from .connection import AbletonCommandError
 from .ui import panels as ui
 from .telemetry_decorator import telemetry_tool
@@ -781,6 +781,17 @@ def interpolate_points(points: list[dict], resolution: float) -> list[tuple[floa
     return out
 
 
+def set_notes() -> list[dict]:
+    """The notes kept in the open Live set (memory.py)."""
+    return notes_store.parse(send("lom_call", {"path": "live_set", "method": "get_data",
+                                               "args": [notes_store.SET_KEY, ""]})["result"])
+
+
+def save_set_notes(notes: list[dict]) -> None:
+    send("lom_call", {"path": "live_set", "method": "set_data",
+                      "args": [notes_store.SET_KEY, notes_store.dumps(notes)]})
+
+
 def envelope_steps(shape: str | None, points: list[dict] | None, length: float, low: float,
                    high: float, cycles: float, resolution: float, pmin: float, pmax: float,
                    normalized: bool) -> list[dict]:
@@ -951,10 +962,54 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     def get_session_overview() -> str:
         """Compact map of the whole set: every track (type, group, mute/solo/arm,
         volume, pan, sends, devices, Session clips), returns, master, scenes,
-        cue points, tempo, loop, key/scale. Cheaper than get_session_snapshot —
-        call this first to orient yourself.
+        cue points, tempo, loop, key/scale, and the notes kept about this set
+        and the user (see memory). Cheaper than get_session_snapshot — call
+        this first to orient yourself.
         """
-        return to_json(send("get_session_overview"))
+        overview = send("get_session_overview")
+        try:
+            in_set = set_notes()
+        except AbletonCommandError:  # a Live without Song.get_data (before 11)
+            in_set = []
+        kept = {"set": notes_store.brief(in_set), "user": notes_store.brief(notes_store.load_user())}
+        if kept["set"] or kept["user"]:
+            overview["memory"] = {k: v for k, v in kept.items() if v}
+        return to_json(overview)
+
+    @tool
+    def memory(action: str = "recall", text: str | None = None, scope: str = "set",
+               key: str | None = None) -> str:
+        """Notes that outlast the conversation. scope="set" keeps them inside
+        this Live set, saved with it: what the song is, references, decisions
+        ("kick at -6 dB"). scope="user" keeps them for every set: the user's
+        taste and habits. action: recall (both) | remember (text; a key
+        replaces that key's earlier note) | forget (key, or words of the
+        note). get_session_overview shows them too; none enter Live's undo
+        history. Remember what the user states as a preference or decision.
+        """
+        action, scope = action.strip().lower(), scope.strip().lower()
+        if scope not in ("set", "user"):
+            raise ValueError("scope must be set or user")
+        if action == "recall":
+            return to_json({"set": set_notes(), "user": notes_store.load_user()})
+        notes = set_notes() if scope == "set" else notes_store.load_user()
+        if action == "remember":
+            notes, outcome = notes_store.add(notes, text or "", key)
+            result: dict[str, Any] = {outcome: text, "scope": scope, "notes": len(notes)}
+        elif action == "forget":
+            notes, removed = notes_store.forget(notes, key, text)
+            if not removed:
+                raise ValueError(f"No {scope} note matches; recall lists them")
+            result = {"forgot": [n["text"] for n in removed], "scope": scope}
+        else:
+            raise ValueError("action must be recall, remember or forget")
+        if scope == "set":
+            save_set_notes(notes)
+            result["kept_in"] = "this Live set: saved with it when the set is saved"
+        else:
+            notes_store.save_user(notes)
+            result["kept_in"] = str(notes_store.user_file())
+        return to_json(result)
 
     # ── Tracks & mixer ───────────────────────────────────────────────────────
 

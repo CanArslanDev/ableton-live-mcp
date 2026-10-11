@@ -17,7 +17,7 @@
   in-memory Live set (with an undo history that follows Live's rules), so the
   server and its tools work without Ableton; `--state-file` keeps the set as
   JSON.
-- **Eval suite** (`evals/`): 30 `claude plugin eval` cases, each against a
+- **Eval suite** (`evals/`): 32 `claude plugin eval` cases, each against a
   fresh simulated set, graded by deterministic checks of the resulting set
   (plus the reply where wording matters). A scripted correct solution of
   every case runs in the tests.
@@ -32,6 +32,11 @@
   gaps before a drop and high-pass sweeps. All verified on Live 12.4,
   including undoing each with `agent_changes`.
 
+- **Project memory.** `memory` keeps notes about a song inside the Live set
+  (`Song.set_data`, saved with the set, no undo step) and the user's
+  preferences in `~/.ableton-mcp/memory.json`; a keyed note replaces the
+  earlier one. `get_session_overview` shows them, so a later session (or
+  another client) starts from what was decided.
 - **MIDI Tools in Live's clip view.** `install_midi_tools` adds three Max for
   Live MIDI Tools that run inside Live, without the server: Usul and Makam
   Melody (Generate) and Makam Snap (Transform). Their JavaScript is a port

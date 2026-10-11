@@ -14,7 +14,12 @@ audible at once, and each tool call is one step in Live's undo history.
 - `get_session_overview()` returns tempo, meter, Key & Scale, every track
   (type, devices, mixer, Session and Arrangement clips) and the scenes. Call it
   before changing anything and again after structural edits; do not guess
-  indices.
+  indices. Its `memory` holds what was decided about this set and what the
+  user likes: follow it ("as we agreed" means look there).
+- When the user states a decision or a preference, keep it:
+  `memory(action="remember", text="Kick at -6 dB", key="kick")` for this set
+  (saved inside it), `scope="user"` for every set. A key replaces that key's
+  old note.
 - Tracks: index, exact name, `master` or `return A`. Devices: index or name.
   Session clips: `clip_index` (the scene row). Arrangement clips:
   `arrangement_clip_index`.

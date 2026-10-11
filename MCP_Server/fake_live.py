@@ -492,7 +492,7 @@ class FakeTrack(FakeObj):
 # Bookkeeping of the fakes themselves, never part of an undo step
 _NOT_SET_STATE = frozenset(["_listeners", "undo_log", "calls", "_undo", "_redo", "_open_step",
                             "_position", "_clock", "_pass", "_pass_closing", "_pass_starting",
-                            "running_clock"])
+                            "running_clock", "_data"])
 _MISSING = object()
 
 
@@ -721,6 +721,13 @@ class FakeSong(FakeObj):
 
     def delete_scene(self, index):
         del self.scenes[index]
+
+    # Song.set_data/get_data: saved with the set, no undo step (Live 12.4)
+    def set_data(self, key, value):
+        vars(self).setdefault("_data", {})[key] = value
+
+    def get_data(self, key, default):
+        return vars(self).get("_data", {}).get(key, default)
 
     def set_or_delete_cue(self):
         here = [c for c in self.cue_points if c.time == self.current_song_time]

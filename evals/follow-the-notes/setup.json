@@ -1,0 +1,13 @@
+[
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set",
+   "method": "set_data",
+   "args": [
+    "ableton_mcp_memory",
+    "[{\"text\": \"Vox is the lead: keep it at -3 dB, panned center\", \"key\": \"vox\", \"at\": \"2026-10-01 18:00\"}]"
+   ]
+  }
+ }
+]

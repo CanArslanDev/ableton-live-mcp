@@ -37,6 +37,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/ml_worker.py` | The job side: runs in those environments, imports nothing from `MCP_Server`, talks JSON lines. |
 | `MCP_Server/als.py` | Reads Live Set files (.als) without Live: settings, tracks, devices, clips and notes, samples, comparing and finding sets. Never writes them. |
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
+| `MCP_Server/memory.py` | Notes that outlast a conversation: in the set (`Song.set_data`, key `ableton_mcp_memory`) and in `~/.ableton-mcp/memory.json`; the `memory` tool and the overview's `memory`. |
 | `MCP_Server/snapshots.py` | Capture / compare / restore mixer and device parameters (A/B), stored in `~/.ableton-mcp/snapshots`. |
 | `MCP_Server/music.py` | Pure music theory + generators + note transforms over note dicts. No Live access. |
 | `MCP_Server/turkish.py` | Makams (AEU commas, 12-tone approximation, `.ascl` tunings) and usuls (düm/tek cycles). Pure. |
@@ -48,7 +49,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
-| `evals/` | `claude plugin eval` suite: 30 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
+| `evals/` | `claude plugin eval` suite: 32 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
 | `packaging/build_mcpb.py`, `packaging/mcpb/` | Claude Desktop extension: manifest template, icon, build script (fills in version and tools). |
 | `.claude-plugin/`, `skills/` | Claude Code plugin (MCP server + skills) and its marketplace entry. |
 | `.github/workflows/` | CI (tests, lint, wheel/sdist/.mcpb) and tag-triggered GitHub releases. |
@@ -133,6 +134,9 @@ claude plugin validate .                       # plugin manifest + skills
   pass leaves an undo step per value set plus one (measured with 2 to 48
   values), the first undo removing the automation. `transitions.py` and
   `rewrite_range` build on these.
+- **Song.set_data/get_data** (12.4): strings (any Unicode), numbers, lists
+  and dicts round-trip; no undo step. The Trial cannot save, so keeping the
+  data through save and reopen rests on Ableton's documentation here.
 - **Value objects outside `Live.*`:** `RoutingType` reports module `Track` and has
   no `_live_ptr`; `_lom_value` turns any non-builtin object into a `$ref`.
 - **Vector types:** some lists are Live vector classes, not tuples;

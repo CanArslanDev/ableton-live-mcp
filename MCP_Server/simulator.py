@@ -196,6 +196,7 @@ def describe_song(song: Any, browser: Any | None = None) -> dict:
         "locators": sorted(({"name": c.name, "time": _number(float(c.time))}
                             for c in song.cue_points), key=lambda c: c["time"]),
         "selected_track": getattr(song.view.selected_track, "name", None),
+        "data": dict(vars(song).get("_data", {})),
         # steps: what Live's undo history holds now (commands that changed
         # nothing, or only what Live does not undo, leave none)
         "undo": {"steps": len(song._undo), "commands": song.undo_log.count("begin"),

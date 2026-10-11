@@ -85,6 +85,12 @@ SOLUTIONS = {
                                         "tracks": ["Bass"]})],
     "fade-out": [("record_automation", {"track": "master", "parameter": "volume", "start_bar": 13,
                                         "bars": 4, "shape": "ramp_down", "hold": True})],
+    "remember-decision": [("memory", {"action": "remember", "key": "kick",
+                                      "text": "Kick sits at -6 dB in this song"}),
+                          ("memory", {"action": "remember", "key": "reference",
+                                      "text": "Reference track: Burial – Archangel"})],
+    "follow-the-notes": [("get_session_overview", {}),
+                         ("set_track_mixer", {"track": "Vox", "volume_db": -3, "pan": "C"})],
     "scenes": [("manage_scene", {"action": "create", "name": "Verse"}),
                ("manage_scene", {"action": "create", "name": "Chorus"})],
 }

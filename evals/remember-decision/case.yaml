@@ -1,0 +1,26 @@
+schema_version: "1.1"
+name: remember-decision
+description: 'Keeps a decision and a reference inside the set.'
+tags: [memory]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    From now on the kick should always sit at -6 dB in this song, and the reference track is
+    Burial's Archangel. Remember that for next time.
+graders:
+  - name: kick-decision
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:kick-decision":\s*true'
+  - name: reference
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:reference":\s*true'

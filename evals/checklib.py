@@ -107,3 +107,10 @@ def played_notes(t: dict | None, start: float = 0.0, end: float = 1e9) -> list[l
         notes += unroll_notes(raw, clip, start, end)
     return sorted([[n["pitch"], n["start_time"], n["duration"], n["velocity"]] for n in notes],
                   key=lambda n: (n[1], n[0]))
+
+
+def set_notes(state: dict) -> list[dict]:
+    """The notes the memory tool keeps inside the set (Song.set_data)."""
+    from MCP_Server.memory import SET_KEY, parse
+
+    return parse(state.get("data", {}).get(SET_KEY, ""))
