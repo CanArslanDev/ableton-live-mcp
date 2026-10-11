@@ -3,7 +3,9 @@ right, through the same server tools the plugin offers, against the simulator.""
 
 import asyncio
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -126,13 +128,22 @@ def simulated_case(tmp_path, monkeypatch):
         simulator.stop()
 
 
+def executable(path: Path) -> bool:
+    """The file's exec bit; on Windows, which has none, the mode git records."""
+    if os.name != "nt":
+        return bool(path.stat().st_mode & 0o111)
+    listed = subprocess.run(["git", "ls-files", "-s", path.name], cwd=path.parent,
+                            capture_output=True, text=True)
+    return listed.stdout.startswith("100755") if listed.stdout else True  # not from git
+
+
 def test_every_case_has_a_solution_and_its_files():
     assert len(CASES) >= 20 and set(CASES) == set(SOLUTIONS)
     for name in CASES:
         folder = EVALS / name
         text = (folder / "case.yaml").read_text()
         assert f"name: {name}\n" in text and "scaffold_script: scaffold.sh" in text
-        assert (folder / "scaffold.sh").stat().st_mode & 0o111, f"{name}/scaffold.sh not executable"
+        assert executable(folder / "scaffold.sh"), f"{name}/scaffold.sh not executable"
         assert (folder / "check.py").exists()
 
 
