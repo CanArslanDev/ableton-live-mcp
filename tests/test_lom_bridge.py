@@ -339,6 +339,7 @@ def live_server(script, tmp_path, monkeypatch):
         except ValueError:
             return text
 
+    call.mcp = mcp  # for tests that need a client session (elicitation)
     yield script, call
     connection.disconnect()
     ticking.clear()
@@ -1297,3 +1298,131 @@ def test_long_tools_report_progress(live_server):
     anyio.run(main)
     assert steps and steps[-1][1] == 1.0
     assert all(message.startswith("Metering") for _p, _t, message in steps)
+
+
+# ── Safety net: journal and undo, previews, confirmations ────────────────────
+
+def test_agent_changes_lists_and_undoes_exactly_what_a_call_made(live_server):
+    from MCP_Server import journal
+
+    journal.clear()
+    script, call = live_server
+    song = script._song
+    call("set_track_mixer", track="Bass", volume_db=-6)
+    begins = song.undo_log.count("begin")
+    call("generate_chord_progression", track="Bass", progression="Am F", clip_index=3)
+    made = song.undo_log.count("begin") - begins
+    changes = call("agent_changes")["changes"]
+    assert [c["tool"] for c in changes] == ["generate_chord_progression", "set_track_mixer"]
+    assert changes[0]["undo_steps"] == made >= 2
+    assert changes[1]["undo_steps"] == 1 and changes[1]["snapshot_before"].startswith("auto ")
+    call("lom_get_object", path="live_set", properties=["tempo"])  # reads are not changes
+    assert len(call("agent_changes")["changes"]) == 2
+
+    undos = song.undo_log.count("undo")
+    result = call("agent_changes", undo=1)
+    assert song.undo_log.count("undo") - undos == made
+    assert [c["tool"] for c in result["undone"]] == ["generate_chord_progression"]
+    assert call("agent_changes", undo=5)["undo_steps"] == 1  # only the mixer change is left
+    with pytest.raises(Exception, match="Nothing of the agent's to undo"):
+        call("agent_changes", undo=1)
+    # The undo itself is not recorded as a change
+    assert [c.get("undone") for c in call("agent_changes")["changes"]] == [True, True]
+
+
+def test_a_snapshot_restore_keeps_the_state_it_replaces(live_server):
+    script, call = live_server
+    call("snapshot", action="save", name="mix A")
+    call("set_track_mixer", track="Bass", volume_db=-20)
+    call("snapshot", action="restore", name="mix A")
+    automatic = call("snapshot", action="list")["automatic"]
+    assert any(a["name"].endswith("before restoring mix A") for a in automatic)
+
+
+def test_previews_change_nothing(live_server):
+    script, call = live_server
+    song = script._song
+    bass = song.tracks[1]
+    log = list(song.undo_log)
+    preview = call("generate_chord_progression", track="Bass", progression="Am F C G",
+                   clip_index=3, preview=True)
+    assert "Nothing was written" in preview["preview"] and "clip" not in preview
+    assert preview["note_columns"][:2] == ["pitch", "name"] and len(preview["notes"]) == 12
+    assert not bass.clip_slots[3].has_clip and song.undo_log == log
+
+    call("generate_chord_progression", track="Bass", progression="Am", clip_index=3)
+    clip = bass.clip_slots[3].clip
+    pitches = sorted(n.pitch for n in clip._notes)
+    log = list(song.undo_log)
+    moved = call("transform_clip_notes", track="Bass", clip_index=3, operation="transpose",
+                 semitones=12, preview=True)
+    assert sorted(n.pitch for n in clip._notes) == pitches and song.undo_log == log
+    column = moved["note_columns"].index("pitch")
+    assert sorted(row[column] for row in moved["notes"]) == [p + 12 for p in pitches]
+    strum = call("apply_midi_tool", track="Bass", clip_index=3, tool="strum", preview=True)
+    assert strum["notes_in_clip"] == len(pitches) and song.undo_log == log
+
+    call("generate_usul", track="Drums", usul="aksak", clip_index=3, set_meter=True, preview=True)
+    assert song.signature_numerator == 4 and song.undo_log == log
+
+
+def _session(call, callback=None, mode="auto"):
+    from mcp.client import Client
+
+    return Client(call.mcp, elicitation_callback=callback, mode=mode)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+def test_deletes_ask_the_user_when_the_client_can(live_server, mode):
+    from mcp.types import ElicitResult
+
+    script, call = live_server
+    asked = []
+
+    async def decline(_context, params):
+        asked.append(params.message)
+        return ElicitResult(action="decline")
+
+    async def accept(_context, params):
+        asked.append(params.message)
+        return ElicitResult(action="accept", content={"confirm": True})
+
+    async def delete(callback):
+        async with _session(call, callback, mode) as client:
+            return await client.call_tool("manage_track", {"action": "delete", "track": "Vox"})
+
+    names = lambda: [t.name for t in script._song.tracks]  # noqa: E731
+    refused = asyncio.run(delete(decline))
+    assert refused.is_error and "declined" in refused.content[0].text and "Vox" in names()
+    assert asked[0].startswith("Delete the track “Vox”") and "clips" in asked[0]
+    assert not asyncio.run(delete(accept)).is_error and "Vox" not in names()
+
+
+def test_clients_without_elicitation_are_not_asked(live_server, monkeypatch):
+    script, call = live_server
+
+    async def delete_scene():
+        async with _session(call) as client:
+            return await client.call_tool("manage_scene", {"action": "delete", "scene": "Drop"})
+
+    assert not asyncio.run(delete_scene()).is_error
+    assert [s.name for s in script._song.scenes] == ["Intro"]
+    # ABLETON_MCP_CONFIRM=off skips the question even where it could be asked
+    monkeypatch.setenv("ABLETON_MCP_CONFIRM", "off")
+
+    async def never(_context, _params):
+        raise AssertionError("asked")
+
+    async def delete_device():
+        async with _session(call, never) as client:
+            return await client.call_tool("manage_device", {"track": "Bass", "device": 0,
+                                                            "action": "delete"})
+
+    assert not asyncio.run(delete_device()).is_error
+
+
+def test_journal_matches_the_remote_scripts_read_only_rules(script):
+    from MCP_Server import journal
+
+    assert journal.READ_ONLY_COMMANDS == script.READ_ONLY_COMMANDS
+    assert journal.READ_ONLY_METHODS == script.READ_ONLY_METHODS

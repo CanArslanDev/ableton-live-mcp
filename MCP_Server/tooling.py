@@ -30,6 +30,8 @@ from collections.abc import Callable
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
+
+from . import journal
 from mcp.shared.exceptions import MCPError
 from mcp.types import ToolAnnotations
 
@@ -65,13 +67,15 @@ def _as_tool_error(name: str, error: Exception) -> ToolError:
 
 
 def errors_as_tool_errors(fn: Callable) -> Callable:
-    """Re-raise any exception from `fn` as a ToolError with its message."""
+    """Re-raise any exception from `fn` as a ToolError with its message, and
+    record the call in the journal (what it changed in Live, for undo)."""
     name = fn.__name__
     if inspect.iscoroutinefunction(fn):
         @functools.wraps(fn)
         async def runner(*args: Any, **kwargs: Any) -> Any:
             try:
-                return await fn(*args, **kwargs)
+                with journal.recording(name, kwargs):
+                    return await fn(*args, **kwargs)
             except (ToolError, MCPError):
                 raise
             except Exception as e:
@@ -82,7 +86,8 @@ def errors_as_tool_errors(fn: Callable) -> Callable:
     @functools.wraps(fn)
     def caller(*args: Any, **kwargs: Any) -> Any:
         try:
-            return fn(*args, **kwargs)
+            with journal.recording(name, kwargs):
+                return fn(*args, **kwargs)
         except (ToolError, MCPError):
             raise
         except Exception as e:

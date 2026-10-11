@@ -341,6 +341,17 @@ class FakeSong(FakeObj):
     def end_undo_step(self):
         self.undo_log.append("end")
 
+    can_undo = True
+
+    def undo(self):
+        self.undo_log.append("undo")
+
+    def redo(self):
+        self.undo_log.append("redo")
+
+    def delete_scene(self, index):
+        del self.scenes[index]
+
     def set_or_delete_cue(self):
         here = [c for c in self.cue_points if c.time == self.current_song_time]
         if here:

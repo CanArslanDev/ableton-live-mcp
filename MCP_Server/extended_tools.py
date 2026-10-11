@@ -14,18 +14,25 @@ Addressing conventions shared by the tools:
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import json
 import logging
+import os
 import re
 import shlex
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
+from mcp.server.elicitation import AcceptedElicitation, ElicitationResult
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.resolve import Elicit, Resolve
 
-from . import music
+from pydantic import BaseModel, Field
+
+from . import journal, music
 from .connection import AbletonCommandError
 from .ui import panels as ui
 from .telemetry_decorator import telemetry_tool
@@ -86,9 +93,17 @@ _NEW_COMMANDS = {"lom_get", "lom_set", "lom_call", "batch", "observe", "unobserv
 
 # ── Plumbing ─────────────────────────────────────────────────────────────────
 
+# True while a tool runs with preview=True (see previewable): no clip is
+# created, no note written, and any other change to the set is refused.
+PREVIEW: contextvars.ContextVar[bool] = contextvars.ContextVar("abletonmcp_preview",
+                                                                default=False)
+
+
 def send(command: str, params: dict | None = None, timeout: float | None = None) -> Any:
     if _get_connection is None:
         raise RuntimeError("extended tools not registered")
+    if PREVIEW.get() and not journal.is_read_only(command, params):
+        raise RuntimeError(f"A preview must not change the set (it tried {command})")
     try:
         if timeout is None:
             return _get_connection().send_command(command, params or {})
@@ -310,6 +325,8 @@ def read_notes(path: str, **window: Any) -> dict:
 
 
 def write_notes(path: str, notes: list[dict], mode: str = "replace", **extra: Any) -> dict:
+    if PREVIEW.get():
+        return {"written": len(notes)}
     return send("clip_write_notes", dict({"clip_path": path, "notes": notes, "mode": mode},
                                          **extra))
 
@@ -323,6 +340,13 @@ def apply_note_edit(path: str, notes: list[dict], chosen: list[dict],
     is gone are removed, notes without an id are added. Without note ids
     (Live 10) the clip is rewritten.
     """
+    if PREVIEW.get():
+        chosen_ids = {id(n) for n in chosen}
+        result_notes = [n for n in notes if id(n) not in chosen_ids] + changed
+        result_notes.sort(key=lambda n: (n["start_time"], n["pitch"]))
+        return {"preview": "Nothing was written; call again without preview to apply it.",
+                "notes_changed": len(changed), "notes_in_clip": len(result_notes),
+                **note_table(result_notes)}
     if notes and all("note_id" in n for n in notes):
         kept = {n["note_id"] for n in changed if "note_id" in n}
         doomed = [n["note_id"] for n in chosen if n["note_id"] not in kept]
@@ -354,6 +378,8 @@ def apply_note_edit(path: str, notes: list[dict], chosen: list[dict],
 def prepare_clip(track: int | str, clip_index: int | None, length: float,
                  arrangement_time: float | None = None, name: str | None = None) -> str:
     """Return a path to a MIDI clip at least `length` beats long, creating it if needed."""
+    if PREVIEW.get():
+        return ""
     if arrangement_time is not None:
         created = send("lom_call", {"path": track_path(track), "method": "create_midi_clip",
                                     "args": [float(arrangement_time), float(length)]})
@@ -384,7 +410,113 @@ def generated_result(path: str, notes: list[dict], written: dict, extra: dict | 
                if pitches else None}
     if extra:
         payload.update(extra)
+    if PREVIEW.get():
+        del payload["clip"]
+        payload["preview"] = "Nothing was written; call again without preview to write these notes."
+        payload.update(note_table(notes))
     return to_json(payload)
+
+
+class _Confirm(BaseModel):
+    confirm: bool = Field(default=True, description="Go ahead")
+
+
+# Deletes ask the user first when the client can show a question (MCP
+# elicitation). The tools take a parameter that the SDK fills by running one of
+# these resolvers before the tool: Elicit asks (on 2025-11-25 as a request in
+# the middle of the call, on 2026-07-28 as an input-required round), a ready
+# answer skips the question (nothing to confirm, a client that cannot ask, or
+# ABLETON_MCP_CONFIRM=off).
+# A resolver's plain return value reaches the tool as an accepted answer
+PROCEED = _Confirm(confirm=True)
+GO_AHEAD = AcceptedElicitation(data=PROCEED)  # the tools' default, outside MCP
+
+
+def _question(ctx: Context | None, describe: Callable[[], str]) -> Elicit[_Confirm] | _Confirm:
+    if os.environ.get("ABLETON_MCP_CONFIRM", "on").strip().lower() in {"0", "off", "false", "no"}:
+        return PROCEED
+    try:
+        capabilities = ctx.client_capabilities if ctx is not None else None
+    except Exception:  # no request behind this call (a direct call): nobody to ask
+        capabilities = None
+    elicitation = getattr(capabilities, "elicitation", None)
+    if elicitation is None or (getattr(elicitation, "form", None) is None
+                               and getattr(elicitation, "url", None) is not None):
+        return PROCEED
+    try:
+        message = describe()
+    except Exception as e:  # the tool will say what is wrong
+        logger.debug("No question before the delete: %s", e)
+        return PROCEED
+    return Elicit(message, _Confirm)
+
+
+def ask_track_delete(action: str, ctx: Context, track: int | str | None = None
+                     ) -> Elicit[_Confirm] | _Confirm:
+    if action.lower() != "delete" or track is None:
+        return PROCEED
+
+    def describe() -> str:
+        tp = track_path(track)
+        devices = len(lom_get(f"{tp} devices", ["name"])["items"])
+        clips = sum(1 for s in lom_get(f"{tp} clip_slots", ["has_clip"])["items"]
+                    if s.get("has_clip"))
+        return (f"Delete the track “{lom_get(tp, ['name'])['name']}” ({clips} clips, "
+                f"{devices} devices)? Live can undo it.")
+    return _question(ctx, describe)
+
+
+def ask_scene_delete(action: str, ctx: Context, scene: int | str | None = None
+                     ) -> Elicit[_Confirm] | _Confirm:
+    if action.lower() != "delete" or scene is None:
+        return PROCEED
+
+    def describe() -> str:
+        index = index_in("live_set scenes", scene)
+        name = lom_get(f"live_set scenes {index}", ["name"])["name"] or f"Scene {index + 1}"
+        return f"Delete the scene “{name}” and its clips? Live can undo it."
+    return _question(ctx, describe)
+
+
+def ask_clip_delete(action: str, track: int | str, ctx: Context, clip_index: int | None = None,
+                    arrangement_clip_index: int | None = None
+                    ) -> Elicit[_Confirm] | _Confirm:
+    if action.lower() != "delete":
+        return PROCEED
+
+    def describe() -> str:
+        name = lom_get(clip_path(track, clip_index, arrangement_clip_index), ["name"])["name"]
+        return (f"Delete “{name or 'the clip'}” on {lom_get(track_path(track), ['name'])['name']}? "
+                "Live can undo it.")
+    return _question(ctx, describe)
+
+
+def ask_device_delete(track: int | str, device: int | str, action: str, ctx: Context
+                      ) -> Elicit[_Confirm] | _Confirm:
+    if action.lower() != "delete":
+        return PROCEED
+
+    def describe() -> str:
+        name = lom_get(device_path(track, device), ["name"])["name"]
+        return f"Remove {name} from {lom_get(track_path(track), ['name'])['name']}? Live can undo it."
+    return _question(ctx, describe)
+
+
+def require_go_ahead(answer: Any) -> None:
+    if not (isinstance(answer, AcceptedElicitation) and getattr(answer.data, "confirm", False)):
+        raise RuntimeError("Not done: the user declined.")
+
+
+def previewable(fn: Callable) -> Callable:
+    """Run the tool with PREVIEW set when it is called with preview=True."""
+    @functools.wraps(fn)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        token = PREVIEW.set(bool(kwargs.get("preview")))
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            PREVIEW.reset(token)
+    return run
 
 
 def song_context(optional: bool = False) -> dict:
@@ -661,7 +793,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         Hints become MCP tool annotations; see tooling.register_tool.
         """
         def decorate(f: Callable) -> Callable:
-            return register_tool(mcp, telemetry_tool(f.__name__)(f), **hints)
+            options = dict(hints)
+            if options.pop("preview", False):
+                f = previewable(f)
+            return register_tool(mcp, telemetry_tool(f.__name__)(f), **options)
         return decorate(fn) if fn is not None else decorate
 
     # ── Generic LOM access ───────────────────────────────────────────────────
@@ -738,6 +873,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         Applied in one round-trip; undoing it takes one Cmd+Z (two if a name
         or color change is mixed in — Live files those separately).
         """
+        auto_snapshot("set_track_mixer", [track])
         tp = track_path(track)
         ops = []
         if volume_db is not None:
@@ -765,7 +901,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     @tool(destructive=True)
     def manage_track(action: str, track: int | str | None = None, name: str | None = None,
-                     color: str | int | None = None, index: int = -1) -> str:
+                     color: str | int | None = None, index: int = -1,
+                     go_ahead: Annotated[ElicitationResult[_Confirm],
+                                        Resolve(ask_track_delete)] = GO_AHEAD) -> str:
         """Create, delete, duplicate, rename, recolor or fold tracks.
 
         action: create_midi | create_audio | create_return | delete | duplicate |
@@ -773,6 +911,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - index: insert position for create_* (-1 = end)
         - color: hex "#RRGGBB" or a Live color index (0-69)
         """
+        require_go_ahead(go_ahead)
         action = action.lower()
         if action in ("create_midi", "create_audio", "create_return"):
             ops = []
@@ -852,11 +991,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     @tool(destructive=True)
     def manage_scene(action: str, scene: int | str | None = None, name: str | None = None,
-                     tempo: float | None = None, index: int = -1) -> str:
+                     tempo: float | None = None, index: int = -1,
+                     go_ahead: Annotated[ElicitationResult[_Confirm],
+                                        Resolve(ask_scene_delete)] = GO_AHEAD) -> str:
         """Scenes: create | delete | duplicate | fire | rename | set_tempo |
         clear_tempo | stop_all_clips | capture (capture playing clips into a new scene).
         scene: index or name. index: insert position for create (-1 = end).
         """
+        require_go_ahead(go_ahead)
         action = action.lower()
         if action == "create":
             ops = [op_call("live_set", "create_scene", index)]
@@ -960,7 +1102,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     target_track: int | str | None = None,
                     target_clip_index: int | None = None, grid: str = "1/16",
                     amount: float = 1.0, start_time: float | None = None,
-                    length: float = 4.0, name: str | None = None) -> str:
+                    length: float = 4.0, name: str | None = None,
+                    go_ahead: Annotated[ElicitationResult[_Confirm],
+                                       Resolve(ask_clip_delete)] = GO_AHEAD) -> str:
         """Clip operations.
 
         action:
@@ -973,6 +1117,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - create_arrangement_clip: empty MIDI clip at start_time (beats) in the
           Arrangement (Live 12+)
         """
+        require_go_ahead(go_ahead)
         action = action.lower()
         tp = track_path(track)
         if action == "create_session_clip":
@@ -1119,7 +1264,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return to_json(write_notes(clip_path(track, clip_index, arrangement_clip_index),
                                    prepared, mode, **extra))
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def transform_clip_notes(track: int | str, operation: str,
                              clip_index: int | None = None,
                              arrangement_clip_index: int | None = None,
@@ -1133,7 +1278,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              pitch_low: int | str | None = None,
                              pitch_high: int | str | None = None,
                              time_start: float | None = None,
-                             time_end: float | None = None) -> str:
+                             time_end: float | None = None,
+                             preview: bool = False) -> str:
         """Transform a clip's MIDI notes (or only those in a pitch and/or time range)
         as one edit; note ids and MPE are kept (Live 11+).
 
@@ -1146,6 +1292,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - reverse | invert (axis pitch) | legato | double_speed | half_speed
         - set_probability (value 0..1) | set_velocity_deviation (value) | dedupe | delete
         key/scale default to the set's Key & Scale.
+        preview=True shows the result without writing it.
         """
         cp = clip_path(track, clip_index, arrangement_clip_index)
         data = read_notes(cp)
@@ -1197,14 +1344,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         "arpeggiate": (music.arpeggiate, {"style", "rate", "gate", "octaves", "seed"}),
     }
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def apply_midi_tool(track: int | str, tool: str, clip_index: int | None = None,
                         arrangement_clip_index: int | None = None,
                         settings: dict[str, Any] | None = None,
                         pitch_low: int | str | None = None,
                         pitch_high: int | str | None = None,
                         time_start: float | None = None,
-                        time_end: float | None = None) -> str:
+                        time_end: float | None = None,
+                        preview: bool = False) -> str:
         """Live 12's MIDI Tools (Transformations) on a clip's notes, or only those
         in a pitch/time range; one undo step, note ids and MPE kept.
 
@@ -1221,6 +1369,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - arpeggiate: style up|down|updown|downup|random|played, rate (0.25), gate (0.9),
           octaves (1), seed
         e.g. tool="strum", settings={"amount": 0.03, "direction": "alternate"}
+        preview=True shows the result without writing it.
         """
         name = tool.strip().lower()
         if name not in MIDI_TOOLS:
@@ -1281,7 +1430,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                      for c, v in zip(chords, voiced)]
         return to_json(result)
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def generate_chord_progression(track: int | str, progression: str | None = None,
                                    key: str | None = None, scale: str | None = None,
                                    clip_index: int | None = 0,
@@ -1289,7 +1438,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                    bars_per_chord: float = 1.0, octave: int = 3,
                                    voicing: str = "smooth", rhythm: str = "sustain",
                                    add_bass_note: bool = False, velocity: int = 90,
-                                   replace: bool = True, clip_name: str | None = None) -> str:
+                                   replace: bool = True, clip_name: str | None = None,
+                                   preview: bool = False) -> str:
         """Write a chord progression into a MIDI clip (created if missing).
 
         - progression: roman numerals ("ii7 V7 Imaj7", "i iv bVII III") or chord symbols
@@ -1299,6 +1449,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - rhythm: sustain | half | quarters | eighths | offbeat | syncopated | charleston | stabs
         - octave: 3 centres close chords on middle C (C3 = 60 in Live)
         - arrangement_time: a new Arrangement clip at this beat instead of a Session slot
+        preview=True shows the result without writing it.
         """
         context = song_context()
         key, scale = resolve_key(key, scale, context)
@@ -1315,7 +1466,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "chords": [{"chord": c["symbol"], "notes": [music.note_name(p) for p in v]}
                        for c, v in zip(chords, voiced)], "length_beats": length}))
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def generate_drum_pattern(track: int | str, style: str = "house", bars: int = 2,
                               clip_index: int | None = 0,
                               arrangement_time: float | None = None,
@@ -1323,7 +1474,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                               mapping: dict[str, int | str] | None = None,
                               auto_map_drum_rack: bool = True, seed: int | None = None,
                               velocity: int = 100, replace: bool = True,
-                              clip_name: str | None = None) -> str:
+                              clip_name: str | None = None,
+                              preview: bool = False) -> str:
         """Write a drum groove into a MIDI clip on a Drum Rack track.
 
         style: house | techno | trap | drill | boom_bap | lofi | dnb | breakbeat | uk_garage |
@@ -1332,6 +1484,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - auto_map_drum_rack: find pads by their names; otherwise General MIDI (kick 36,
           snare 38, clap 39, closed hat 42, open hat 46)
         - mapping: {"kick": 36, "closed_hat": "F#1"}
+        preview=True shows the result without writing it.
         """
         context = song_context()
         bar = context["beats_per_bar"]
@@ -1349,11 +1502,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "pads_used": [music.note_name(p) for p in used],
             "time_signature": context["time_signature"], "length_beats": bars * bar})
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def generate_euclidean(track: int | str, voices: list[dict], bars: int = 2,
                            step: float | str = "1/16", clip_index: int | None = 0,
                            arrangement_time: float | None = None, replace: bool = True,
-                           clip_name: str | None = None) -> str:
+                           clip_name: str | None = None,
+                           preview: bool = False) -> str:
         """Euclidean rhythms (Live 12's Euclidean generator): each voice spreads
         `pulses` hits evenly over `steps`; cycles of different lengths drift apart.
 
@@ -1362,6 +1516,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         accent: the velocity of each cycle's first hit.
         step: "1/16" (default), "1/8", "1/8T" or beats.
         Classics: E(3,8) tresillo, E(5,8) cinquillo, E(5,16) bossa, E(4,9) aksak (2+2+2+3).
+        preview=True shows the result without writing it.
         """
         grids = {"1/4": 1.0, "1/8": 0.5, "1/8t": 1 / 3, "1/16": 0.25, "1/16t": 1 / 6,
                  "1/32": 0.125}
@@ -1429,13 +1584,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                "tunings itself.")
         return to_json(info)
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def generate_usul(track: int | str, usul: str = "aksak", cycles: int = 4,
                       clip_index: int | None = 0, arrangement_time: float | None = None,
                       mapping: dict[str, int | str] | None = None, velocity: int = 110,
                       ornament: float = 0.0, seed: int | None = None,
                       set_meter: bool = False, replace: bool = True,
-                      clip_name: str | None = None) -> str:
+                      clip_name: str | None = None,
+                      preview: bool = False) -> str:
         """Write a Turkish usul (rhythmic cycle) as MIDI on a drum track.
 
         usul: nim_sofyan 2/4, semai 3/4, sofyan 4/4, turk_aksagi 5/8,
@@ -1447,6 +1603,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - ornament 0..1: fill long strokes with light te/ke hits
         - set_meter: also set the set's time signature to the usul's meter
         Length: `cycles` cycles of the usul.
+        preview=True shows the result without writing it.
         """
         from . import turkish
 
@@ -1462,7 +1619,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             pads[key] = music.parse_note(note)
         notes = turkish.usul_notes(info["usul"], cycles, pads, velocity, ornament, seed)
         length = cycles * info["units"] * 4.0 / info["denominator"]
-        if set_meter:
+        if set_meter and not PREVIEW.get():
             batch([op_set("live_set", "signature_numerator", info["numerator"]),
                    op_set("live_set", "signature_denominator", info["denominator"])])
         path = prepare_clip(track, clip_index, length, arrangement_time,
@@ -1474,7 +1631,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "pads": {stroke: music.note_name(note) for stroke, note in pads.items()},
             "length_beats": length, "meter_set": set_meter})
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def generate_bassline(track: int | str, progression: str | None = None,
                           key: str | None = None, scale: str | None = None,
                           clip_index: int | None = 0,
@@ -1482,7 +1639,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                           bars_per_chord: float = 1.0, octave: int = 1,
                           style: str = "root", velocity: int = 100,
                           seed: int | None = None, replace: bool = True,
-                          clip_name: str | None = None) -> str:
+                          clip_name: str | None = None,
+                          preview: bool = False) -> str:
         """Write a bassline that follows a chord progression.
 
         style: root (whole notes) | octave (8th-note octave jumps) | offbeat
@@ -1492,6 +1650,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         to four chords from the scale's own triads. To follow chords already
         in a clip, run analyze_harmony and pass its progression and
         bars_per_chord.
+        preview=True shows the result without writing it.
         """
         context = song_context()
         key, scale = resolve_key(key, scale, context)
@@ -1508,14 +1667,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return generated_result(path, notes, written, dict(
             musical_context(key, scale, context), progression=progression, length_beats=length))
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def generate_arpeggio(track: int | str, progression: str | None = None,
                           key: str | None = None, scale: str | None = None,
                           clip_index: int | None = 0, arrangement_time: float | None = None,
                           bars_per_chord: float = 1.0, octave: int = 4,
                           pattern: str = "up", rate: float = 0.25, octaves: int = 1,
                           gate: float = 0.8, velocity: int = 90, seed: int | None = None,
-                          replace: bool = True, clip_name: str | None = None) -> str:
+                          replace: bool = True, clip_name: str | None = None,
+                          preview: bool = False) -> str:
         """Write an arpeggio over a chord progression.
 
         pattern: up | down | updown | downup | random | converge | pinky
@@ -1523,6 +1683,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         octaves: how many octaves the arpeggio spans; gate: note length fraction
         key/scale default to the set's Key & Scale (Live 12); the progression
         to four chords from the scale's own triads.
+        preview=True shows the result without writing it.
         """
         context = song_context()
         key, scale = resolve_key(key, scale, context)
@@ -1539,20 +1700,22 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return generated_result(path, notes, written, dict(
             musical_context(key, scale, context), progression=progression, length_beats=length))
 
-    @tool(destructive=True, ui=ui.NOTES)
+    @tool(destructive=True, ui=ui.NOTES, preview=True)
     def generate_melody(track: int | str, key: str | None = None, scale: str | None = None,
                         bars: int = 4, progression: str | None = None,
                         bars_per_chord: float = 1.0, clip_index: int | None = 0,
                         arrangement_time: float | None = None, low: str = "C4",
                         high: str = "C6", density: float = 0.6, seed: int | None = None,
                         velocity: int = 95, replace: bool = True,
-                        clip_name: str | None = None) -> str:
+                        clip_name: str | None = None,
+                        preview: bool = False) -> str:
         """Write a phrase-structured melody (A A' B A'') in a key/scale.
 
         If a progression is given, strong beats land on chord tones. density
         0..1 controls how busy it is; low/high bound the range; vary `seed` for
         alternatives and keep it to reproduce one. key/scale default to the
         set's Key & Scale (Live 12); bars follow the set's time signature.
+        preview=True shows the result without writing it.
         """
         context = song_context()
         key, scale = resolve_key(key, scale, context)
@@ -2021,10 +2184,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(destructive=True)
     def manage_device(track: int | str, device: int | str, action: str,
                       target_track: int | str | None = None,
-                      target_index: int | None = None) -> str:
+                      target_index: int | None = None,
+                      go_ahead: Annotated[ElicitationResult[_Confirm],
+                                         Resolve(ask_device_delete)] = GO_AHEAD) -> str:
         """Device operations: info | delete | enable | disable | toggle | select |
         collapse | expand | move (to target_track at target_index; Live 11+).
         """
+        require_go_ahead(go_ahead)
         action = action.lower()
         dp = device_path(track, device)
         if action == "info":
@@ -2136,6 +2302,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         with parameter "volume" | "pan" | "send A".
         The error message lists valid parameter names when one is not found.
         """
+        auto_snapshot("set_device_parameter_by_name", [track])
         if str(device).lower() not in ("mixer", "mixer_device") and isinstance(parameter, str) \
                 and not parameter.strip().isdigit():
             parameter = resolve_parameter_names(device_path(track, device),
@@ -2160,6 +2327,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - randomize_macros | add_macro | remove_macro
         - store_variation | recall_variation (variation index) | delete_variation
         """
+        if action.lower() != "info":
+            auto_snapshot("rack_control", [track])
         dp = device_path(track, device)
         action = action.lower()
         if action == "info":
@@ -2526,7 +2695,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         action = action.lower()
         if action == "list":
-            return to_json({"snapshots": snapshots.list_all(),
+            every = snapshots.list_all()
+            automatic = [s for s in every if str(s.get("name", "")).startswith("auto ")]
+            return to_json({"snapshots": [s for s in every if s not in automatic],
+                            "automatic": [{"name": s["name"], "created": s["created"]}
+                                          for s in automatic],
                             "folder": str(snapshots.snapshot_dir())})
         if action == "delete":
             return to_json({"deleted": snapshots.delete(name), "name": name})
@@ -2556,6 +2729,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             result["compared_to"] = compare_to or "the set now"
             result["changes"] = with_displays(report["changes"])
         else:
+            if report["changes"] and not compare_to:
+                # The state being replaced, so the restore itself can be taken back
+                keep_auto_snapshot(f"restoring {name}", current)
             applied = batch_summary(batch(snapshots.restore_ops(report["changes"]),
                                           stop_on_error=False)) if report["changes"] \
                 else {"ok": True, "steps": []}
@@ -2568,6 +2744,59 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if report["missing"]:
             result["missing_now"] = report["missing"]
         return to_json(result)
+
+    AUTO_SNAPSHOTS = 10
+
+    def keep_auto_snapshot(reason: str, captured: list[dict]) -> None:
+        from . import snapshots
+
+        name = f"auto {time.strftime('%H.%M.%S')} before {reason}"
+        snapshots.save(name, captured)
+        journal.attach_snapshot(name)
+        autos = sorted(snapshots.snapshot_dir().glob("auto *.json"), key=lambda p: p.stat().st_mtime)
+        for old in autos[:-AUTO_SNAPSHOTS]:
+            old.unlink(missing_ok=True)
+
+    def auto_snapshot(reason: str, tracks: list[int | str] | None) -> None:
+        """Save how `tracks` sound before a tool changes their parameters. Unlike
+        undo, restoring it still works after the user has edited the set."""
+        from . import snapshots
+
+        if PREVIEW.get():
+            return
+        try:
+            paths = [track_path(t) for t in tracks] if tracks else current_track_paths()
+            keep_auto_snapshot(reason, snapshots.capture(run_steps, paths))
+        except Exception as e:  # never stands in the way of the change itself
+            logger.debug("No automatic snapshot before %s: %s", reason, e)
+
+    @tool(destructive=True)
+    def agent_changes(undo: int = 0) -> str:
+        """What the agent changed in Live this session, newest first: tool,
+        arguments, time, undo steps, and the automatic snapshot taken before
+        parameter changes. undo=N takes back the last N changes with Live's
+        undo, exactly as many steps as they made. Live's undo history is the
+        user's too: if they edited the set since, undo would take their edits
+        back first; then restore the change's snapshot_before instead, or let
+        them undo in Live.
+        """
+        if undo <= 0:
+            return to_json({"changes": [e.describe() for e in journal.recent(30)]})
+        entries = journal.undoable(int(undo))
+        if not entries:
+            raise ValueError("Nothing of the agent's to undo (or it was undone already)")
+        steps = sum(e.steps for e in entries)
+        with journal.not_recorded():
+            if not lom_get("live_set", ["can_undo"]).get("can_undo"):
+                raise RuntimeError("Live has nothing to undo")
+            done = 0
+            for _ in range(steps):
+                send("lom_call", {"path": "live_set", "method": "undo"})
+                done += 1
+        for entry in entries:
+            entry.undone = True
+        return to_json({"undone": [e.describe() for e in entries], "undo_steps": done,
+                        "redo": "transport(action=\"redo\") steps forward again"})
 
     # ── Song structure ───────────────────────────────────────────────────────
 

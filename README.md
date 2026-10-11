@@ -60,6 +60,7 @@ while testing against Live 12.3.
 | **Device chains** | `add_device` inserts any of Live's own devices by name with settings; `apply_device_chain` adds ready-made chains (vocal, drum bus, bass, pad, master, sidechain duck) — Live 12.3+ |
 | **Browser** | `browser_search` finds presets, devices, plug-ins, clips and samples by name (yours too; ~12,000 samples in about 0.1 s), `browser_load` puts one on a track or a Drum Rack pad, `browser_preview` plays it in Live's preview |
 | **Drum kits** | `build_drum_kit` fills a Drum Rack's General MIDI pads with one-shots from Drums › Drum Hits — by style ("808", "909"), from the Core Library or your own samples |
+| **Safety net** | `agent_changes` lists what the assistant changed this session (tool, arguments, undo steps) and `agent_changes(undo=N)` takes back exactly those steps with Live's undo; parameter changes also leave an automatic snapshot; generators, `transform_clip_notes` and `apply_midi_tool` take `preview=true` to show the notes without writing; deleting a track, scene, clip or device asks you first in clients that support MCP elicitation (`ABLETON_MCP_CONFIRM=off` turns it off) |
 | **Snapshots & A/B** | `snapshot` saves the mixer and every device parameter (racks included), shows what changed in Live's own units, and restores it in one undo step; automated parameters are left alone |
 | **Listening** | `measure_levels` reads Live's meters while the set plays (peak/average dBFS per track, no recording); `render_and_analyze` records a Session scene, the clips playing or an Arrangement section and measures it; `analyze_audio_file`, `analyze_clip_audio` |
 | **Mix diagnosis** | `mix_doctor` records every track and the master in one pass and reports masking (which parts fight in which band, how often, what to do), stray low end, phase, overs and the master against a streaming target; `capture_stems` returns the stem files; `compare_to_reference` compares tonal balance, loudness, dynamics and width with a reference track and returns EQ Eight settings that move the mix towards it |
@@ -71,7 +72,7 @@ while testing against Live 12.3.
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-69 tools in the default profile (97 with `ABLETON_MCP_PROFILE=full`), plus
+70 tools in the default profile (98 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -276,7 +277,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 285 tests, no Live or models required
+uv run --with pytest pytest -q            # 292 tests, no Live or models required
 (cd extension && npm ci && npm test)       # the Extensions SDK add-on
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb

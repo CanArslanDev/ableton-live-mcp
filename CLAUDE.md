@@ -273,6 +273,22 @@ Measured on Live 12.3.8:
   compact JSON; notes go out as rows under `note_columns` (`note_table`, ~80%
   smaller than objects). Keep docstrings to what the model needs to call the
   tool right; tools a newer one replaces belong in the `full` profile.
+- **Safety net.** `journal.py` gives each tool call an entry (a contextvar
+  set in `register_tool`); `AbletonConnection.send_command` counts the
+  modifying commands sent inside it (`journal.is_read_only` mirrors the
+  script's READ_ONLY_COMMANDS/METHODS; a test keeps them equal). Measured on
+  Live 12.4: N modifying commands = N undo steps, so `agent_changes(undo=N)`
+  undoes exactly that. Parameter tools call `auto_snapshot` first (the last
+  10 are kept; tests write them to a temp folder via conftest).
+  `@tool(..., preview=True)` + a `preview` parameter: `PREVIEW` makes
+  `prepare_clip`/`write_notes` no-ops and `send` refuse any change. Deletes
+  take `go_ahead: Annotated[ElicitationResult[_Confirm], Resolve(ask_…)]`:
+  the SDK runs the module-level resolver first and asks through elicitation
+  in either protocol era (2026-07-28 has no back-channel, so `ctx.elicit`
+  inside a tool fails there); resolvers must be module-level, because the
+  SDK resolves the annotation strings with `get_type_hints` and silently
+  drops unresolvable ones. A plain resolver return reaches the tool wrapped
+  as `AcceptedElicitation(data=…)`.
 - Generators read the set's meter and Key & Scale through `song_context()` /
   `resolve_key()`; explicit arguments win.
 - Prefer composing `op_set` / `op_call` / `op_display` into one `batch(...)`

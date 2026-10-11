@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import journal
+
 logger = logging.getLogger("AbletonMCPServer")
 
 DEFAULT_TIMEOUT = 15.0
@@ -133,7 +135,9 @@ class AbletonConnection:
             if timeout is None:
                 timeout = LONG_RUNNING_COMMANDS.get(command_type, DEFAULT_TIMEOUT)
             try:
-                return self._exchange(command_type, params or {}, timeout)
+                result = self._exchange(command_type, params or {}, timeout)
+                journal.note_command(command_type, params)
+                return result
             except AbletonCommandError:
                 raise
             except TimeoutError:

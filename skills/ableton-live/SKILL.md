@@ -31,9 +31,15 @@ audible at once, and each tool call is one step in Live's undo history.
   user an A/B.
 - Generators write into a clip slot (`clip_index`) or the Arrangement
   (`arrangement_time`). Pass `replace=true` only when the old notes should go.
-- Ask before deleting tracks, clips, scenes or devices. The user can always
-  undo in Live (Cmd/Ctrl+Z), and `transport(action="undo")` does the same:
-  one step per tool call.
+- Ask before deleting tracks, clips, scenes or devices (clients that support
+  it show the user a question themselves).
+- `preview=true` on generators, `transform_clip_notes` and `apply_midi_tool`
+  shows the notes without writing them: use it when the user wants to see
+  options first.
+- `agent_changes()` lists what you changed this session; `agent_changes(undo=1)`
+  takes back your last change exactly. If the user has edited the set since,
+  restore that change's `snapshot_before` instead (parameter changes) or let
+  them undo in Live.
 - `select_in_live(...)` shows the user what you are talking about (selects the
   track, clip or device in Live's window).
 

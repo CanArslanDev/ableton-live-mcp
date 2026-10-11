@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Safety net.** `agent_changes` lists what the assistant changed in this
+  session and, with `undo=N`, takes back exactly the undo steps those changes
+  made (verified on Live 12.4: one step per modifying command). Parameter
+  changes leave an automatic snapshot (the last 10), which still works after
+  the user edited the set. The seven generators, `transform_clip_notes` and
+  `apply_midi_tool` take `preview=true`. Deleting a track, scene, clip or
+  device asks the user first in clients with MCP elicitation, in both
+  protocol versions.
+
 ### Changed
 
 - **Less context per session and per call.** The core profile's tool
