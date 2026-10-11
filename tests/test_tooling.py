@@ -24,11 +24,13 @@ def _server_tools(monkeypatch, profile):
 def test_core_profile_drops_duplicated_original_tools(monkeypatch):
     tools = _server_tools(monkeypatch, "core")
     for duplicate in ("set_tempo", "fire_clip", "get_clip_notes", "create_midi_track",
-                      "start_playback", "set_device_parameter", "get_session_snapshot"):
+                      "start_playback", "set_device_parameter", "get_session_snapshot",
+                      # browser_search/browser_load, build_drum_kit, doctor do these
+                      "load_instrument_or_effect", "get_browser_tree", "get_browser_items_at_path",
+                      "load_drum_kit", "get_remote_script_info", "get_arrangement_clips"):
         assert duplicate not in tools
     # Originals with no newer equivalent stay
-    for kept in ("load_instrument_or_effect", "get_browser_tree", "create_audio_clip",
-                 "duplicate_to_arrangement", "create_locator", "get_remote_script_info"):
+    for kept in ("create_audio_clip", "duplicate_to_arrangement", "create_locator"):
         assert kept in tools
     assert "get_session_overview" in tools
 
@@ -147,3 +149,37 @@ def test_ui_tools_point_at_their_panel(monkeypatch):
     tools = _server_tools(monkeypatch, "core")
     panels = {t.name: (t.meta or {}).get("ui", {}).get("resourceUri") for t in tools.values()}
     assert panels["get_session_overview"] is None or panels["get_session_overview"].startswith("ui://")
+
+
+def test_schemas_are_compacted_without_losing_parameters():
+    from MCP_Server.tooling import compact_schema
+
+    schema = {"title": "fArguments", "type": "object", "required": ["message"], "properties": {
+        "message": {"title": "Message", "type": "string"},
+        "title": {"title": "Title", "type": "string", "default": "AbletonMCP"},
+        "track": {"title": "Track", "anyOf": [{"type": "integer"}, {"type": "string"}]},
+        "clip": {"title": "Clip", "anyOf": [{"type": "integer"}, {"type": "null"}], "default": None},
+        "notes": {"anyOf": [{"type": "array", "items": {"type": "object"}}, {"type": "null"}]},
+    }}
+    assert compact_schema(schema) == {"type": "object", "required": ["message"], "properties": {
+        "message": {"type": "string"},
+        "title": {"type": "string", "default": "AbletonMCP"},
+        "track": {"type": ["integer", "string"]},
+        "clip": {"type": ["integer", "null"]},
+        "notes": {"anyOf": [{"type": "array", "items": {"type": "object"}}, {"type": "null"}]},
+    }}
+
+
+def test_note_rows_keep_every_field_and_drop_defaults():
+    from MCP_Server.extended_tools import note_table
+
+    table = note_table([
+        {"note_id": 3, "pitch": 60, "start_time": 0.0, "duration": 0.25, "velocity": 100.0,
+         "mute": False, "probability": 1.0, "velocity_deviation": 0.0, "release_velocity": 64.0},
+        {"note_id": 4, "pitch": 64, "start_time": 0.123456789, "duration": 0.5, "velocity": 90.5,
+         "mute": True, "probability": 0.5, "velocity_deviation": 0.0, "release_velocity": 64.0},
+    ])
+    assert table == {"note_columns": ["note_id", "pitch", "name", "start_time", "duration", "velocity"],
+                     "notes": [[3, 60, "C3", 0, 0.25, 100], [4, 64, "E3", 0.1235, 0.5, 90.5]],
+                     "note_extras": {"1": {"mute": True, "probability": 0.5}}}
+    assert note_table([])["notes"] == []

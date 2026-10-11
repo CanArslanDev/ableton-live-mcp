@@ -265,6 +265,14 @@ Measured on Live 12.3.8:
   returns a `CallToolResult`. Clients negotiate 2025-11-25 (`mode="legacy"`) or
   2026-07-28; push updates and tests cover both. The original tools in `server.py` use `@legacy_tool("core" |
   "full")`; "full" ones only appear with `ABLETON_MCP_PROFILE=full`.
+- **Context cost.** Every tool's description and schema is sent to the model
+  each session (69 core tools ≈ 15k tokens, measured 2026-10-11, down from
+  22k), and every result on every call. So: `register_tool` strips pydantic
+  titles, `"default": null` and nullable `anyOf` from the advertised schema
+  (`compact_schema`; validation still uses the signature); `to_json` writes
+  compact JSON; notes go out as rows under `note_columns` (`note_table`, ~80%
+  smaller than objects). Keep docstrings to what the model needs to call the
+  tool right; tools a newer one replaces belong in the `full` profile.
 - Generators read the set's meter and Key & Scale through `song_context()` /
   `resolve_key()`; explicit arguments win.
 - Prefer composing `op_set` / `op_call` / `op_display` into one `batch(...)`

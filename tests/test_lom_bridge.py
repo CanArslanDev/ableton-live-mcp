@@ -20,6 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fake_live  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def note_dicts(result):
+    """A tool result's notes (rows under note_columns) as one dict per note."""
+    extras = result.get("note_extras", {})
+    return [dict(zip(result["note_columns"], row), **extras.get(str(i), {}))
+            for i, row in enumerate(result["notes"])]
 BUNDLED_SCRIPT = REPO_ROOT / "MCP_Server" / "bundled_ableton_remote_script" / "AbletonMCP_init.py"
 
 
@@ -397,7 +404,7 @@ def test_tools_generators_and_transforms(live_server):
     assert len(song.tracks[1].clip_slots[2].clip._notes) == 3 * 8
 
     notes = call("read_clip_notes", track="Bass", clip_index=2, pitch_low="C1", pitch_high="B1")
-    assert all(n["name"].endswith("1") for n in notes["notes"])
+    assert all(n["name"].endswith("1") for n in note_dicts(notes))
 
     call("edit_clip_notes", track="Bass", clip_index=2, mode="add",
          notes=[{"pitch": "C3", "start_time": 0, "duration": 1}])
@@ -678,7 +685,7 @@ def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch)
     wav = tmp_path / "Riff.wav"
     sf.write(wav, np.zeros(4410), 44100)
     listing = call("audio_to_midi", path=str(wav), lowest="A1")
-    assert [n["start_time"] for n in listing["notes"]] == [0.0, 2.0]
+    assert [n["start_time"] for n in note_dicts(listing)] == [0, 2]
     # Live's note names: A1 is MIDI 45, 110 Hz
     assert jobs[0][1]["minimum_frequency"] == pytest.approx(110.0)
     result = call("audio_to_midi", path=str(wav), to_track="Bass", to_clip_index=2,

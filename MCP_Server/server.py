@@ -329,13 +329,13 @@ def get_session_info(ctx: Context) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_session_info")
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error getting session info from Ableton: {str(e)}")
         return f"Error getting session info: {str(e)}"
 
 
-@legacy_tool("core", read_only=True)
+@legacy_tool("full", read_only=True)
 @telemetry_tool("get_remote_script_info")
 @trajectory_tool("get_remote_script_info", modifying=False)
 def get_remote_script_info(ctx: Context) -> str:
@@ -352,7 +352,7 @@ def get_remote_script_info(ctx: Context) -> str:
         info = handshake(ableton.send_command)
         cached = dict(get_cached_script_info() or info)
         cached["expected_version"] = EXPECTED_REMOTE_SCRIPT_VERSION
-        return json.dumps(cached, indent=2)
+        return json.dumps(cached, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error getting remote script info: {str(e)}")
         return f"Error getting remote script info: {str(e)}"
@@ -370,7 +370,7 @@ def get_track_info(ctx: Context, track_index: int) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_track_info", {"track_index": track_index})
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error getting track info from Ableton: {str(e)}")
         return f"Error getting track info: {str(e)}"
@@ -404,7 +404,7 @@ def get_clip_notes(
             "get_clip_notes",
             {"track_index": track_index, "clip_index": clip_index},
         )
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error getting clip notes: {str(e)}")
         return f"Error getting clip notes: {str(e)}"
@@ -431,7 +431,7 @@ def get_device_parameters(
             "get_device_parameters",
             {"track_index": track_index, "device_index": device_index},
         )
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error getting device parameters: {str(e)}")
         return f"Error getting device parameters: {str(e)}"
@@ -511,7 +511,7 @@ def get_session_snapshot(
                 "include_params": include_params,
             },
         )
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error getting session snapshot: {str(e)}")
         return f"Error getting session snapshot: {str(e)}"
@@ -768,7 +768,7 @@ def set_tempo(ctx: Context, tempo: float) -> str:
         return f"Error setting tempo: {str(e)}"
 
 
-@legacy_tool("core")
+@legacy_tool("full")
 @rich_telemetry_tool("load_instrument_or_effect")
 @trajectory_tool("load_instrument_or_effect")
 def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
@@ -869,7 +869,7 @@ def delete_clip(ctx: Context, track_index: int, clip_index: int) -> str:
             "track_index": track_index,
             "clip_index": clip_index,
         })
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error deleting clip: {str(e)}")
         return f"Error deleting clip: {str(e)}"
@@ -903,7 +903,7 @@ def stop_playback(ctx: Context) -> str:
         logger.error(f"Error stopping playback: {str(e)}")
         return f"Error stopping playback: {str(e)}"
 
-@legacy_tool("core", read_only=True)
+@legacy_tool("full", read_only=True)
 @rich_telemetry_tool("get_browser_tree")
 @trajectory_tool("get_browser_tree")
 def get_browser_tree(ctx: Context, category_type: str = "all") -> str:
@@ -968,7 +968,7 @@ def get_browser_tree(ctx: Context, category_type: str = "all") -> str:
             logger.error(f"Error getting browser tree: {error_msg}")
             return f"Error getting browser tree: {error_msg}"
 
-@legacy_tool("core", read_only=True)
+@legacy_tool("full", read_only=True)
 @rich_telemetry_tool("get_browser_items_at_path")
 @trajectory_tool("get_browser_items_at_path")
 def get_browser_items_at_path(ctx: Context, path: str) -> str:
@@ -992,7 +992,7 @@ def get_browser_items_at_path(ctx: Context, path: str) -> str:
             return (f"Error: {error}\n"
                    f"Available browser categories: {', '.join(available_cats)}")
         
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         error_msg = str(e)
         if "Browser is not available" in error_msg:
@@ -1011,7 +1011,7 @@ def get_browser_items_at_path(ctx: Context, path: str) -> str:
             logger.error(f"Error getting browser items at path: {error_msg}")
             return f"Error getting browser items at path: {error_msg}"
 
-@legacy_tool("core")
+@legacy_tool("full")
 @rich_telemetry_tool("load_drum_kit")
 @trajectory_tool("load_drum_kit")
 def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) -> str:
@@ -1098,7 +1098,7 @@ def set_arrangement_time(ctx: Context, time: float) -> str:
         return f"Error setting arrangement time: {str(e)}"
 
 
-@legacy_tool("core", read_only=True)
+@legacy_tool("full", read_only=True)
 @telemetry_tool("get_arrangement_clips")
 @trajectory_tool("get_arrangement_clips")
 def get_arrangement_clips(ctx: Context, track_index: int) -> str:
@@ -1113,7 +1113,7 @@ def get_arrangement_clips(ctx: Context, track_index: int) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_arrangement_clips", {"track_index": track_index})
-        return json.dumps(result, indent=2)
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error getting arrangement clips: {str(e)}")
         return f"Error getting arrangement clips: {str(e)}"
@@ -1128,23 +1128,9 @@ def duplicate_to_arrangement(
     clip_index: int,
     destination_time: float,
 ) -> str:
-    """
-    Copy a Session-view clip into the Arrangement timeline.
-
-    Uses Live's track.duplicate_clip_to_arrangement() API (Live 11 / 12).
-    The clip is placed at destination_time beats from the start of the
-    arrangement on the same track it lives in.
-
-    Typical workflow:
-      1. create_clip / add_notes_to_clip to build a Session clip
-      2. Call duplicate_to_arrangement once per bar/section you need
-      3. Call switch_to_arrangement_view to confirm the result in Live
-
-    Parameters:
-    - track_index:       Index of the track that owns the Session clip
-    - clip_index:        Index of the clip slot in that track (Session view)
-    - destination_time:  Beat position in the arrangement to place the clip
-                         (e.g. 0.0 = start, 8.0 = bar 3 in 4/4)
+    """Copy a Session clip (track_index, clip_index) into the Arrangement on the
+    same track, destination_time beats from the start. build_arrangement lays out
+    whole sections in one call.
     """
     try:
         ableton = get_ableton_connection()

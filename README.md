@@ -71,7 +71,7 @@ while testing against Live 12.3.
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-75 tools in the default profile (97 with `ABLETON_MCP_PROFILE=full`), plus
+69 tools in the default profile (97 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -178,7 +178,7 @@ Surface → AbletonMCP**, Input and Output **None**. Restart Live after every
 script update.
 
 Run only one MCP client against Live at a time. Ask the assistant to call
-`doctor` (or `get_remote_script_info`) to confirm the server and the script
+`doctor` to confirm the server and the script
 versions match.
 
 Environment variables: `ABLETON_MCP_PROFILE=full` (every original tool),
@@ -276,7 +276,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 282 tests, no Live or models required
+uv run --with pytest pytest -q            # 285 tests, no Live or models required
 (cd extension && npm ci && npm test)       # the Extensions SDK add-on
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb

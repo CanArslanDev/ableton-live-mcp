@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Less context per session and per call.** The core profile's tool
+  descriptions and schemas take about 15k tokens instead of 22k: schemas lose
+  pydantic's titles and null defaults, long descriptions are tighter, and six
+  original tools that newer ones replace (`load_instrument_or_effect`,
+  `get_browser_tree`, `get_browser_items_at_path`, `load_drum_kit`,
+  `get_remote_script_info`, `get_arrangement_clips`) moved to the `full`
+  profile. Results are compact JSON (a quarter to a half smaller), and notes
+  come as rows under `note_columns` (an 8-bar melody: 885 characters instead
+  of about 4,100).
+
 ## 2.0.0 — 2026-10-11
 
 ### Breaking

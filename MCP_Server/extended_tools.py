@@ -147,7 +147,46 @@ def ref(path: str) -> dict:
 
 
 def to_json(value: Any) -> str:
-    return json.dumps(value, indent=2, ensure_ascii=False)
+    # Compact: results cost the model tokens on every call (indentation was a
+    # quarter to a half of a typical result)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+NOTE_COLUMNS = ["note_id", "pitch", "name", "start_time", "duration", "velocity"]
+# Note fields left out of the rows when they hold Live's default
+NOTE_DEFAULTS = {"mute": False, "probability": 1.0, "velocity_deviation": 0.0,
+                 "release_velocity": 64.0}
+
+
+def _short(value: Any) -> Any:
+    if isinstance(value, float):
+        value = round(value, 4)
+        return int(value) if value.is_integer() else value
+    return value
+
+
+def note_table(notes: list[dict]) -> dict:
+    """Notes as rows under one header instead of one object per note (about a
+    third of the size): {"note_columns": [...], "notes": [[...], ...]}, with
+    non-default expression (mute, probability, …) in "note_extras" by row."""
+    columns = [c for c in NOTE_COLUMNS if c == "name" or any(c in n for n in notes)]
+    rows, extras = [], {}
+    for index, note in enumerate(notes):
+        row = []
+        for column in columns:
+            if column == "name":
+                row.append(music.note_name(int(note["pitch"])))
+            else:
+                row.append(_short(note.get(column)))
+        rows.append(row)
+        extra = {k: _short(note[k]) for k in NOTE_DEFAULTS
+                 if k in note and note[k] is not None and _short(note[k]) != _short(NOTE_DEFAULTS[k])}
+        if extra:
+            extras[str(index)] = extra
+    table: dict[str, Any] = {"note_columns": columns, "notes": rows}
+    if extras:
+        table["note_extras"] = extras
+    return table
 
 
 def selector(value: int | str) -> str:
@@ -456,8 +495,8 @@ def inserted_device_ids(track: str, inserts: list[list[Any]]) -> list[int]:
         if step["status"] == "error":
             message = step["message"]
             if "has no method 'insert_device'" in message:
-                message = ("inserting devices by name needs Live 12.3 or later; use "
-                           "load_instrument_or_effect with a browser URI")
+                message = ("inserting devices by name needs Live 12.3 or later; find the "
+                           "device with browser_search and load it with browser_load")
             raise RuntimeError(f"Could not insert {args[0]!r}: {message}")
         ids.append(step["result"]["result"]["$id"])
     return ids
@@ -629,21 +668,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     @tool(read_only=True)
     def lom_get_object(path: str, properties: list[str] | None = None) -> str:
-        """Read anything in the Live Object Model (LOM) by path.
+        """Read anything in the Live Object Model by path. Without `properties`: the
+        object's properties, children (with lengths) and methods; with them, only those
+        (on a list, for each item).
 
-        Without `properties` an object is described: its scalar properties,
-        child objects/lists (with lengths) and callable methods. With
-        `properties`, only those are read; on a list each item is read.
-
-        Path syntax (space separated, like Max for Live):
-        - "live_set" (the Song), "live_app", "live_set view", "live_app view"
-        - "live_set tracks 0 devices 1 parameters 2"
-        - select by name with quotes: 'live_set tracks "Bass" devices "Wavetable"'
-        - negative indexes: "live_set tracks -1"
-        - ids returned earlier: "id 12345"
-
-        Use this to discover features that have no dedicated tool. Objects in
-        results carry "$id"; pass "id <n>" as a path to reach them again.
+        Paths are space separated, as in Max for Live: "live_set", "live_app",
+        "live_set view", "live_set tracks 0 devices 1 parameters 2", by name
+        'live_set tracks "Bass"', negative indexes "live_set tracks -1", or "id 12345"
+        for a "$id" from an earlier result. For anything without a dedicated tool.
         """
         return to_json(lom_get(path, properties))
 
@@ -667,19 +699,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     @tool(destructive=True)
     def run_batch(commands: list[dict], stop_on_error: bool = True) -> str:
-        """Run several Remote Script commands in one round-trip, on Live's main
-        thread. Each command call is its own undo history entry; Live keeps
-        parameter changes (volume, tempo, mute, device values) as a separate
-        step from structural edits (names, colors, new tracks/clips/notes), so
-        undoing a mixed batch can take two Cmd+Z.
+        """Run several Remote Script commands in one round trip, on Live's main
+        thread; each modifying command is one undo step (Live keeps parameter changes and
+        structural edits as separate steps).
 
-        Each command is {"type": <command>, "params": {...}}. Useful types:
-        lom_get, lom_set, lom_call, param_set_display, clip_write_notes,
-        clip_write_envelope, create_midi_track, create_clip, add_notes_to_clip,
-        set_device_parameter, load_browser_item, fire_clip, ...
-        Example: [{"type": "lom_call", "params": {"path": "live_set",
-        "method": "create_midi_track", "args": [-1]}}, {"type": "lom_set",
-        "params": {"path": "live_set tracks -1", "property": "name", "value": "Pad"}}]
+        commands: [{"type": <command>, "params": {...}}] — lom_get, lom_set, lom_call,
+        param_set_display, clip_write_notes, clip_write_envelope, create_clip,
+        set_device_parameter, load_browser_item, fire_clip, …
+        e.g. [{"type": "lom_call", "params": {"path": "live_set", "method":
+        "create_midi_track", "args": [-1]}}, {"type": "lom_set", "params": {"path":
+        "live_set tracks -1", "property": "name", "value": "Pad"}}]
         """
         return to_json(batch(commands, stop_on_error))
 
@@ -1037,9 +1066,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         from_time: float | None = None, time_span: float | None = None,
                         pitch_low: int | str | None = None,
                         pitch_high: int | str | None = None) -> str:
-        """Read notes (with note_id, probability, velocity_deviation,
-        release_velocity) from a Session or Arrangement MIDI clip, optionally
-        within a time window (beats) and pitch range (MIDI number or "C3").
+        """Read the notes of a Session or Arrangement MIDI clip, optionally within
+        a time window (beats) and pitch range (MIDI number or "C3"). Notes come
+        as rows under "note_columns"; mute, probability, velocity_deviation and
+        release_velocity that differ from Live's defaults are in "note_extras"
+        by row index.
         """
         window: dict[str, Any] = {}
         if from_time is not None:
@@ -1051,8 +1082,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             hi = music.parse_note(pitch_high) if pitch_high is not None else 127
             window.update(from_pitch=lo, pitch_span=hi - lo + 1)
         result = read_notes(clip_path(track, clip_index, arrangement_clip_index), **window)
-        for n in result["notes"]:
-            n["name"] = music.note_name(n["pitch"])
+        result.update(note_table(result["notes"]))
         return to_json(result)
 
     @tool(destructive=True)
@@ -1104,22 +1134,18 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              pitch_high: int | str | None = None,
                              time_start: float | None = None,
                              time_end: float | None = None) -> str:
-        """Transform existing MIDI notes (optionally only those within a pitch
-        range and/or time range), written back as one edit.
+        """Transform a clip's MIDI notes (or only those in a pitch and/or time range)
+        as one edit; note ids and MPE are kept (Live 11+).
 
         operation:
-        - transpose (semitones) | transpose_in_scale (steps, key, scale)
-        - constrain_to_scale (key, scale): snap wrong notes into the scale
-        - quantize (grid in beats e.g. 0.25 = 1/16, strength 0..1)
-        - humanize (timing in beats, velocity_amount, seed)
+        - transpose (semitones) | transpose_in_scale (steps, key, scale) |
+          constrain_to_scale (key, scale)
+        - quantize (grid in beats, 0.25 = 1/16; strength 0..1) | humanize (timing,
+          velocity_amount, seed)
         - velocity_scale (factor, offset) | velocity_ramp (start_velocity → end_velocity)
-        - reverse | invert (axis pitch) | legato
-        - double_speed | half_speed
-        - set_probability (value 0..1) | set_velocity_deviation (value)
-        - dedupe | delete
-        key/scale default to the set's Key & Scale (Live 12).
-        Notes are edited in place (Live 11+), so note ids and per-note
-        expression the API cannot read (MPE) are kept.
+        - reverse | invert (axis pitch) | legato | double_speed | half_speed
+        - set_probability (value 0..1) | set_velocity_deviation (value) | dedupe | delete
+        key/scale default to the set's Key & Scale.
         """
         cp = clip_path(track, clip_index, arrangement_clip_index)
         data = read_notes(cp)
@@ -1179,26 +1205,22 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         pitch_high: int | str | None = None,
                         time_start: float | None = None,
                         time_end: float | None = None) -> str:
-        """Live 12's MIDI Tools (Transformations) on a clip's notes — all of
-        them, or those within a pitch and/or time range. One undo step; notes
-        that survive keep their ids and MPE.
+        """Live 12's MIDI Tools (Transformations) on a clip's notes, or only those
+        in a pitch/time range; one undo step, note ids and MPE kept.
 
         tool → settings (defaults):
-        - strum: amount (0.04 beats between strings), direction up|down|alternate
-        - ornament: kind flam|grace, spacing (0.0625 beats), velocity (0.6 ×),
-          step (-1; grace notes move by scale steps in the set's key)
-        - chop: parts (2), velocity_decay (0..1, 0) — ratchets
+        - strum: amount (0.04 beats), direction up|down|alternate
+        - ornament: kind flam|grace, spacing (0.0625), velocity (0.6×), step (-1 scale steps)
+        - chop: parts (2), velocity_decay (0) — ratchets
         - connect: rate (0.25), max_notes (8) — scale passing notes between notes
-        - time_warp: mode accelerando|ritardando, amount (0..1, 0.5)
+        - time_warp: mode accelerando|ritardando, amount (0.5)
         - velocity_shaper: shape ramp_up|ramp_down|swell|dip|sine|random|accent,
           low (40), high (120), cycles (1), seed
-        - recombine: mode rotate|reverse|shuffle, part pitch|velocity|duration,
-          amount (1), seed — new order over the same rhythm
+        - recombine: mode rotate|reverse|shuffle, part pitch|velocity|duration, amount (1), seed
         - span: mode percent|fixed|legato|scale, value (0.5)
-        - arpeggiate: style up|down|updown|downup|random|played, rate (0.25),
-          gate (0.9), octaves (1), seed — chords become arpeggios
-        e.g. tool="strum", settings={"amount": 0.03, "direction": "alternate"}.
-        transform_clip_notes has transpose, quantize, humanize and more.
+        - arpeggiate: style up|down|updown|downup|random|played, rate (0.25), gate (0.9),
+          octaves (1), seed
+        e.g. tool="strum", settings={"amount": 0.03, "direction": "alternate"}
         """
         name = tool.strip().lower()
         if name not in MIDI_TOOLS:
@@ -1270,17 +1292,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                    replace: bool = True, clip_name: str | None = None) -> str:
         """Write a chord progression into a MIDI clip (created if missing).
 
-        - progression: roman numerals ("ii7 V7 Imaj7", "i iv bVII III") or chord
-          symbols ("Am F C G", "Dm7 G7 Cmaj7", "C/E"); default: four chords
-          from the scale's own triads (C major: C G Am F; D Dorian: Dm G Dm C)
-        - key/scale: default to the set's Key & Scale (Live 12); bars follow the
-          set's time signature
-        - voicing: smooth (voice-led inversions) | close | open | drop2 | spread
-        - rhythm: sustain | half | quarters | eighths | offbeat | syncopated |
-          charleston | stabs
-        - octave: 3 puts close chords around middle C (C3 = 60 in Live)
-        - arrangement_time: write into a new Arrangement clip at this beat
-          instead of a Session slot (Live 12+)
+        - progression: roman numerals ("ii7 V7 Imaj7", "i iv bVII III") or chord symbols
+          ("Am F C G", "C/E"); default four of the scale's triads
+        - key/scale: default the set's Key & Scale; bars follow its meter
+        - voicing: smooth (voice-led) | close | open | drop2 | spread
+        - rhythm: sustain | half | quarters | eighths | offbeat | syncopated | charleston | stabs
+        - octave: 3 centres close chords on middle C (C3 = 60 in Live)
+        - arrangement_time: a new Arrangement clip at this beat instead of a Session slot
         """
         context = song_context()
         key, scale = resolve_key(key, scale, context)
@@ -1308,16 +1326,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                               clip_name: str | None = None) -> str:
         """Write a drum groove into a MIDI clip on a Drum Rack track.
 
-        style: house | techno | trap | drill | boom_bap | lofi | dnb | breakbeat |
-        uk_garage | reggaeton | afrobeats | rock | funk | disco | halftime
-        Bars follow the set's time signature: the 4/4 grooves are cut or
-        extended to fit other meters.
-        - swing 0..1 delays off-beat 16ths; humanize 0..1 adds timing/velocity variation
-        - fill: snare fill on the last beat of the last bar
-        - auto_map_drum_rack: find kick/snare/hat/... pads by their names in the
-          track's Drum Rack; otherwise General MIDI notes (kick C1=36, snare D1=38,
-          clap D#1=39, closed hat F#1=42, open hat A#1=46)
-        - mapping overrides: {"kick": 36, "closed_hat": "F#1", ...}
+        style: house | techno | trap | drill | boom_bap | lofi | dnb | breakbeat | uk_garage |
+        reggaeton | afrobeats | rock | funk | disco | halftime (fitted to the set's meter)
+        - swing 0..1 (off-beat 16ths); humanize 0..1; fill: a snare fill on the last beat
+        - auto_map_drum_rack: find pads by their names; otherwise General MIDI (kick 36,
+          snare 38, clap 39, closed hat 42, open hat 46)
+        - mapping: {"kick": 36, "closed_hat": "F#1"}
         """
         context = song_context()
         bar = context["beats_per_bar"]
@@ -1341,16 +1355,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                            arrangement_time: float | None = None, replace: bool = True,
                            clip_name: str | None = None) -> str:
         """Euclidean rhythms (Live 12's Euclidean generator): each voice spreads
-        `pulses` hits as evenly as possible over `steps`, and its cycle repeats
-        regardless of bar lines, so voices of different lengths drift apart.
+        `pulses` hits evenly over `steps`; cycles of different lengths drift apart.
 
-        voices: [{"pad": "kick", "pulses": 3, "steps": 8, "rotation": 0,
-        "velocity": 100, "accent": 120}, …] — pad is a role found on the
-        track's Drum Rack (kick, snare, closed_hat, …), a note name ("C1") or a
-        MIDI number; accent (optional) is the velocity of each cycle's first hit.
-        step: length of one step, "1/16" (0.25 beat), "1/8", "1/8T", or beats.
-        Classics: E(3,8) tresillo, E(5,8) cinquillo, E(7,16), E(5,16) bossa;
-        E(4,9) = 2+2+2+3, the Turkish aksak.
+        voices: [{"pad": "kick", "pulses": 3, "steps": 8, "rotation": 0, "velocity": 100,
+        "accent": 120}, …]; pad: a Drum Rack role, a note name ("C1") or a MIDI number;
+        accent: the velocity of each cycle's first hit.
+        step: "1/16" (default), "1/8", "1/8T" or beats.
+        Classics: E(3,8) tresillo, E(5,8) cinquillo, E(5,16) bossa, E(4,9) aksak (2+2+2+3).
         """
         grids = {"1/4": 1.0, "1/8": 0.5, "1/8t": 1 / 3, "1/16": 0.25, "1/16t": 1 / 6,
                  "1/32": 0.125}
@@ -1380,18 +1391,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(idempotent=True, ui=ui.MAKAM)
     def turkish_makam(name: str | None = None, tonic: str | None = None,
                       tuning_file: bool = False) -> str:
-        """Turkish makams (Arel-Ezgi-Uzdilek system, 53 commas per octave) and
-        usuls. Without a name: every makam and usul. With a name (rast, uşşak,
-        hicaz, hüseynî, kürdî, saba, segâh, hüzzam, nihavend, karcığar, …):
-        its steps in commas, degrees in cents, karar (tonic) and güçlü, and the
-        12-tone approximation on `tonic` (default: its karar).
-
-        Every generator and scale tool accepts a makam as the scale
-        (scale="hicaz", key="A"), using that 12-tone approximation.
-        tuning_file=True also writes an .ascl tuning to Live's User Library ›
-        Tunings that moves the makam's degrees to their true comma pitches;
-        double-click it in Live's browser (Tunings) to hear the real intervals
-        on the same notes.
+        """Turkish makams (Arel-Ezgi-Uzdilek, 53 commas per octave) and usuls. No
+        name: all of them. With a name (rast, uşşak, hicaz, hüseynî, kürdî, saba, segâh,
+        hüzzam, nihavend, karcığar, …): steps in commas, degrees in cents, karar, güçlü
+        and the 12-tone approximation on `tonic` (default its karar). Every generator
+        takes a makam as its scale (scale="hicaz", key="A").
+        tuning_file=True writes an .ascl tuning to User Library › Tunings with the true
+        comma pitches; the user double-clicks it in Live's browser.
         """
         from . import turkish
 
@@ -1726,7 +1732,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if not notes:
             raise ValueError(f"The clip {source['clip']!r} has no notes in its played region")
         if to_track is None and midi_path is None:
-            return to_json(source)
+            return to_json({**source, **note_table(source["notes"])})
         name = clip_name or source["clip"] or Path(source["file"]).stem
         result: dict[str, Any] = {"source": {k: source[k] for k in ("file", "track", "clip",
                                                                      "length", "notes_outside")}}
@@ -1786,19 +1792,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              two_stems: str | None = None, model: str = "htdemucs",
                              out_dir: str | None = None, to_tracks: bool = False,
                              ctx: Context | None = None) -> str:
-        """Split a mix into stems with Demucs: drums, bass, vocals and other
-        (model htdemucs_6s adds guitar and piano), from an audio file or the
-        file behind an audio clip.
+        """Split a mix into drums, bass, vocals and other with Demucs (htdemucs_6s adds
+        guitar and piano), from an audio file or the file behind an audio clip.
 
-        - two_stems: "vocals" (or drums, bass, other) gives that stem plus
-          everything else, e.g. for a karaoke track or an a cappella
-        - model: htdemucs (default) | htdemucs_ft (cleaner, ~4x slower) |
-          htdemucs_6s
+        - two_stems: "vocals" (or drums, bass, other) gives that stem plus the rest
+        - model: htdemucs | htdemucs_ft (cleaner, ~4× slower) | htdemucs_6s
         - out_dir: default ~/Music/Ableton MCP/Stems/<name>
-        - to_tracks: also add one audio track per stem to the open set, the
-          stem placed where the source clip is (slot 0 for a file)
-        Uses the GPU when there is one. The first use downloads torch and
-        Demucs (~400 MB) and the model (~80 MB) into uv's cache.
+        - to_tracks: one audio track per stem in the set, placed where the source clip is
+        Uses the GPU if there is one; the first use downloads ~500 MB.
         """
         from . import ml
         from .audio_analysis import analyze
@@ -1871,21 +1872,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                             lowest: int | str | None = None, highest: int | str | None = None,
                             replace: bool = True, clip_name: str | None = None,
                             ctx: Context | None = None) -> str:
-        """Turn audio into MIDI notes with Spotify's Basic Pitch: melodies,
-        bass lines and chords (polyphonic; not drums), from an audio file or
-        the file behind an audio clip.
+        """Turn audio into MIDI notes with Spotify's Basic Pitch (melodies, bass lines,
+        chords; not drums), from an audio file or the file behind an audio clip.
 
-        - to_track: write the notes into a MIDI clip there, in Session slot
-          to_clip_index or in the Arrangement at arrangement_time (default:
-          where the source clip is, or slot 0); midi_path: also a .mid file.
-          With neither, the notes are listed.
-        - tempo: the audio's own tempo, to turn seconds into beats. Default:
-          the set's tempo, right for audio playing at its original speed
-          (Warp off, or a file at the set's tempo).
-        - onset_threshold, frame_threshold (0..1): higher gives fewer, surer
-          notes; minimum_note_ms; lowest/highest: pitch range ("E1", 40, …)
-        The first use downloads Basic Pitch (~150 MB; uv runs it on
-        Python 3.10, which its model needs).
+        - to_track: write a MIDI clip there (Session slot to_clip_index, or
+          arrangement_time; default where the source clip is); midi_path: a .mid file;
+          with neither, the notes are listed
+        - tempo: the audio's own tempo, for seconds → beats (default the set's: right
+          for unwarped audio)
+        - onset_threshold, frame_threshold (0..1): higher gives fewer, surer notes;
+          minimum_note_ms; lowest/highest: pitch range ("E1", 40)
+        The first use downloads Basic Pitch (~150 MB).
         """
         from . import midi_files, ml
 
@@ -1938,7 +1935,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
             payload.update(json.loads(await asyncio.to_thread(write)))
         elif not midi_path:
-            payload["notes"] = notes
+            payload.update(note_table(notes))
         return to_json(payload)
 
     def sound_folders() -> list[Path]:
@@ -2072,20 +2069,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool
     def add_device(track: int | str, device: str, position: int | None = None,
                    settings: dict[str, float | str] | None = None) -> str:
-        """Insert one of Live's own devices by name, without the browser (Live 12.3+).
+        """Insert one of Live's own devices by its browser name (Live 12.3+): effects
+        ("EQ Eight", "Compressor", "Glue Compressor", "Limiter", "Saturator", "Utility",
+        "Reverb", "Delay", "Echo", "Auto Filter", "Drum Buss", "Roar", …), instruments
+        ("Drift", "Operator", "Wavetable", "Simpler", "Drum Rack", "Meld"), MIDI effects
+        ("Arpeggiator", "Chord", "Scale") and racks. Plug-ins, Max devices and presets
+        load with browser_load.
 
-        device: the name in Live's browser, e.g. "EQ Eight", "Compressor",
-        "Glue Compressor", "Limiter", "Saturator", "Utility", "Reverb",
-        "Delay", "Echo", "Auto Filter", "Drum Buss", "Multiband Dynamics",
-        "Chorus-Ensemble", "Roar", "Channel EQ", "Gate"; instruments ("Drift",
-        "Operator", "Wavetable", "Simpler", "Drum Rack", "Meld"); MIDI effects
-        ("Arpeggiator", "Chord", "Scale"); racks ("Audio Effect Rack",
-        "Instrument Rack"). Plug-ins, Max devices and presets need
-        load_instrument_or_effect with a browser URI.
-        - position: index in the device chain (default: the end); MIDI effects
-          go before the instrument
-        - settings: {"Threshold": "-18 dB", "Ratio": "4", "1 Filter Type A":
-          "High Pass 48dB"} as Live displays them, or raw numbers
+        - position: index in the chain (default the end)
+        - settings: {"Threshold": "-18 dB", "1 Filter Type A": "High Pass 48dB"} as Live
+          displays them, or raw numbers
         """
         tp = track_path(track)
         args = [device] if position is None else [device, int(position)]
@@ -2329,7 +2322,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         audio_effects | midi_effects | max_for_live | plugins | clips |
         samples | user_library | packs | current_project.
         Results carry an id for browser_load and browser_preview (valid until
-        Live restarts) and the uri for load_instrument_or_effect.
+        Live restarts).
         """
         return to_json(search_browser(query, category, max(1, min(int(max_results), 200))))
 
@@ -2394,20 +2387,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                        sounds: dict[str, int | str] | None = None, style: str = "",
                        source: str = "any", seed: int | None = None,
                        replace: bool = False) -> str:
-        """Build a Drum Rack from single samples: for each role a one-shot from
-        Live's Drums › Drum Hits (your own samples included) goes onto its
-        General MIDI pad, so generate_drum_pattern plays it right away.
+        """Build a Drum Rack from one-shots in Live's Drums › Drum Hits (the user's
+        included), each role on its General MIDI pad, so generate_drum_pattern plays it at
+        once. Adds a Drum Rack if the track has none (Live 12.3+).
 
-        - roles: default kick, snare, clap, closed_hat, open_hat, rim, perc,
-          shaker, crash, low_tom, high_tom (also: pedal_hat, mid_tom, ride, cowbell)
-        - sounds: per-role override, a browser_search id or a query:
-          {"kick": "808 long", "snare": 12345}
-        - style: a word added to every search ("808", "909", "acoustic", "lofi");
-          roles with no match fall back to any sample of that kind
-        - source: any | core (Ableton's Core Library) | user (your own samples)
-        - seed: picks among the best dozen matches for variety (default: the best)
-        - replace: also refill pads that already hold a sound
-        Adds a Drum Rack to the track if it has none (Live 12.3+).
+        - roles: default kick, snare, clap, closed_hat, open_hat, rim, perc, shaker, crash,
+          low_tom, high_tom (also pedal_hat, mid_tom, ride, cowbell)
+        - sounds: per role a browser_search id or query, {"kick": "808 long"}
+        - style: a word added to every search ("808", "909", "lofi")
+        - source: any | core | user; seed: another of the best matches; replace: refill
+          pads that already have a sound
         """
         import random
 
@@ -2521,20 +2510,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(ui=ui.SNAPSHOTS)
     def snapshot(action: str = "save", name: str = "", tracks: list[int | str] | None = None,
                  compare_to: str = "") -> str:
-        """Save and restore how the set sounds: mixer (volume, pan, sends,
-        mute) and every device parameter, devices inside racks included.
+        """Save and restore how the set sounds: mixer (volume, pan, sends, mute) and
+        every device parameter, racks included.
 
         action:
-        - save: capture `tracks` (default: all tracks, returns and the master)
-          under `name` (default: a timestamp)
-        - restore: put the saved values back, as one undo step. Automated
-          parameters are left alone (setting one would switch its automation off)
-        - diff: what changed since the snapshot, with values as Live shows
-          them; with compare_to, the difference between two snapshots
+        - save: `tracks` (default all, returns and the master) under `name` (default a
+          timestamp)
+        - restore: one undo step; automated parameters are left alone
+        - diff: what changed since the snapshot (or against compare_to), in Live's units
         - list | delete
-        Use it to try ideas safely and to A/B: save "A", make changes, save
-        "B", then restore "A" or "B" while the user listens. Tracks are matched
-        by name, so snapshots survive adding or moving tracks.
+        A/B: save "A", change, save "B", restore either while the user listens. Tracks
+        match by name.
         """
         from . import snapshots
 
@@ -2615,19 +2601,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                           locators: bool = True) -> str:
         """Lay Session clips out in the Arrangement as a song, in one call.
 
-        sections, in order: {"name": "Intro", "bars": 8, ...} plus what plays —
-        - "scene": index or name: every track plays its clip from that scene;
-          "except": ["Drums", "Bass"] leaves tracks out (breakdowns, intros)
-        - "clips": {"Drums": 0, "Bass": "Bass B"}: per track a Session slot
-          index or clip name; tracks not listed are silent
-        A clip shorter than its section repeats. MIDI clips are cut exactly at
-        the section end; an audio clip that does not fit a whole number of
-        times runs over (the next section's clip on that track cuts it).
-        locators: a named locator at each section start. Whatever was in the
-        Arrangement in those bars is overwritten (one undo step).
-        Example: [{"name": "Intro", "bars": 8, "scene": 0, "except": ["Drums"]},
-        {"name": "Drop", "bars": 16, "scene": 1}, {"name": "Outro", "bars": 8,
-        "clips": {"Pad": 0}}]
+        sections, in order, each {"name", "bars"} plus what plays:
+        - "scene": index or name, every track plays its clip there; "except": ["Drums"]
+          leaves tracks out
+        - "clips": {"Drums": 0, "Bass": "Bass B"}: slot index or clip name per track;
+          other tracks are silent
+        Shorter clips repeat; MIDI clips are cut at the section end, audio clips may run
+        over. locators: a named locator at each section start. Overwrites those bars (one
+        undo step). e.g. [{"name": "Intro", "bars": 8, "scene": 0, "except": ["Drums"]},
+        {"name": "Drop", "bars": 16, "scene": 1}]
         """
         bar = song_context()["beats_per_bar"]
         names, clips, scenes = session_clips()
@@ -3467,12 +3449,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     @tool(read_only=True)
     async def get_live_selection() -> str:
-        """What the user pointed at in Live with "Share … with AbletonMCP"
-        (right-click menu of the AbletonMCP Companion extension, Live 12.4.5+
-        Suite): an Arrangement time selection (beats and bars, tracks), clip
-        slots, a clip or a track. Use it when the user means "this part",
-        "the selection" or "these clips"; the Live Object Model cannot see a
-        time selection.
+        """What the user shared from Live with "Share … with AbletonMCP" (the
+        AbletonMCP Companion extension, Live 12.4.5+ Suite): the selected bars
+        and tracks, clips or a track, for "this part" or "the selection".
         """
         from . import companion
 
@@ -3492,11 +3471,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(read_only=True)
     async def confirm_in_live(message: str, title: str = "AbletonMCP",
                               confirm_label: str = "OK", cancel_label: str = "Cancel") -> str:
-        """Ask the user a yes/no question in a dialog inside Live (AbletonMCP
-        Companion extension, Live 12.4.5+ Suite), for example before replacing
-        their work while they are looking at Live rather than at the chat.
-        Returns {"confirmed": true|false}; closing the dialog means no. Waits
-        up to 5 minutes for an answer.
+        """Ask a yes/no question in a dialog inside Live (AbletonMCP Companion
+        extension, Live 12.4.5+ Suite); {"confirmed": false} if closed. Waits up
+        to 5 minutes.
         """
         from . import companion
 
@@ -3508,11 +3485,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(read_only=True)
     async def render_track_audio(track: int | str, start_beat: float, end_beat: float,
                                  analyze: bool = True) -> str:
-        """Render an audio track's clips between two beats to a WAV file without
-        playing the set: the Extensions SDK's render before the track's devices
-        (AbletonMCP Companion extension, Live 12.4.5+ Suite). Audio tracks
-        only; for what the devices and the mix make of it, use
-        render_and_analyze. analyze: also measure it (see analyze_audio_file).
+        """Render an audio track's clips between two beats to a WAV, before its
+        devices and without playing (AbletonMCP Companion extension, Live
+        12.4.5+ Suite); analyze: also measure it. With devices and mix:
+        render_and_analyze.
         """
         from . import companion
         from .audio_analysis import analyze as measure

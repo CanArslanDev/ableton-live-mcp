@@ -343,6 +343,14 @@ function roll(notes, length, sig, chords) {
     chordLabels);
 }
 function slotPath(clip) { return clip && clip.endsWith(" clip") ? clip.slice(0, -5) : null; }
+// Notes come as rows under "note_columns" (see note_table); older results as objects
+function noteObjects(data) {
+  const rows = (data && data.notes) || [];
+  if (!data.note_columns) return rows;
+  const extras = data.note_extras || {};
+  return rows.map((row, i) => Object.assign(
+    Object.fromEntries(data.note_columns.map((column, c) => [column, row[c]])), extras[i] || {}));
+}
 async function loadNotes(input) {
   if (input.track === undefined || !canCallTools()) return null;
   const args = { track: input.track };
@@ -364,7 +372,7 @@ function render(data, input) {
     slotPath(data.clip) ? actionButton("Play it", () => callTool("lom_call_method", { path: slotPath(data.clip), method: "fire" }), { busy: "Firing", done: "Play it" }) : null,
     data.clip || input.track !== undefined ? actionButton("Stop", () => callTool("lom_call_method", { path: "live_set", method: "stop_all_clips" }), { busy: "Stopping", done: "Stop" }) : null);
   if (data.notes) {
-    show(head, roll(data.notes, data.length, data.time_signature, data.chords), buttons);
+    show(head, roll(noteObjects(data), data.length, data.time_signature, data.chords), buttons);
     return;
   }
   show(head, el("div", { class: "muted" }, "Reading the notes…"), buttons);
@@ -372,7 +380,7 @@ function render(data, input) {
   drawn = data;
   loadNotes(input || {}).then((notes) => {
     if (!notes) { show(head, el("div", { class: "muted" }, data.text || "Open the clip in Live to see it."), buttons); return; }
-    show(head, roll(notes.notes || [], notes.length || data.length_beats, data.time_signature, data.chords), buttons);
+    show(head, roll(noteObjects(notes), notes.length || data.length_beats, data.time_signature, data.chords), buttons);
   }).catch((e) => show(head, notice(String(e.message || e), "bad"), buttons));
 }
 """

@@ -112,6 +112,31 @@ def failure_text_as_error(fn: Callable) -> Callable:
     return caller
 
 
+def compact_schema(node: Any, _property_map: bool = False) -> Any:
+    """A tool's input schema without what costs tokens and tells the model
+    nothing: pydantic's titles (the property name again), `"default": null`
+    (the `required` list already says what is optional), and
+    `anyOf: [{type: X}, {type: null}]` written as `type: [X, "null"]`.
+    Property names are kept even when one is called "title".
+    """
+    if isinstance(node, list):
+        return [compact_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    if _property_map:
+        return {name: compact_schema(schema) for name, schema in node.items()}
+    compacted = {key: compact_schema(value, _property_map=key == "properties")
+                 for key, value in node.items() if key != "title"}
+    any_of = compacted.get("anyOf")
+    if isinstance(any_of, list) and all(isinstance(o, dict) and set(o) == {"type"} for o in any_of):
+        types = [o["type"] for o in any_of]
+        del compacted["anyOf"]
+        compacted["type"] = types if len(types) > 1 else types[0]
+    if "default" in compacted and compacted["default"] is None:
+        del compacted["default"]
+    return compacted
+
+
 def annotations(read_only: bool = False, destructive: bool = False,
                 idempotent: bool = False, title: str | None = None) -> ToolAnnotations:
     # Every tool acts on the local Live set only, never on an open world.
@@ -142,4 +167,8 @@ def register_tool(mcp, fn: Callable, *, read_only: bool = False, destructive: bo
              annotations=annotations(read_only, destructive, idempotent, title),
              meta={"ui": {"resourceUri": ui}} if ui else None,
              structured_output=False)(wrapped)
+    # Only the advertised schema changes; arguments are still validated
+    # against the function's signature
+    registered = mcp._tool_manager.get_tool(fn.__name__)
+    registered.parameters = compact_schema(registered.parameters)
     return fn
