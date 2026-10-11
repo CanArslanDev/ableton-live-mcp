@@ -34,6 +34,13 @@ def test_versions_agree():
     assert marketplace["plugins"][0]["name"] == plugin["name"]
 
 
+def test_changelog_describes_this_version():
+    # The release workflow takes the version's section as the release notes
+    version = _load_build_mcpb().project_version()
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(rf"^## {re.escape(version)}( |$)", changelog, re.MULTILINE), version
+
+
 def test_mcpb_manifest_is_filled_from_the_code():
     build = _load_build_mcpb()
     manifest = build.build_manifest()

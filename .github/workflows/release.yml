@@ -27,7 +27,10 @@ jobs:
           test "${GITHUB_REF_NAME#v}" = "$version" || { echo "tag $GITHUB_REF_NAME, pyproject $version"; exit 1; }
       - run: uv build
       - run: uv run --frozen python packaging/build_mcpb.py
-      - name: GitHub release
+      - name: GitHub release, with the version's section of CHANGELOG.md as notes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz dist/*.mcpb --generate-notes
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" 'index($0, "## " v) == 1 {f=1; next} /^## / && f {exit} f' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz dist/*.mcpb --title "$GITHUB_REF_NAME" "${notes[@]}"

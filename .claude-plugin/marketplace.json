@@ -12,7 +12,7 @@
       "name": "ableton-live",
       "source": "./",
       "description": "Control Ableton Live from Claude Code: the whole Live Object Model, music generators, mixing and audio analysis.",
-      "version": "1.8.0",
+      "version": "2.0.0",
       "category": "music",
       "keywords": ["ableton", "music", "midi", "mixing"]
     }
