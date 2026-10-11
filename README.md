@@ -102,6 +102,16 @@ The original upstream tools that newer ones replace (`set_tempo`,
 default to keep the tool list short. Set `ABLETON_MCP_PROFILE=full` to get
 them back.
 
+### Built with it
+
+[**reference-dissector**](https://github.com/CanArslanDev/reference-dissector)
+takes a reference track apart: the tempo grid, the tuning, every drum hit, the
+exact samples from your own library and a synthesized 808. It rebuilds the
+track in Live through this server's tools, with the original stems muted
+underneath for A/B. Its docs also cover the Live behaviour measured along the
+way and how a model that cannot hear can still tell whether two sounds are the
+same.
+
 ---
 
 ## Install
