@@ -255,6 +255,27 @@ def check_live_log(log: Path | None = None) -> dict:
     return _check("live_log", "ok", f"No AbletonMCP errors since the script last started ({log})")
 
 
+def check_companion() -> dict:
+    """The optional Extensions SDK add-on (Live 12.4.5+ Suite)."""
+    from . import companion
+
+    try:
+        info = companion.request("song", timeout=3.0)
+        session = companion.find_session()
+        return _check("companion", "ok",
+                      f"AbletonMCP Companion {session.get('companion') or ''} answers on port "
+                      f"{session['port']} ({len(info.get('tracks', []))} tracks)".replace("  ", " "))
+    except companion.CompanionUnavailable as e:
+        if not companion.session_files() and "ABLETON_MCP_COMPANION_TOKEN" not in os.environ:
+            return _check("companion", "info", "AbletonMCP Companion not installed (optional: "
+                          "an Extensions SDK add-on for Live 12.4.5+ Suite)")
+        return _check("companion", "warn", str(e),
+                      "Open Live with the extension enabled (Settings › Extensions), or delete "
+                      "the stale session file.")
+    except Exception as e:
+        return _check("companion", "warn", f"AbletonMCP Companion error: {e}")
+
+
 def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
     checks = [check_server(), check_installed_scripts(), check_bundle_copies()]
     versions = live_versions()
@@ -264,6 +285,7 @@ def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
     connection, _state = check_connection(host, port)
     checks += connection
     checks.append(check_live_log())
+    checks.append(check_companion())
     problems = [c for c in checks if c["status"] in ("fail", "warn")]
     return {"ok": not any(c["status"] == "fail" for c in checks),
             "problems": len(problems), "checks": checks}

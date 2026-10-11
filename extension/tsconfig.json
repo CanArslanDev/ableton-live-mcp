@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.sdk.json",
+  "compilerOptions": {
+    "paths": { "@ableton-extensions/sdk": ["./types/ableton-sdk.d.ts"] }
+  }
+}

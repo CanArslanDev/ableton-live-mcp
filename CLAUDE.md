@@ -28,6 +28,8 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
 | `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
+| `MCP_Server/companion.py` | Client for the Extensions SDK add-on: finds its session file, sends one command. |
+| `extension/` | AbletonMCP Companion, the Extensions SDK add-on (TypeScript): share selection, confirm dialog, pre-FX render. |
 | `MCP_Server/m4l_device.py` | Builds the AbletonMCP Analyzer (.amxd) as bytes: the Max patch as JSON. |
 | `MCP_Server/analyzer.py` | UDP/OSC listener for the analyzer's messages; levels, bands, correlation, approximate LUFS. |
 | `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP) in uv-built environments; seconds→beats; the CLAP sound index. |
@@ -170,6 +172,21 @@ Measured on Live 12.3.8:
   device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
+
+## Extensions SDK add-on (`extension/`, not yet run inside Live)
+
+- Needs Live 12.4.5+ Suite (beta); the Trial cannot load extensions, so it is
+  checked against the SDK's declarations (every class takes the API version,
+  `Track<"1.0.0">`) and, in `test/host.test.ts`, as a bundle in a `vm` context
+  set up like the Extension Host: no `global`, no `URL`, `require` for
+  `node:` modules, integers as bigint, errors from another realm.
+- Keep the SDK out of runtime imports everywhere but `src/extension.ts`
+  (tests run the other files on plain Node with type stripping);
+  `types/ableton-sdk.d.ts` declares only what the add-on uses, without
+  default type arguments, so it fails where the real SDK would.
+- The server side (`companion.py`, tools `get_live_selection`,
+  `confirm_in_live`, `render_track_audio`, the doctor's `companion` line) is
+  tested against a Python stand-in of the protocol.
 
 ## Max for Live analyzer (built and checked in Live 12.4 Trial, Max 9)
 

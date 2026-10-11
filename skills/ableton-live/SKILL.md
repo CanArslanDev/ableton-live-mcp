@@ -47,6 +47,13 @@ audible at once, and each tool call is one step in Live's undo history.
 - These play the set in real time, so tell the user before starting a long
   section, and keep sections short (8–16 bars) while iterating.
 
+## "This part", "the selection"
+
+With the AbletonMCP Companion extension (Live 12.4.5+ Suite), the user can
+right-click an Arrangement selection, clips or a track and choose "Share …
+with AbletonMCP"; `get_live_selection()` then returns the bars and tracks
+they mean. Without it, ask for bar numbers or locator names.
+
 ## Sets on disk
 
 `read_live_set(path=...)` reads an .als without opening it: settings, tracks,

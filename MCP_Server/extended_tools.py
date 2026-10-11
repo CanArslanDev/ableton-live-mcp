@@ -3461,6 +3461,67 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             await asend("lom_call", {"path": "live_set", "method": "delete_track",
                                      "args": [index]})
 
+    # ── Extensions SDK companion (Live 12.4.5+ Suite, optional) ──────────────
+
+    @tool(read_only=True)
+    async def get_live_selection() -> str:
+        """What the user pointed at in Live with "Share … with AbletonMCP"
+        (right-click menu of the AbletonMCP Companion extension, Live 12.4.5+
+        Suite): an Arrangement time selection (beats and bars, tracks), clip
+        slots, a clip or a track. Use it when the user means "this part",
+        "the selection" or "these clips"; the Live Object Model cannot see a
+        time selection.
+        """
+        from . import companion
+
+        shared = await asyncio.to_thread(companion.request, "get_selection")
+        if not shared:
+            raise ValueError("Nothing shared yet: in Live, right-click the selection, a clip or "
+                             "a track and choose \"Share … with AbletonMCP\".")
+        if shared.get("kind") == "arrangement":
+            try:
+                bar = (await asyncio.to_thread(song_context, True))["beats_per_bar"]
+                shared["start_bar"] = round(shared["start_beat"] / bar + 1, 2)
+                shared["bars"] = round((shared["end_beat"] - shared["start_beat"]) / bar, 2)
+            except Exception as e:  # the Remote Script is not connected: beats only
+                logger.debug("No meter for the selection: %s", e)
+        return to_json(shared)
+
+    @tool(read_only=True)
+    async def confirm_in_live(message: str, title: str = "AbletonMCP",
+                              confirm_label: str = "OK", cancel_label: str = "Cancel") -> str:
+        """Ask the user a yes/no question in a dialog inside Live (AbletonMCP
+        Companion extension, Live 12.4.5+ Suite), for example before replacing
+        their work while they are looking at Live rather than at the chat.
+        Returns {"confirmed": true|false}; closing the dialog means no. Waits
+        up to 5 minutes for an answer.
+        """
+        from . import companion
+
+        return to_json(await asyncio.to_thread(
+            companion.request, "confirm",
+            {"title": title, "message": message, "confirm_label": confirm_label,
+             "cancel_label": cancel_label}, 300.0))
+
+    @tool(read_only=True)
+    async def render_track_audio(track: int | str, start_beat: float, end_beat: float,
+                                 analyze: bool = True) -> str:
+        """Render an audio track's clips between two beats to a WAV file without
+        playing the set: the Extensions SDK's render before the track's devices
+        (AbletonMCP Companion extension, Live 12.4.5+ Suite). Audio tracks
+        only; for what the devices and the mix make of it, use
+        render_and_analyze. analyze: also measure it (see analyze_audio_file).
+        """
+        from . import companion
+        from .audio_analysis import analyze as measure
+
+        result = await asyncio.to_thread(
+            companion.request, "render_audio",
+            {"track": track, "start_beat": start_beat, "end_beat": end_beat}, 600.0)
+        if analyze and result.get("file"):
+            result["analysis"] = await asyncio.to_thread(measure, result["file"])
+        return to_json(result)
+
     # ── Max for Live analyzer ────────────────────────────────────────────────
 
     def analyzer_file() -> Path:

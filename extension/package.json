@@ -1,0 +1,20 @@
+{
+  "name": "abletonmcp-companion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ableton Live Extensions SDK add-on for the ableton-live-mcp server: share the selection, confirm in Live, render audio.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:check": "node build.mjs --external-sdk",
+    "typecheck": "tsc -p tsconfig.json",
+    "typecheck:sdk": "tsc -p tsconfig.sdk.json",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.1",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  }
+}
