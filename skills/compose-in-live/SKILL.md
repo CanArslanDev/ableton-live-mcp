@@ -49,6 +49,9 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
 - `read_clip_notes(...)` / `edit_clip_notes(...)` for exact changes.
 - `.mid` files: `import_midi_file(path=..., track=...)` and
   `export_clip_to_midi(track=..., clip_index=..., path=...)`.
+- From an older set: `read_live_set(path=..., detail="full")` lists its clips,
+  `import_from_live_set(path=..., track=..., clip_index=..., to_track=...)`
+  copies one MIDI clip's notes into the open set.
 
 ## Sounds
 

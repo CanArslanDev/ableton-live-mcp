@@ -47,6 +47,13 @@ audible at once, and each tool call is one step in Live's undo history.
 - These play the set in real time, so tell the user before starting a long
   section, and keep sections short (8–16 bars) while iterating.
 
+## Sets on disk
+
+`read_live_set(path=...)` reads an .als without opening it: settings, tracks,
+devices, plug-ins, clips and missing samples; `compare_to=` a file from the
+project's Backup folder shows what changed. `find_live_sets(query="Serum")`
+finds sets by file, track or plug-in name. These never touch the open set.
+
 ## Watching what the user does
 
 `watch_live(preset="transport")` (or `selection`, `structure`, or any

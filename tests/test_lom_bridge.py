@@ -575,6 +575,27 @@ def test_midi_files_round_trip_through_clips(live_server, tmp_path):
         call("export_clip_to_midi", track="Bass", clip_index=1, path=exported["file"])
 
 
+def test_import_from_live_set_writes_the_played_notes(live_server, tmp_path):
+    import als_sets
+
+    script, call = live_server
+    path = str(als_sets.project(tmp_path))
+    info = call("read_live_set", path=path)
+    assert info["tempo"] == 124.0 and [t["name"] for t in info["tracks"]][1] == "Keys"
+    listing = call("import_from_live_set", path=path, track="Keys", clip_index=1)
+    assert len(listing["notes"]) == 2 and listing["notes_outside"] == 1
+
+    result = call("import_from_live_set", path=path, track="Keys", arrangement_clip_index=0,
+                  to_track="Bass", to_clip_index=3, midi_path=str(tmp_path / "mid"))
+    clip = script._song.tracks[1].clip_slots[3].clip
+    assert clip.name == "Verse" and clip.length == 8.0
+    assert sorted((n.pitch, n.start_time, n.duration) for n in clip._notes) == [
+        (62, 0.0, 1.0), (65, 7.5, 0.5)]
+    assert result["notes_written"] == 2 and result["source"]["notes_outside"] == 1
+    assert Path(result["midi_file"]["file"]).name == "Verse.mid"
+    assert result["midi_file"]["time_signature"] == "7/8" and result["midi_file"]["tempo_bpm"] == 124.0
+
+
 def test_add_device_inserts_by_name_and_applies_settings(live_server):
     script, call = live_server
     bass = script._song.tracks[1]

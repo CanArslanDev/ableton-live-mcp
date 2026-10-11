@@ -56,6 +56,7 @@ while testing against Live 12.3.
 | **Turkish makam & usul** | `turkish_makam` gives 24 makams in the Arel-Ezgi-Uzdilek system (steps in commas, karar, güçlü) and writes an `.ascl` tuning that plays their true comma pitches in Live 12; every generator takes a makam as its scale (`scale="hicaz"`); `generate_usul` writes usuls (sofyan, türk aksağı, yürük semai, devr-i hindi, düyek, aksak, aksak semai, curcuna, …) on a drum or darbuka kit |
 | **Harmony** | `analyze_harmony` names the chords in a clip (key, roman numerals, changes) and returns a progression the generators accept, so new parts follow existing ones |
 | **MIDI files** | `import_midi_file` (whole file, one track or one channel), `export_clip_to_midi` (with the set's tempo and meter) |
+| **Live Set files** | Without opening them in Live: `read_live_set` reads an `.als` (tempo, meter, key, locators, scenes, tracks with mixer, devices, racks, third-party plug-ins and Max for Live devices, clips, samples and which are missing) or compares it with a backup; `find_live_sets` lists your sets newest first and finds the ones using a plug-in or track name; `import_from_live_set` brings a MIDI clip from an old set into the open one or a `.mid` file |
 | **Device chains** | `add_device` inserts any of Live's own devices by name with settings; `apply_device_chain` adds ready-made chains (vocal, drum bus, bass, pad, master, sidechain duck) — Live 12.3+ |
 | **Browser** | `browser_search` finds presets, devices, plug-ins, clips and samples by name (yours too; ~12,000 samples in about 0.1 s), `browser_load` puts one on a track or a Drum Rack pad, `browser_preview` plays it in Live's preview |
 | **Drum kits** | `build_drum_kit` fills a Drum Rack's General MIDI pads with one-shots from Drums › Drum Hits — by style ("808", "909"), from the Core Library or your own samples |
@@ -67,7 +68,7 @@ while testing against Live 12.3.
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-64 tools in the default profile (86 with `ABLETON_MCP_PROFILE=full`), plus
+67 tools in the default profile (89 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -272,7 +273,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 241 tests, no Live required
+uv run --with pytest pytest -q            # 253 tests, no Live required
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb
 claude plugin validate .                  # the Claude Code plugin and its skills

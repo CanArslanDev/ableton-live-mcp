@@ -1662,6 +1662,91 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         result["clip"] = name
         return to_json(result)
 
+    # ── Live Set files (.als) ────────────────────────────────────────────────
+
+    @tool(read_only=True)
+    def read_live_set(path: str, detail: str = "summary", compare_to: str | None = None) -> str:
+        """Read a Live Set file (.als) without opening it in Live: the Live
+        version that saved it, tempo, meter, key, arrangement length, locators,
+        scenes, every track with its mixer, devices (racks, third-party
+        plug-ins, Max for Live) and clips, and the samples it uses, including
+        missing ones.
+
+        detail: summary (devices as one line each, clip counts) | full (rack
+        chains and drum pads, every clip with its position, every sample).
+        compare_to: another .als, e.g. one from the project's Backup folder:
+        report what changed from that one to `path` instead.
+        """
+        from . import als
+
+        if compare_to:
+            return to_json(als.compare(path, compare_to))
+        return to_json(als.read_set(path, detail))
+
+    @tool(read_only=True)
+    def find_live_sets(folder: str | None = None, query: str | None = None,
+                       include_backups: bool = False, limit: int = 30) -> str:
+        """Find Live Sets (.als) in a folder and its subfolders, newest first,
+        with tempo, meter, key, length, track counts, third-party plug-ins and
+        missing samples.
+
+        folder: default ~/Music/Ableton and ~/Documents (Ableton folders
+        first). query: matches file names, track names and plug-in names, so
+        "Serum" finds the sets that use Serum. Backup copies are skipped
+        unless include_backups.
+        """
+        from . import als
+
+        return to_json(als.find_sets(folder, query, include_backups, max(1, min(int(limit), 200))))
+
+    @tool(destructive=True)
+    def import_from_live_set(path: str, track: int | str, clip_index: int | None = None,
+                             arrangement_clip_index: int | None = None,
+                             to_track: int | str | None = None, to_clip_index: int | None = 0,
+                             arrangement_time: float | None = None,
+                             midi_path: str | None = None, replace: bool = True,
+                             clip_name: str | None = None) -> str:
+        """Take a MIDI clip's notes from a Live Set file (.als) on disk.
+
+        - track and clip_index (Session slot) or arrangement_clip_index pick the
+          clip in the file (read_live_set with detail="full" lists them). The
+          notes are those you hear: the loop, or start to end marker.
+        - to_track: write them into the open set, in Session slot
+          to_clip_index or in the Arrangement at arrangement_time (beats); the
+          new clip gets the source clip's length.
+        - midi_path: write a .mid file (a folder gives a free name in it),
+          with the file's tempo and time signature.
+        Without to_track or midi_path the notes are only listed.
+        """
+        from . import als, midi_files
+
+        source = als.clip(path, track, clip_index, arrangement_clip_index)
+        notes = [{k: v for k, v in n.items()} for n in source["notes"]]
+        if not notes:
+            raise ValueError(f"The clip {source['clip']!r} has no notes in its played region")
+        if to_track is None and midi_path is None:
+            return to_json(source)
+        name = clip_name or source["clip"] or Path(source["file"]).stem
+        result: dict[str, Any] = {"source": {k: source[k] for k in ("file", "track", "clip",
+                                                                     "length", "notes_outside")}}
+        if midi_path:
+            target = Path(midi_path).expanduser()
+            if target.is_dir() or not target.suffix:
+                target = midi_files.free_path(target, name)
+            elif target.exists():
+                raise ValueError(f"{target} exists; choose another midi_path")
+            numerator, denominator = source["set_time_signature"]
+            result["midi_file"] = midi_files.write_midi(
+                target, notes, float(source["set_tempo"] or 120.0), numerator, denominator, name)
+        if to_track is not None:
+            length = max(float(source["length"]), 1.0)
+            clip = prepare_clip(to_track, None if arrangement_time is not None else to_clip_index,
+                                length, arrangement_time, name)
+            written = write_notes(clip, notes, "replace" if replace else "add")
+            result.update(json.loads(generated_result(clip, notes, written, {
+                "length_beats": length})))
+        return to_json(result)
+
     # ── Devices & racks ──────────────────────────────────────────────────────
 
     @tool(destructive=True)

@@ -28,6 +28,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
 | `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
+| `MCP_Server/als.py` | Reads Live Set files (.als) without Live: settings, tracks, devices, clips and notes, samples, comparing and finding sets. Never writes them. |
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
 | `MCP_Server/snapshots.py` | Capture / compare / restore mixer and device parameters (A/B), stored in `~/.ableton-mcp/snapshots`. |
 | `MCP_Server/music.py` | Pure music theory + generators + note transforms over note dicts. No Live access. |
@@ -165,6 +166,26 @@ Measured on Live 12.3.8:
   device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
+
+## Live Set files (.als), as read from Live 12.4's own sets
+
+- gzip-compressed XML; parsing drops automation and modulation subtrees as
+  it goes (a 27 MB set takes ~80 MB instead of ~215 MB, ~0.4 s).
+- Device elements are named by `Device.class_name` (Eq8, StereoGain …);
+  `als.DEVICE_NAMES` was read from Live 12.4 by inserting each native device.
+  Max for Live devices are `MxDevice*` named by their `.amxd` file;
+  plug-ins are `PluginDevice` with `PluginDesc/Vst3PluginInfo` (or VST2, AU).
+- Time signature: `(numerator - 1) + 99 * log2(denominator)` (201 = 4/4).
+  ScaleInformation: root 0 = C and the scale as an index (0 Major, 1 Minor
+  checked against the demo set's notes; the rest in Live/Push order).
+- A clip plays `Loop/LoopStart..LoopEnd` whether the loop is on or off (with
+  it off they are the start and end markers); arrangement clips sit at
+  `CurrentStart..CurrentEnd`. Drum pad note = 128 − `ReceivingNote`.
+- Sample paths: `RelativePathType` 1 = project folder, 5 = a Live Pack
+  (`LivePackName`, e.g. the Core Library in the app bundle), 6 = Library,
+  7 = Live's Builtin folder; `Path` is absolute on the machine that saved it.
+- No writer on purpose: it would be the way around the Trial's disabled
+  saving, and a damaged set is worse than none.
 
 ## Server-side conventions
 
