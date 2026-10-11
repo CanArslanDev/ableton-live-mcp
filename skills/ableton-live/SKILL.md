@@ -36,8 +36,10 @@ audible at once, and each tool call is one step in Live's undo history.
   user an A/B.
 - Generators write into a clip slot (`clip_index`) or the Arrangement
   (`arrangement_time`). Pass `replace=true` only when the old notes should go.
-- Ask before deleting tracks, clips, scenes or devices (clients that support
-  it show the user a question themselves).
+- Delete only what the user named. When they asked for it, call the tool:
+  clients that can show a confirmation ask the user themselves, and a
+  declined delete comes back as an error to report. Ask first only before
+  deleting something they did not name (a cleanup you are proposing).
 - `preview=true` on generators, `transform_clip_notes` and `apply_midi_tool`
   shows the notes without writing them: use it when the user wants to see
   options first.
