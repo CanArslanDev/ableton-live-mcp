@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 — 2026-10-11
+
+The Remote Script is unchanged (2.0.0): no reinstall or Live restart needed.
 
 ### Added
 
