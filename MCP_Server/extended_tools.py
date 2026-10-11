@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import shlex
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -1746,6 +1747,275 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             result.update(json.loads(generated_result(clip, notes, written, {
                 "length_beats": length})))
         return to_json(result)
+
+    # ── Machine learning (run by ml.py in their own environments) ────────────
+
+    async def audio_source(path: str | None, track: int | str | None, clip_index: int | None,
+                           arrangement_clip_index: int | None) -> dict:
+        """The audio file to work on: `path`, or the file behind an audio clip."""
+        if path:
+            file = Path(path).expanduser()
+            if not file.is_file():
+                raise FileNotFoundError(f"No such audio file: {file}")
+            return {"file": str(file), "name": file.stem}
+        if track is None:
+            raise ValueError("Give path (an audio file), or track with clip_index or "
+                             "arrangement_clip_index (an audio clip)")
+        cp = clip_path(track, clip_index, arrangement_clip_index)
+        info = await asend("lom_get", {"path": cp, "properties": [
+            "is_audio_clip", "file_path", "name", "warping", "warp_mode", "start_time"]})
+        if not info.get("is_audio_clip"):
+            raise ValueError("That is a MIDI clip; these tools work on audio")
+        source = {"file": info["file_path"], "name": info.get("name") or Path(info["file_path"]).stem,
+                  "track": track, "warping": info.get("warping"), "warp_mode": info.get("warp_mode")}
+        if arrangement_clip_index is not None:
+            source["start_time"] = info.get("start_time")
+        else:
+            source["clip_index"] = clip_index
+        return source
+
+    def ml_progress(ctx: Context | None):
+        async def report(fraction: float, message: str) -> None:
+            await report_progress(ctx, round(fraction * 100, 1), 100, message)
+        return report
+
+    @tool
+    async def separate_stems(path: str | None = None, track: int | str | None = None,
+                             clip_index: int | None = None,
+                             arrangement_clip_index: int | None = None,
+                             two_stems: str | None = None, model: str = "htdemucs",
+                             out_dir: str | None = None, to_tracks: bool = False,
+                             ctx: Context | None = None) -> str:
+        """Split a mix into stems with Demucs: drums, bass, vocals and other
+        (model htdemucs_6s adds guitar and piano), from an audio file or the
+        file behind an audio clip.
+
+        - two_stems: "vocals" (or drums, bass, other) gives that stem plus
+          everything else, e.g. for a karaoke track or an a cappella
+        - model: htdemucs (default) | htdemucs_ft (cleaner, ~4x slower) |
+          htdemucs_6s
+        - out_dir: default ~/Music/Ableton MCP/Stems/<name>
+        - to_tracks: also add one audio track per stem to the open set, the
+          stem placed where the source clip is (slot 0 for a file)
+        Uses the GPU when there is one. The first use downloads torch and
+        Demucs (~400 MB) and the model (~80 MB) into uv's cache.
+        """
+        from . import ml
+        from .audio_analysis import analyze
+
+        source = await audio_source(path, track, clip_index, arrangement_clip_index)
+        stem = re.sub(r'[\\/:*?"<>|]+', "_", source["name"]).strip() or "stems"
+        target = (Path(out_dir).expanduser() if out_dir
+                  else Path.home() / "Music" / "Ableton MCP" / "Stems" / stem)
+        job = {"path": source["file"], "out_dir": str(target), "model": model}
+        if two_stems:
+            job["two_stems"] = two_stems
+        result = await ml.run("separate", job, ml_progress(ctx))
+
+        def loudness(file: str) -> dict:
+            info = analyze(file, max_seconds=600)
+            lufs = info.get("integrated_lufs")
+            return {"file": file, "lufs": lufs, "peak_dbtp": info.get("true_peak_dbtp"),
+                    **({"silent": True} if lufs is None or lufs < -50 else {})}
+
+        stems = {name: await asyncio.to_thread(loudness, file)
+                 for name, file in result["stems"].items()}
+        payload: dict[str, Any] = {"source": source["file"], "stems": stems,
+                                   "model": result["model"], "device": result["device"],
+                                   "seconds": result["seconds"]}
+        empty = [name for name, s in stems.items() if s.get("silent")]
+        if empty:
+            payload["observations"] = [f"Nothing in: {', '.join(empty)} (the source has no "
+                                       "such part, or very little of it)."]
+        if to_tracks:
+            payload["tracks"] = await place_stems(source, result["stems"])
+        return to_json(payload)
+
+    async def place_stems(source: dict, stems: dict[str, str]) -> list[dict]:
+        """One audio track per stem after the source track, each stem where the source is."""
+        index = -1
+        if source.get("track") is not None:
+            index = await asyncio.to_thread(index_in, "live_set tracks", source["track"]) + 1
+        placed = []
+        for offset, (name, file) in enumerate(stems.items()):
+            made = await asend("lom_call", {"path": "live_set", "method": "create_audio_track",
+                                            "args": [index if index < 0 else index + offset]})
+            tp = f"id {made['result']['$id']}"
+            label = f"{source['name']} {name.replace('_', ' ')}"
+            await asend("lom_set", {"path": tp, "property": "name", "value": label})
+            if source.get("start_time") is not None:
+                clip = await asend("lom_call", {"path": tp, "method": "create_audio_clip",
+                                                "args": [file, float(source["start_time"])]})
+                where = {"arrangement_time": source["start_time"]}
+            else:
+                row = source.get("clip_index") or 0
+                clip = await asend("lom_call", {"path": f"{tp} clip_slots {int(row)}",
+                                                "method": "create_audio_clip", "args": [file]})
+                where = {"clip_index": row}
+            clip_ref = clip.get("result") or {}
+            if source.get("warping") is False and clip_ref.get("$id"):
+                # The source plays the file at its own speed; so must its stems
+                await asend("lom_set", {"path": f"id {clip_ref['$id']}", "property": "warping",
+                                        "value": False})
+            placed.append({"track": label, **where})
+        return placed
+
+    @tool(destructive=True)
+    async def audio_to_midi(path: str | None = None, track: int | str | None = None,
+                            clip_index: int | None = None,
+                            arrangement_clip_index: int | None = None,
+                            to_track: int | str | None = None, to_clip_index: int | None = None,
+                            arrangement_time: float | None = None, midi_path: str | None = None,
+                            tempo: float | None = None, onset_threshold: float = 0.5,
+                            frame_threshold: float = 0.3, minimum_note_ms: float = 127.7,
+                            lowest: int | str | None = None, highest: int | str | None = None,
+                            replace: bool = True, clip_name: str | None = None,
+                            ctx: Context | None = None) -> str:
+        """Turn audio into MIDI notes with Spotify's Basic Pitch: melodies,
+        bass lines and chords (polyphonic; not drums), from an audio file or
+        the file behind an audio clip.
+
+        - to_track: write the notes into a MIDI clip there, in Session slot
+          to_clip_index or in the Arrangement at arrangement_time (default:
+          where the source clip is, or slot 0); midi_path: also a .mid file.
+          With neither, the notes are listed.
+        - tempo: the audio's own tempo, to turn seconds into beats. Default:
+          the set's tempo, right for audio playing at its original speed
+          (Warp off, or a file at the set's tempo).
+        - onset_threshold, frame_threshold (0..1): higher gives fewer, surer
+          notes; minimum_note_ms; lowest/highest: pitch range ("E1", 40, …)
+        The first use downloads Basic Pitch (~150 MB; uv runs it on
+        Python 3.10, which its model needs).
+        """
+        from . import midi_files, ml
+
+        source = await audio_source(path, track, clip_index, arrangement_clip_index)
+        job: dict[str, Any] = {"path": source["file"], "onset_threshold": onset_threshold,
+                               "frame_threshold": frame_threshold,
+                               "minimum_note_ms": minimum_note_ms}
+        for key, note in (("minimum_frequency", lowest), ("maximum_frequency", highest)):
+            if note is not None:
+                job[key] = 440.0 * 2 ** ((music.parse_note(note) - 69) / 12)
+        result = await ml.run("transcribe", job, ml_progress(ctx))
+        context = await asyncio.to_thread(song_context, True)
+        if tempo is None:
+            try:
+                tempo = float((await asend("lom_get", {"path": "live_set",
+                                                       "properties": ["tempo"]}))["tempo"])
+            except Exception:
+                tempo = 120.0
+        notes = ml.events_to_notes(result["notes"], tempo)
+        if not notes:
+            raise ValueError("No notes found; try a lower onset_threshold or frame_threshold")
+        bar = context["beats_per_bar"]
+        end = max(n["start_time"] + n["duration"] for n in notes)
+        length = max(1, -(-end // bar)) * bar
+        pitches = sorted({n["pitch"] for n in notes})
+        payload: dict[str, Any] = {
+            "source": source["file"], "notes_found": len(notes), "tempo_used": tempo,
+            "pitch_range": [music.note_name(pitches[0]), music.note_name(pitches[-1])],
+            "length_beats": length}
+        name = clip_name or f"{source['name']} MIDI"
+        if midi_path:
+            target = Path(midi_path).expanduser()
+            if target.is_dir() or not target.suffix:
+                target = midi_files.free_path(target, name)
+            elif target.exists():
+                raise ValueError(f"{target} exists; choose another midi_path")
+            payload["midi_file"] = midi_files.write_midi(target, notes, tempo, name=name)
+        if to_track is not None:
+            if arrangement_time is None and to_clip_index is None:
+                if source.get("start_time") is not None:
+                    arrangement_time = source["start_time"]
+                else:
+                    to_clip_index = source.get("clip_index") or 0
+
+            def write() -> str:
+                clip = prepare_clip(to_track, to_clip_index if arrangement_time is None else None,
+                                    length, arrangement_time, name)
+                written = write_notes(clip, notes, "replace" if replace else "add")
+                return generated_result(clip, notes, written)
+
+            payload.update(json.loads(await asyncio.to_thread(write)))
+        elif not midi_path:
+            payload["notes"] = notes
+        return to_json(payload)
+
+    def sound_folders() -> list[Path]:
+        from . import als
+        folders = [r / "Core Library" / "Samples" / "One Shots" for r in als._live_resource_dirs()]
+        folders += [lib / "Samples" for lib in als._user_libraries()]
+        return [f for f in folders if f.is_dir()]
+
+    @tool(read_only=True)
+    async def find_similar_sounds(text: str | None = None, like: str | None = None,
+                                  folder: str | None = None, top: int = 10,
+                                  ctx: Context | None = None) -> str:
+        """Find sounds by description or by example with CLAP (LAION's
+        audio-text model): text="dusty vinyl kick", "airy female vocal
+        chop", or like=<an audio file> for the closest ones; both together
+        mean "like this, but …".
+
+        folder: where to look (default: the Core Library's one-shots and the
+        User Library's Samples folder). The first search in a folder indexes
+        its files (about 10 a second, at most 1,500 per call; later calls go
+        on) and keeps the index in ~/.ableton-mcp/sound-index. Put a result
+        on a track with browser_load(item=<file name>) or on a pad with
+        build_drum_kit(sounds={"kick": <file name>}).
+        """
+        import numpy as np
+
+        from . import ml
+
+        if not text and not like:
+            raise ValueError("Give text (a description), like (an audio file), or both")
+        folders = [Path(folder).expanduser()] if folder else sound_folders()
+        missing = [str(f) for f in folders if not f.is_dir()]
+        if missing or not folders:
+            raise FileNotFoundError(f"No such folder: {', '.join(missing) or 'none to search'}")
+        files = await asyncio.to_thread(ml.audio_files, folders)
+        if not files:
+            raise ValueError(f"No audio files in {', '.join(str(f) for f in folders)}")
+        index = await asyncio.to_thread(ml.SoundIndex, ml.CLAP_MODEL)
+        stale = index.stale(files)
+        batch = stale[:ml.INDEX_PER_CALL]
+        example = Path(like).expanduser() if like else None
+        if example is not None and not example.is_file():
+            raise FileNotFoundError(f"No such audio file: {example}")
+        embed_files = ([example] if example is not None else []) + batch
+        with tempfile.TemporaryDirectory() as scratch:
+            out = Path(scratch) / "vectors.npz"
+            run = await ml.run("embed", {"texts": [text] if text else [],
+                                         "files": [str(f) for f in embed_files],
+                                         "out": str(out), "model": ml.CLAP_MODEL},
+                               ml_progress(ctx))
+            data = np.load(out)
+            vectors = data["files"] if "files" in data else np.zeros((0, 512), np.float32)
+            text_vector = data["texts"][0] if text else None
+        if batch:
+            index.add(batch, vectors[len(embed_files) - len(batch):])
+            await asyncio.to_thread(index.save)
+        parts = []
+        if example is not None:
+            if not np.all(np.isfinite(vectors[0])):
+                raise ValueError(f"Could not read {example}")
+            parts.append(vectors[0])
+        if text_vector is not None:
+            parts.append(text_vector)
+        query = np.mean(parts, axis=0)
+        results = index.search(query, files, max(1, min(int(top), 50)),
+                               exclude=str(example) if example else None)
+        payload: dict[str, Any] = {"query": {"text": text, "like": like}, "results": results,
+                                   "folders": [str(f) for f in folders],
+                                   "indexed": len(files) - (len(stale) - len(batch)),
+                                   "sounds": len(files)}
+        if len(stale) > len(batch):
+            payload["not_indexed_yet"] = len(stale) - len(batch)
+            payload["note"] = ("Only part of the folder is indexed so far; call again to index "
+                               "more, or give a smaller folder.")
+        if run.get("failed"):
+            payload["unreadable"] = len(run["failed"])
+        return to_json(payload)
 
     # ── Devices & racks ──────────────────────────────────────────────────────
 

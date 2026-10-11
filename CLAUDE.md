@@ -28,6 +28,8 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
 | `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
+| `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP) in uv-built environments; seconds→beats; the CLAP sound index. |
+| `MCP_Server/ml_worker.py` | The job side: runs in those environments, imports nothing from `MCP_Server`, talks JSON lines. |
 | `MCP_Server/als.py` | Reads Live Set files (.als) without Live: settings, tracks, devices, clips and notes, samples, comparing and finding sets. Never writes them. |
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
 | `MCP_Server/snapshots.py` | Capture / compare / restore mixer and device parameters (A/B), stored in `~/.ableton-mcp/snapshots`. |
@@ -166,6 +168,29 @@ Measured on Live 12.3.8:
   device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
+
+## Machine learning (measured on an M-series Mac, 2026-10-11)
+
+- Each job runs `ml_worker.py` through `uv run --isolated --no-project
+  --python X --with …` (`ml.ENVIRONMENTS`): torch never loads into the
+  server and the memory is gone when the job ends. uv sets `$UV` for what it
+  runs, so the server finds it. Progress comes back as JSON lines and goes
+  out as MCP progress notifications.
+- Basic Pitch 0.4.0 pins TensorFlow < 2.15 on Python 3.11+ (macOS), which no
+  longer installs: its environment is Python 3.10, where it uses Core ML
+  (macOS), ONNX (Windows) or TFLite. Its resampy needs `pkg_resources`:
+  `setuptools<81`.
+- Demucs 4.1 (Hugging Face weights, `apply_model(callback=…)` for progress)
+  runs on MPS: a 20 s mix in ~9 s once cached; known stems came back at
+  14–19 dB SDR (drums, bass, vocals), 10 dB for "other".
+- CLAP: `laion/larger_clap_music` gives every text the same vector under
+  transformers 5.x (its text pooler loads untrained), so the model is
+  `laion/clap-htsat-unfused`: P@10 0.72 for text queries over 10 drum
+  classes (chance 0.10), 0.62 sound-to-sound; ~0.06–0.1 s per sound, so
+  indexing stops at 1,500 files per call (`INDEX_PER_CALL`).
+- `lowest`/`highest` use Live's note names: A1 = MIDI 45 = 110 Hz.
+- Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
+  `ABLETON_MCP_ML_TESTS=1` adds a run with the real Basic Pitch model.
 
 ## Live Set files (.als), as read from Live 12.4's own sets
 

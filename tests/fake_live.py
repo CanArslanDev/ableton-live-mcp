@@ -206,6 +206,14 @@ class FakeClipSlot(FakeObj):
         target.clip = FakeClip(name=self.clip.name, length=self.clip.length)
         target.has_clip = True
 
+    def create_audio_clip(self, path):
+        clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
+        object.__setattr__(clip, "file_path", path)
+        object.__setattr__(clip, "warping", True)
+        self.clip = clip
+        self.has_clip = True
+        return clip
+
 
 class FakeDevice(FakeObj):
     def __init__(self, name, class_name="OriginalSimpler", parameters=None, **extra):
@@ -279,6 +287,14 @@ class FakeTrack(FakeObj):
         self.arrangement_clips.append(clip)
         return clip
 
+    def create_audio_clip(self, path, position):
+        clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
+        for key, value in (("file_path", path), ("warping", True), ("start_time", float(position)),
+                           ("end_time", float(position) + 8.0)):
+            object.__setattr__(clip, key, value)
+        self.arrangement_clips.append(clip)
+        return clip
+
     def insert_device(self, name, index=-1):
         if name not in INSERTABLE:
             raise RuntimeError("Unknown device name: %s" % name)
@@ -338,6 +354,15 @@ class FakeSong(FakeObj):
             self.tracks.append(track)
         else:
             self.tracks.insert(index, track)
+        return track
+
+    def create_audio_track(self, index):
+        track = FakeTrack("%d-Audio" % (len(self.tracks) + 1), midi=False)
+        if index == -1:
+            self.tracks.append(track)
+        else:
+            self.tracks.insert(index, track)
+        return track
 
     def delete_track(self, index):
         del self.tracks[index]

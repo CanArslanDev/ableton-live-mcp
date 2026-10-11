@@ -596,6 +596,121 @@ def test_import_from_live_set_writes_the_played_notes(live_server, tmp_path):
     assert result["midi_file"]["time_signature"] == "7/8" and result["midi_file"]["tempo_bpm"] == 124.0
 
 
+def _fake_ml(monkeypatch, tmp_path):
+    """ml.run without models: what each job would return, and what it was asked."""
+    import numpy as np
+    import soundfile as sf
+
+    from MCP_Server import ml
+
+    jobs = []
+    monkeypatch.setattr(ml, "INDEX_DIR", tmp_path / "sound-index")
+
+    def vector(text):
+        return [1.0, 0.0, 0.0] if "kick" in text.lower() else [0.0, 1.0, 0.0]
+
+    async def run(task, job, report=None, timeout=3600.0):
+        jobs.append((task, job))
+        if report:
+            await report(0.5, task)
+        if task == "separate":
+            out = Path(job["out_dir"])
+            out.mkdir(parents=True, exist_ok=True)
+            stems = {}
+            for i, name in enumerate(["drums", "bass", "other", "vocals"]):
+                t = np.arange(44100) / 44100
+                level = 0.0 if name == "vocals" else 0.3
+                sf.write(out / f"{name}.wav", level * np.sin(2 * np.pi * 110 * (i + 1) * t), 44100)
+                stems[name] = str(out / f"{name}.wav")
+            return {"stems": stems, "sample_rate": 44100, "model": job["model"], "device": "cpu",
+                    "seconds": 1.0}
+        if task == "transcribe":
+            return {"notes": [{"start": 0.0, "end": 0.5, "pitch": 57, "amplitude": 0.8},
+                              {"start": 1.0, "end": 1.5, "pitch": 60, "amplitude": 0.4}]}
+        if task == "embed":
+            out = {}
+            if job["texts"]:
+                out["texts"] = np.array([vector(t) for t in job["texts"]], np.float32)
+            if job["files"]:
+                out["files"] = np.array([vector(Path(f).name) for f in job["files"]], np.float32)
+            np.savez(job["out"], **out)
+            return {"texts": len(job["texts"]), "files": len(job["files"]), "failed": []}
+        raise AssertionError(task)
+
+    monkeypatch.setattr(ml, "run", run)
+    return jobs
+
+
+def test_separate_stems_from_a_clip_onto_new_tracks(live_server, tmp_path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+
+    script, call = live_server
+    jobs = _fake_ml(monkeypatch, tmp_path)
+    song = script._song
+    source = tmp_path / "Song.wav"
+    sf.write(source, np.zeros(4410), 44100)
+    clip = fake_live.FakeClip(name="Song", length=8.0, midi=False)
+    object.__setattr__(clip, "file_path", str(source))
+    object.__setattr__(clip, "warping", False)
+    vox = song.tracks[2]
+    vox.clip_slots[1].clip, vox.clip_slots[1].has_clip = clip, True
+
+    result = call("separate_stems", track="Vox", clip_index=1, to_tracks=True,
+                  out_dir=str(tmp_path / "stems"))
+    assert jobs[0][0] == "separate" and jobs[0][1]["path"] == str(source)
+    assert set(result["stems"]) == {"drums", "bass", "other", "vocals"}
+    assert result["stems"]["vocals"]["silent"] and "vocals" in result["observations"][0]
+    assert result["stems"]["drums"]["lufs"] > -30
+    names = [t.name for t in song.tracks]
+    assert names[3:7] == ["Song drums", "Song bass", "Song other", "Song vocals"]
+    placed = song.tracks[3].clip_slots[1].clip
+    assert placed.file_path == result["stems"]["drums"]["file"] and placed.warping is False
+    assert result["tracks"][0] == {"track": "Song drums", "clip_index": 1}
+
+
+def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+
+    script, call = live_server
+    jobs = _fake_ml(monkeypatch, tmp_path)
+    wav = tmp_path / "Riff.wav"
+    sf.write(wav, np.zeros(4410), 44100)
+    listing = call("audio_to_midi", path=str(wav), lowest="A1")
+    assert [n["start_time"] for n in listing["notes"]] == [0.0, 2.0]
+    # Live's note names: A1 is MIDI 45, 110 Hz
+    assert jobs[0][1]["minimum_frequency"] == pytest.approx(110.0)
+    result = call("audio_to_midi", path=str(wav), to_track="Bass", to_clip_index=2,
+                  midi_path=str(tmp_path / "mid"))
+    clip = script._song.tracks[1].clip_slots[2].clip
+    assert clip.name == "Riff MIDI" and clip.length == 4.0
+    assert sorted((n.pitch, n.start_time, n.duration, n.velocity) for n in clip._notes) == [
+        (57, 0.0, 1.0, 102), (60, 2.0, 1.0, 51)]
+    assert result["tempo_used"] == 120.0 and result["notes_found"] == 2
+    assert Path(result["midi_file"]["file"]).name == "Riff MIDI.mid"
+
+
+def test_find_similar_sounds_indexes_once_then_searches(live_server, tmp_path, monkeypatch):
+    _script, call = live_server
+    jobs = _fake_ml(monkeypatch, tmp_path)
+    folder = tmp_path / "Samples"
+    folder.mkdir()
+    for name in ["Kick Deep.wav", "Hat Closed.wav", "Kick Short.wav"]:
+        (folder / name).write_bytes(name.encode())
+    first = call("find_similar_sounds", text="punchy kick", folder=str(folder), top=2)
+    assert [r["file"] for r in first["results"]] == ["Kick Deep.wav", "Kick Short.wav"]
+    assert first["indexed"] == 3 and "not_indexed_yet" not in first
+    again = call("find_similar_sounds", text="crisp hat", folder=str(folder), top=1)
+    assert again["results"][0]["file"] == "Hat Closed.wav"
+    assert jobs[-1][1]["files"] == []  # nothing new to index
+    by_example = call("find_similar_sounds", like=str(folder / "Kick Deep.wav"),
+                      folder=str(folder), top=1)
+    assert by_example["results"][0]["file"] == "Kick Short.wav"
+    with pytest.raises(Exception, match="Give text"):
+        call("find_similar_sounds", folder=str(folder))
+
+
 def test_add_device_inserts_by_name_and_applies_settings(live_server):
     script, call = live_server
     bass = script._song.tracks[1]

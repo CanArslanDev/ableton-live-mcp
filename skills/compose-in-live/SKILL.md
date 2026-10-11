@@ -59,6 +59,18 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
   `browser_load(track=..., item=<id or name>)`; `browser_preview(item=...)`
   lets the user hear a sample first.
 - Live's own devices without the browser: `add_device(track=..., device="Drift")`.
+- By description or example: `find_similar_sounds(text="dusty vinyl kick")` or
+  `find_similar_sounds(like="/path/to/sound.wav")`; the first search in a
+  folder indexes it, so warn that it takes a minute or two.
+
+## From audio
+
+- `audio_to_midi(track=..., clip_index=..., to_track=...)` turns a melody,
+  bass line or chords in an audio clip (or a file) into a MIDI clip; pass the
+  audio's own `tempo` if it is warped from another tempo.
+- `separate_stems(track=..., clip_index=..., to_tracks=true)` splits a mix
+  into drums, bass, vocals and other on new tracks, e.g. to sample a part or
+  to transcribe just the bass. The first use of each downloads its model.
 
 ## Arrange
 

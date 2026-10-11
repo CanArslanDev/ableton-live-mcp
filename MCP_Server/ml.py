@@ -1,0 +1,257 @@
+"""Machine-learning jobs, run outside the MCP server.
+
+Separating stems (Demucs), turning audio into MIDI (Basic Pitch) and finding
+sounds by description (CLAP) need torch or Core ML, model weights and, for
+Basic Pitch, an older Python than the server's. None of that belongs in the
+server: each job runs `ml_worker.py` in an environment `uv run` builds from
+ENVIRONMENTS the first time (a download of a few hundred MB, cached after
+that) and gone from memory when the job ends. Progress comes back as JSON
+lines and is passed on as MCP progress notifications.
+
+The pure parts (seconds to beats, the sound index) are here and tested
+without any model.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+import sys
+import tempfile
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+logger = logging.getLogger("AbletonMCPServer")
+
+WORKER = Path(__file__).with_name("ml_worker.py")
+AUDIO_SUFFIXES = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg"}
+
+
+@dataclass(frozen=True)
+class Environment:
+    python: str
+    packages: tuple[str, ...]
+    download: str  # what the first run fetches, for the progress message
+
+
+ENVIRONMENTS = {
+    # Demucs 4.1 loads its weights from Hugging Face (htdemucs: ~80 MB)
+    "separate": Environment("3.12", ("demucs==4.1.0", "soundfile>=0.12", "scipy>=1.11"),
+                            "torch and Demucs, ~400 MB"),
+    # Basic Pitch 0.4 wants TensorFlow < 2.15 on Python 3.11+; on 3.10 it
+    # runs its own model through Core ML (macOS), ONNX (Windows) or TFLite
+    # (its resampy still imports pkg_resources, which setuptools 81 dropped)
+    "transcribe": Environment("3.10", ("basic-pitch==0.4.0", "setuptools<81"),
+                              "Basic Pitch and Core ML/ONNX, ~150 MB"),
+    "embed": Environment("3.12", ("torch>=2.4", "transformers>=4.45,<6", "soundfile>=0.12",
+                                  "scipy>=1.11"),
+                         "torch, transformers and the CLAP model, ~1.2 GB"),
+}
+
+ProgressCallback = Callable[[float, str], Awaitable[None]]
+
+
+def uv_executable() -> str:
+    """uv, which set up the server too (uv sets $UV for what it runs)."""
+    home = Path.home()
+    candidates = [os.environ.get("UV"), shutil.which("uv"), str(home / ".local" / "bin" / "uv"),
+                  str(home / ".cargo" / "bin" / "uv"), "/opt/homebrew/bin/uv", "/usr/local/bin/uv"]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    raise RuntimeError("This tool sets up its libraries with uv, which was not found. Install "
+                       "it (https://docs.astral.sh/uv/) and restart the MCP client.")
+
+
+def command(task: str) -> list[str]:
+    if task not in ENVIRONMENTS:  # tests: no libraries, the server's own Python
+        return [sys.executable, str(WORKER), task]
+    env = ENVIRONMENTS[task]
+    cmd = [uv_executable(), "run", "--isolated", "--no-project", "--python", env.python]
+    for package in env.packages:
+        cmd += ["--with", package]
+    return cmd + ["python", str(WORKER), task]
+
+
+def child_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    # The server's own environment must not leak into the job's
+    for name in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT", "CONDA_PREFIX"):
+        env.pop(name, None)
+    env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", HF_HUB_DISABLE_TELEMETRY="1",
+               TOKENIZERS_PARALLELISM="false")
+    return env
+
+
+async def run(task: str, job: dict, report: ProgressCallback | None = None,
+              timeout: float = 3600.0) -> dict:
+    """Run one job and return its result; raise with the worker's message on failure."""
+    process = await asyncio.create_subprocess_exec(
+        *command(task), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, env=child_environment())
+    log: deque[str] = deque(maxlen=60)
+
+    async def read_log() -> None:
+        async for raw in process.stderr:
+            log.append(raw.decode("utf-8", "replace").rstrip())
+
+    async def read_messages() -> dict:
+        result: dict | None = None
+        error: str | None = None
+        async for raw in process.stdout:
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                logger.debug("%s: %s", task, raw.decode("utf-8", "replace").rstrip())
+                continue
+            if "progress" in message and report is not None:
+                await report(float(message["progress"]), str(message.get("message", "")))
+            if "result" in message:
+                result = message["result"]
+            if "error" in message:
+                error = str(message["error"])
+        await process.wait()
+        if error is not None:
+            raise RuntimeError(error)
+        if result is None:
+            tail = "\n".join(list(log)[-12:])
+            raise RuntimeError(f"The {task} job ended without a result (exit code "
+                               f"{process.returncode}). Last output:\n{tail}")
+        return result
+
+    if report is not None and task in ENVIRONMENTS:
+        await report(0.0, f"Starting; the first run sets up {ENVIRONMENTS[task].download}")
+    process.stdin.write(json.dumps(job).encode("utf-8"))
+    await process.stdin.drain()
+    process.stdin.close()
+    logs = asyncio.create_task(read_log())
+    try:
+        return await asyncio.wait_for(read_messages(), timeout)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"The {task} job took longer than {timeout:.0f} s and was stopped") from None
+    finally:
+        if process.returncode is None:  # timed out or the request was cancelled
+            process.kill()
+            await process.wait()
+        await logs
+
+
+# ── Audio to MIDI: seconds to beats ──────────────────────────────────────────
+
+def events_to_notes(events: list[dict], tempo: float, offset_beats: float = 0.0) -> list[dict]:
+    """Basic Pitch's note events (seconds, amplitude 0..1) as clip notes in beats."""
+    beats_per_second = tempo / 60.0
+    notes = []
+    for event in events:
+        start = event["start"] * beats_per_second + offset_beats
+        duration = max(1 / 64, (event["end"] - event["start"]) * beats_per_second)
+        notes.append({"pitch": int(event["pitch"]), "start_time": round(start, 4),
+                      "duration": round(duration, 4),
+                      "velocity": max(1, min(127, round(127 * float(event["amplitude"]))))})
+    return notes
+
+
+# ── Finding sounds: the CLAP index ───────────────────────────────────────────
+
+INDEX_DIR = Path.home() / ".ableton-mcp" / "sound-index"
+# laion/larger_clap_music gives one text vector for every text in transformers
+# 5.x (its text pooler loads untrained); this one ranked drum one-shots by
+# description at P@10 0.72 (10 classes, chance 0.10).
+CLAP_MODEL = "laion/clap-htsat-unfused"
+INDEX_PER_CALL = 1500  # ~2.5 minutes of indexing
+
+
+def audio_files(folders: list[Path], limit: int = 20000) -> list[Path]:
+    found: list[Path] = []
+    for folder in folders:
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "Backup")
+            for name in sorted(files):
+                path = Path(root) / name
+                if path.suffix.lower() in AUDIO_SUFFIXES and not name.startswith("."):
+                    found.append(path)
+                    if len(found) >= limit:
+                        return found
+    return found
+
+
+class SoundIndex:
+    """CLAP vectors of audio files, kept per model in ~/.ableton-mcp/sound-index."""
+
+    def __init__(self, model: str, folder: Path | None = None) -> None:
+        self.model = model
+        slug = "".join(c if c.isalnum() else "-" for c in model)
+        self.path = (folder or INDEX_DIR) / f"{slug}.npz"
+        self.entries: dict[str, tuple[int, float, Any]] = {}  # path → (size, mtime, vector)
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.is_file():
+            return
+        import numpy as np
+        try:
+            data = np.load(self.path, allow_pickle=False)
+            for path, size, mtime, vector in zip(data["paths"], data["sizes"], data["mtimes"],
+                                                 data["vectors"]):
+                self.entries[str(path)] = (int(size), float(mtime), vector)
+        except Exception as e:  # damaged index: start again
+            logger.warning("Ignoring the sound index %s: %s", self.path, e)
+            self.entries = {}
+
+    def stale(self, files: list[Path]) -> list[Path]:
+        """Files never indexed, or changed since."""
+        todo = []
+        for path in files:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            known = self.entries.get(str(path))
+            if known is None or known[0] != stat.st_size or abs(known[1] - stat.st_mtime) > 1e-3:
+                todo.append(path)
+        return todo
+
+    def add(self, files: list[Path], vectors) -> int:
+        import numpy as np
+        added = 0
+        for path, vector in zip(files, vectors):
+            if vector is None or not np.all(np.isfinite(vector)):
+                continue
+            stat = path.stat()
+            self.entries[str(path)] = (stat.st_size, stat.st_mtime, np.asarray(vector, np.float16))
+            added += 1
+        return added
+
+    def save(self) -> None:
+        import numpy as np
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        paths = list(self.entries)
+        vectors = (np.stack([self.entries[p][2] for p in paths]).astype(np.float16)
+                   if paths else np.zeros((0, 512), np.float16))
+        fd, temp = tempfile.mkstemp(dir=self.path.parent, suffix=".npz")
+        os.close(fd)
+        np.savez(temp, paths=np.array(paths, dtype=str),
+                 sizes=np.array([self.entries[p][0] for p in paths], dtype=np.int64),
+                 mtimes=np.array([self.entries[p][1] for p in paths], dtype=np.float64),
+                 vectors=vectors)
+        os.replace(temp, self.path)
+
+    def search(self, query, files: list[Path], top: int = 10,
+               exclude: str | None = None) -> list[dict]:
+        """The indexed `files` closest to the query vector (cosine similarity)."""
+        import numpy as np
+        candidates = [(str(p), self.entries[str(p)][2]) for p in files
+                      if str(p) in self.entries and str(p) != exclude]
+        if not candidates:
+            return []
+        matrix = np.stack([v for _, v in candidates]).astype(np.float32)
+        query = np.asarray(query, np.float32)
+        scores = matrix @ (query / (np.linalg.norm(query) or 1.0))
+        order = np.argsort(-scores)[:top]
+        return [{"file": Path(candidates[i][0]).name, "path": candidates[i][0],
+                 "score": round(float(scores[i]), 3)} for i in order]
