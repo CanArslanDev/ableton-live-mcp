@@ -23,7 +23,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/connection.py` | `AbletonConnection`: hello + token, line framing, reply ids, fallback to protocol 1 for scripts before 2.0. |
 | `MCP_Server/extended_tools.py` | All newer tools, written in terms of the generic commands (`lom_get/set/call`, `batch`, …). |
 | `MCP_Server/tooling.py` | `register_tool`: annotations, profiles (`ABLETON_MCP_PROFILE`), errors as MCP tool errors with their message, the MCP Apps panel a tool shows. |
-| `MCP_Server/live_updates.py` | Pushes `ableton://events` / `ableton://session/overview` updates: `resources/subscribe` (2025-11-25) and `subscriptions/listen` (2026-07-28). |
+| `MCP_Server/live_updates.py` | Pushes `ableton://events` / `ableton://session/overview` updates: `resources/subscribe` (2025-11-25) and `subscriptions/listen` (2026-07-28). Its long polls use a connection of their own (on the tools' one every command would queue behind them). |
 | `MCP_Server/ui/` | MCP Apps panels (`ui://` HTML resources) registered through the SDK's `Apps` extension. |
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
 | `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
@@ -45,8 +45,9 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
 | `MCP_Server/telemetry*.py`, `MCP_Server/dataset/` | Inherited from upstream. Inactive without the unshipped `MCP_Server/config.py`. |
 | `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices). Tests and the simulator use it. |
+| `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
-| `evals/` | `claude plugin eval` suite: 27 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
+| `evals/` | `claude plugin eval` suite: 30 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
 | `packaging/build_mcpb.py`, `packaging/mcpb/` | Claude Desktop extension: manifest template, icon, build script (fills in version and tools). |
 | `.claude-plugin/`, `skills/` | Claude Code plugin (MCP server + skills) and its marketplace entry. |
 | `.github/workflows/` | CI (tests, lint, wheel/sdist/.mcpb) and tag-triggered GitHub releases. |
@@ -120,6 +121,17 @@ claude plugin validate .                       # plugin manifest + skills
   neither do transport, the playhead, selection, loop, metronome, arm or
   solo. `journal.undo_steps` and the fake's undo (`fake_live.FakeSong`)
   follow these rules; verified end to end with `agent_changes(undo=1)`.
+- **Arrangement automation** (12.4): `create_automation_envelope` on an
+  Arrangement clip is refused ("Not a session clip"), and
+  `automation_envelope` there returns None even when the clip has one. A
+  Session clip copied with `duplicate_clip_to_arrangement` keeps its
+  envelopes, and they play. A copy laid over a clip splits it: both parts
+  keep all the notes and move their start/end markers. An envelope step
+  needs a duration (zero-length steps do nothing). Parameter changes made
+  while the Arrangement records become track automation on any track; the
+  pass leaves an undo step per value set plus one (measured with 2 to 48
+  values), the first undo removing the automation. `transitions.py` and
+  `rewrite_range` build on these.
 - **Value objects outside `Live.*`:** `RoutingType` reports module `Track` and has
   no `_live_ptr`; `_lom_value` turns any non-builtin object into a `$ref`.
 - **Vector types:** some lists are Live vector classes, not tuples;

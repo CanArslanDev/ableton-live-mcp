@@ -1,0 +1,10 @@
+[
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set",
+   "property": "tempo",
+   "value": 240.0
+  }
+ }
+]

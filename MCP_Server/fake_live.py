@@ -11,6 +11,7 @@ setting values by display.
 
 import math
 import sys
+import time
 import types
 
 from .journal import NO_UNDO_PROPERTIES, PARAMETER_PROPERTIES
@@ -106,6 +107,17 @@ class FakeParam(FakeObj):
             return self._display(value)
         return "%.2f" % value
 
+    def __setattr__(self, name, value):
+        FakeObj.__setattr__(self, name, value)
+        song = _RECORDING[0]
+        if name == "value" and song is not None:
+            song._record_automation(self, value)
+
+
+# The song recording the Arrangement now, if any (Live records parameter
+# changes made while it does as automation)
+_RECORDING = [None]
+
 
 def volume_display(value):
     if value <= 0:
@@ -200,6 +212,31 @@ class FakeClip(FakeObj):
         self.loop_end = self.length
 
 
+def _copy_clip(clip):
+    copy = FakeClip(name=clip.name, length=clip.length, midi=clip.is_midi_clip)
+    for key in ("loop_start", "loop_end", "start_marker", "end_marker", "looping",
+                "color_index", "file_path"):
+        object.__setattr__(copy, key, getattr(clip, key))
+    for note in clip._notes:
+        copy._notes.append(FakeNote(**{k: v for k, v in vars(note).items() if k != "_listeners"}))
+    object.__setattr__(copy, "_next_id", clip._next_id)
+    for key, envelope in clip.envelopes.items():
+        twin = FakeEnvelope(envelope.parameter)
+        twin.steps.extend(envelope.steps)
+        copy.envelopes[key] = twin
+    return copy
+
+
+def _clip_time_at(clip, position):
+    """The clip's own time that plays at an Arrangement position."""
+    offset = position - clip.start_time
+    first = clip.loop_end - clip.start_marker
+    if not clip.looping or offset < first:
+        return clip.start_marker + offset
+    loop = clip.loop_end - clip.loop_start
+    return clip.loop_start + (offset - first) % loop
+
+
 class FakeClipSlot(FakeObj):
     def __init__(self, clip=None):
         super(FakeClipSlot, self).__init__(clip=clip, has_clip=clip is not None)
@@ -223,6 +260,13 @@ class FakeClipSlot(FakeObj):
         self.clip = clip
         self.has_clip = True
         return clip
+
+
+class FakeSample(FakeObj):
+    def __init__(self, file_path, seconds=0.5):
+        super(FakeSample, self).__init__(file_path=file_path, sample_rate=44100.0,
+                                         length=int(seconds * 44100), start_marker=0,
+                                         end_marker=int(seconds * 44100) - 1)
 
 
 class FakeDevice(FakeObj):
@@ -305,8 +349,23 @@ def _eq_eight():
 
 
 def _instrument(name, class_name):
-    return lambda: FakeDevice(name, class_name, [
+    extra = [_choice("Osc-A Wave", ["Sine", "Sine 4 Bit", "Sine 8 Bit", "Saw 3", "Saw 4", "Saw 6",
+                                    "Saw 8", "Saw 16", "Saw D", "Square 3"]),
+             _switch("Filter On", True)] if name == "Operator" else []
+    return lambda: FakeDevice(name, class_name, extra + [
         _hz("Filter Freq", 0.8), FakeParam("Filter Res", 0.2), _db("Volume", -12.0, -70.0, 6.0)])
+
+
+class FakeSimpler(FakeDevice):
+    def __init__(self, name, sample=None):
+        super(FakeSimpler, self).__init__(name, "OriginalSimpler", [
+            _percent("S Start", 0.0), FakeParam("Transpose", 0.0, -48.0, 48.0),
+            _db("Volume", -12.0, -36.0, 36.0),
+            _choice("Trigger Mode", ["Trigger", "Gate"], 1)],
+            sample=sample, playback_mode=0, reversed=False)
+
+    def reverse(self):
+        self.reversed = not self.reversed
 
 
 # What Track.insert_device builds (Live 12.3+), by browser name
@@ -343,7 +402,8 @@ INSERTABLE = {
         FakeParam("Rate", 0.3, display=_log_display(0.01, 20.0, "Hz")), _percent("Amount", 50.0),
         _percent("Dry/Wet", 50.0)]),
     "Auto Filter": lambda: FakeDevice("Auto Filter", "AutoFilter2", [
-        _choice("Filter Type", ["Lowpass", "Highpass", "Bandpass", "Notch", "Morph"]),
+        _choice("Filter Type", ["Low-pass", "High-pass", "Band-pass", "Notch", "Morph", "DJ",
+                                "Comb", "Resampling"]),
         _hz("Frequency", 0.9), _percent("Resonance", 20.0), _percent("LFO Amount"),
         _percent("Dry/Wet", 100.0)]),
     "Limiter": lambda: FakeDevice("Limiter", "Limiter", [
@@ -353,7 +413,7 @@ INSERTABLE = {
     "Drift": _instrument("Drift", "Drift"),
     "Wavetable": _instrument("Wavetable", "InstrumentVector"),
     "Analog": _instrument("Analog", "UltraAnalog"),
-    "Simpler": _instrument("Simpler", "OriginalSimpler"),
+    "Simpler": lambda: FakeSimpler("Simpler"),
 }
 
 
@@ -377,10 +437,28 @@ class FakeTrack(FakeObj):
         del self.devices[index]
 
     def duplicate_clip_to_arrangement(self, clip, time):
-        copy = FakeClip(name=clip.name, length=clip.length, midi=clip.is_midi_clip)
-        object.__setattr__(copy, "start_time", float(time))
-        object.__setattr__(copy, "end_time", float(time) + clip.length)
-        self.arrangement_clips.append(copy)
+        """Like Live 12.4: the copy keeps notes and envelopes; clips under it
+        are split, the parts keeping all their notes and moving their markers."""
+        start, end = float(time), float(time) + clip.length
+        copy = _copy_clip(clip)
+        object.__setattr__(copy, "start_time", start)
+        object.__setattr__(copy, "end_time", end)
+        kept = []
+        for other in self.arrangement_clips:
+            if other.end_time <= start or other.start_time >= end:
+                kept.append(other)
+                continue
+            if other.end_time > end:  # a part goes on after the copy
+                tail = other if other.start_time >= start else _copy_clip(other)
+                object.__setattr__(tail, "start_marker", _clip_time_at(other, end))
+                object.__setattr__(tail, "start_time", end)
+                object.__setattr__(tail, "end_time", other.end_time)
+                kept.append(tail)
+            if other.start_time < start:  # a part plays before it
+                object.__setattr__(other, "end_time", start)
+                kept.append(other)
+        kept.append(copy)
+        self.arrangement_clips[:] = sorted(kept, key=lambda c: c.start_time)
         return copy
 
     def create_midi_clip(self, start, length):
@@ -412,7 +490,9 @@ class FakeTrack(FakeObj):
 # ── Undo history, by the rules measured on Live 12.4 (see journal.py) ───────
 
 # Bookkeeping of the fakes themselves, never part of an undo step
-_NOT_SET_STATE = frozenset(["_listeners", "undo_log", "calls", "_undo", "_redo", "_open_step"])
+_NOT_SET_STATE = frozenset(["_listeners", "undo_log", "calls", "_undo", "_redo", "_open_step",
+                            "_position", "_clock", "_pass", "_pass_closing", "_pass_starting",
+                            "running_clock"])
 _MISSING = object()
 
 
@@ -470,7 +550,9 @@ def _changes(before, after):
 
 
 def _apply(changes, use_old):
-    for obj, attr, old, new in changes:
+    """Undo (use_old) walks the changes back, redo forward: a step may change
+    one value several times (a recorded automation pass)."""
+    for obj, attr, old, new in (reversed(changes) if use_old else changes):
         value = old if use_old else new
         current = vars(obj).get(attr, _MISSING)
         if value is _MISSING:
@@ -497,12 +579,54 @@ LIVE_SCALES = {
 
 
 class FakeSong(FakeObj):
+    # The simulator's song keeps time: while it plays, current_song_time moves
+    # at the tempo, and parameter changes made while the Arrangement records
+    # become automation. As in Live 12.4, a recording pass leaves an undo step
+    # for every command run while it records plus one: here record on leaves
+    # none and record off holds the automation. Tests keep the playhead still
+    # unless they ask.
+    running_clock = False
+
     def __setattr__(self, name, value):
         FakeObj.__setattr__(self, name, value)
         if name == "scale_name" and value in LIVE_SCALES:
             FakeObj.__setattr__(self, "scale_intervals", list(LIVE_SCALES[value]))
+        if name in ("record_mode", "is_playing"):
+            self._update_recording()
 
-    def __init__(self):
+    @property
+    def current_song_time(self):
+        clock = vars(self).get("_clock")
+        if clock is not None and vars(self).get("is_playing"):
+            started, position = clock
+            return position + (time.monotonic() - started) * vars(self)["tempo"] / 60.0
+        return vars(self).get("_position", 0.0)
+
+    @current_song_time.setter
+    def current_song_time(self, value):
+        object.__setattr__(self, "_position", float(value))
+        if self.running_clock:
+            object.__setattr__(self, "_clock", (time.monotonic(), float(value)))
+
+    def _update_recording(self):
+        recording = bool(vars(self).get("record_mode")) and bool(vars(self).get("is_playing"))
+        if recording and _RECORDING[0] is not self:
+            _RECORDING[0] = self
+            object.__setattr__(self, "_pass", [])
+            object.__setattr__(self, "_pass_starting", True)
+        elif not recording and _RECORDING[0] is self:
+            _RECORDING[0] = None
+            object.__setattr__(self, "_pass_closing", True)
+
+    def _record_automation(self, param, value):
+        lanes = vars(self).setdefault("automation", {})
+        lane = lanes.get(id(param))
+        points = list(lane["points"]) if lane else []
+        points.append((round(self.current_song_time, 4), float(value)))
+        lanes[id(param)] = {"parameter": param, "points": points}
+
+    def __init__(self, running_clock=False):
+        object.__setattr__(self, "running_clock", running_clock)
         tracks = [FakeTrack("Drums", devices=[FakeDevice(
                       "Kit", "DrumGroupDevice",
                       drum_pads=[FakeObj(note=36, name="Kick 808", mute=False, solo=False,
@@ -529,7 +653,8 @@ class FakeSong(FakeObj):
             clip_trigger_quantization=Quantization(4), groove_amount=1.0,
             session_record=False, arrangement_overdub=False, session_automation_record=False,
             root_note=0, scale_name="Major", scale_mode=False,
-            scale_intervals=[0, 2, 4, 5, 7, 9, 11])
+            scale_intervals=[0, 2, 4, 5, 7, 9, 11], punch_in=False, punch_out=False,
+            back_to_arranger=False, automation={})
         object.__setattr__(self, "view", FakeObj(selected_track=tracks[0], detail_clip=None))
         object.__setattr__(self, "undo_log", [])
         object.__setattr__(self, "_undo", [])
@@ -549,6 +674,20 @@ class FakeSong(FakeObj):
         if before is None:
             return
         changes = _changes(before, _capture(self))
+        if vars(self).get("_pass") is not None:  # while recording: a step per command
+            recorded = [c for c in changes if c[0] is self and c[1] == "automation"]
+            step = [c for c in changes if not (c[0] is self and c[1] == "automation")]
+            self._pass.extend(recorded)
+            if vars(self).get("_pass_starting"):  # record on: its step is the pass's
+                object.__setattr__(self, "_pass_starting", False)
+                return
+            if vars(self).get("_pass_closing"):
+                step += self._pass
+                object.__setattr__(self, "_pass", None)
+                object.__setattr__(self, "_pass_closing", False)
+            self._undo.append(step)
+            del self._redo[:]
+            return
         steps = [[c for c in changes if c[1] not in PARAMETER_PROPERTIES],
                  [c for c in changes if c[1] in PARAMETER_PROPERTIES]]
         steps = [s for s in steps if s]
@@ -617,12 +756,17 @@ class FakeSong(FakeObj):
             self.scenes.insert(index, scene)
 
     def start_playing(self):
+        if self.running_clock:
+            object.__setattr__(self, "_clock", (time.monotonic(), self.current_song_time))
         self.is_playing = True
 
     def continue_playing(self):
-        self.is_playing = True
+        self.start_playing()
 
     def stop_playing(self):
+        if self.running_clock and self.is_playing:
+            object.__setattr__(self, "_position", self.current_song_time)
+            object.__setattr__(self, "_clock", None)
         self.is_playing = False
 
     def stop_all_clips(self, quantized=True):
@@ -649,7 +793,8 @@ class FakeBrowser(FakeObj):
         drum_hits = item("Drum Hits", [
             item("Kick", [item("Kick 808 Long.wav"), item("Kick Acoustic.wav")]),
             item("Snare", [item("Snare Tight.wav")]),
-            item("Hihat", [item("Hihat Closed 1.wav"), item("Hihat Open 1.wav")])])
+            item("Hihat", [item("Hihat Closed 1.wav"), item("Hihat Open 1.wav")]),
+            item("Cymbal", [item("Crash 505.wav"), item("Ride 1.wav")])])
         roots = dict(
             sounds=item("Sounds", [item("Pad", [item("Warm Pad.adg"), item("Glass Pad.adg")])]),
             drums=item("Drums", [drum_hits, item("808 Core Kit.adg")]),
@@ -672,7 +817,8 @@ class FakeBrowser(FakeObj):
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:
-            track.devices.append(FakeDevice(stem, "OriginalSimpler"))
+            seconds = 2.76 if "crash" in item.name.lower() else 0.5
+            track.devices.append(FakeSimpler(stem, FakeSample("/samples/" + item.name, seconds)))
             self.loaded.append((track.name, None, item.name))
 
     def preview_item(self, item):

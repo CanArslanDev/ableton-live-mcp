@@ -49,7 +49,8 @@ while testing against Live 12.3.
 | **Notes** | `read_clip_notes`, `edit_clip_notes` (probability, velocity deviation, release velocity, edit by note id), `transform_clip_notes` (transpose, snap to scale, quantize, humanize, reverse, invert, legato, …) |
 | **MIDI Tools** | `apply_midi_tool` does what Live 12's MIDI Transformations do — strum, ornament (flam, grace notes), chop, connect, time warp, velocity shaper, recombine, span, arpeggiate — in place, keeping note ids |
 | **Song structure** | `build_arrangement` lays Session clips out as sections (scene minus some tracks, or clips per track), repeats loops, cuts MIDI exactly and names a locator at each section |
-| **Automation** | `write_clip_automation` draws envelopes for any device or mixer parameter, from points or shapes |
+| **Automation** | `write_clip_automation` draws envelopes for any device or mixer parameter, from points or shapes; `write_arrangement_automation` does it over a stretch of the Arrangement on MIDI tracks, at once; `record_automation` records track automation on any track (audio, returns, the main track) by playing the stretch while Live records |
+| **Transitions** | `design_transition` builds what leads into a section: a riser, a reversed crash swelling into the downbeat, a drum fill (snare roll, toms, build), a breath of silence before the drop, a high-pass sweep |
 | **Devices & racks** | `set_device_parameter_by_name` accepts what Live displays (`"800 Hz"`, `"-6 dB"`, `"25L"`, `"Lowpass"`), `manage_device`, `rack_control` (macros, variations), `get_drum_pads` |
 | **Song & transport** | `set_song_properties` (time signature, swing, loop, Live 12 key/scale, quantization), `transport` (undo/redo, capture MIDI, cues), `select_in_live` |
 | **Generators** | `music_theory`, `generate_chord_progression`, `generate_drum_pattern` (maps your Drum Rack pads by name), `generate_bassline`, `generate_arpeggio`, `generate_melody`, `generate_euclidean` (Euclidean rhythms per pad) — they follow the set's time signature and, unless told otherwise, its Key & Scale (Live 12) |
@@ -72,7 +73,7 @@ while testing against Live 12.3.
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-70 tools in the default profile (98 with `ABLETON_MCP_PROFILE=full`), plus
+73 tools in the default profile (101 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 `arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
 
@@ -243,9 +244,11 @@ new tracks, clips, notes), so a call that does both can take two Cmd+Z.
 
 ## Limitations
 
-- Live's API cannot write track-level Arrangement automation, and it refuses
-  envelope edits on Arrangement clips. Automation tools write clip envelopes on
-  Session clips; `duplicate_to_arrangement` carries them into the Arrangement.
+- Live's API cannot draw track automation, and it refuses envelopes on
+  Arrangement clips. `write_arrangement_automation` builds the envelope on a
+  Session clip and lays it over the stretch (MIDI tracks; the copy keeps it);
+  `record_automation` records real track automation, but in real time, out
+  loud.
 - Live has no export/render API. `render_and_analyze`, `capture_stems` and
   `mix_doctor` record in real time on temporary tracks (deleted afterwards; the
   audio files stay in the project), so they take as long as the section plays.
@@ -277,7 +280,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 329 tests, no Live or models required
+uv run --with pytest pytest -q            # 344 tests, no Live or models required
 (cd extension && npm ci && npm test)       # the Extensions SDK add-on
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb
@@ -301,8 +304,8 @@ Script, the way Live does, so the server and its tools run without Ableton
 (no sound; the browser holds a few samples). Point a server at it with
 `ABLETON_MCP_SESSION_FILE=~/.ableton-mcp/simulator-session.json`.
 
-[`evals/`](evals/README.md) holds 27 `claude plugin eval` cases (mixing,
-composing, makams and usuls, arrangement, safety) that run the plugin's real
+[`evals/`](evals/README.md) holds 30 `claude plugin eval` cases (mixing,
+composing, makams and usuls, arrangement and transitions, safety) that run the plugin's real
 server against a fresh simulated set each time and check the resulting set,
 not the reply:
 

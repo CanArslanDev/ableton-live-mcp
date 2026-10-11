@@ -1208,11 +1208,14 @@ def _updates_server():
     from mcp.server.subscriptions import InMemorySubscriptionBus
 
     from MCP_Server import extended_tools, live_updates
+    from MCP_Server.connection import AbletonConnection
 
     bus = InMemorySubscriptionBus()
     server = MCPServer("t", subscriptions=bus)
     extended_tools.register(server, extended_tools._get_connection)
-    live_updates.install(server, bus, extended_tools.asend)
+    port = extended_tools._get_connection().port
+    # The watcher on a connection of its own, as the server sets it up
+    live_updates.install(server, bus, connect=lambda: AbletonConnection("127.0.0.1", port))
     return server
 
 
@@ -1445,3 +1448,43 @@ def test_journal_matches_the_remote_scripts_read_only_rules(script):
 
     assert journal.READ_ONLY_COMMANDS == script.READ_ONLY_COMMANDS
     assert journal.READ_ONLY_METHODS == script.READ_ONLY_METHODS
+
+
+def test_tools_do_not_wait_behind_the_watchers_long_poll(live_server):
+    """The watcher long-polls Live for 2 s at a time, on a connection of its
+    own: a tool call meanwhile answers at once. (When they shared one, every
+    call waited up to 2 s: a recorded automation pass lost whole seconds.)"""
+    import time as _time
+    import warnings
+
+    import anyio
+    from mcp.client import Client
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.subscriptions import InMemorySubscriptionBus
+
+    from MCP_Server import extended_tools, live_updates
+    from MCP_Server.connection import AbletonConnection
+
+    script, _call = live_server
+    bus = InMemorySubscriptionBus()
+    server = MCPServer("t", subscriptions=bus)
+    extended_tools.register(server, extended_tools._get_connection)
+    port = script.module.DEFAULT_PORT
+    live_updates.install(server, bus, connect=lambda: AbletonConnection("127.0.0.1", port))
+    timings = []
+
+    async def main():
+        async with Client(server, mode="legacy") as client:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                await client.subscribe_resource("ableton://session/overview")
+            await anyio.sleep(0.6)  # the watcher is waiting on Live now
+            for _ in range(3):
+                started = _time.monotonic()
+                await client.call_tool("lom_get_object", {"path": "live_set",
+                                                          "properties": ["tempo"]})
+                timings.append(_time.monotonic() - started)
+                await anyio.sleep(0.3)
+
+    anyio.run(main)
+    assert max(timings) < 0.5, timings

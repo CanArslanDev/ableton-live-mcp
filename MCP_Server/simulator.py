@@ -106,8 +106,8 @@ def _parameter(param: Any) -> dict:
 def _clip(clip: Any) -> dict:
     item: dict[str, Any] = {"name": clip.name, "length": _number(float(clip.length)),
                             "looping": bool(clip.looping), "muted": bool(clip.muted)}
-    for key in ("start_time", "end_time"):
-        if hasattr(clip, key):
+    if hasattr(clip, "start_time"):  # in the Arrangement: where it plays its own time
+        for key in ("start_time", "end_time", "start_marker", "loop_start", "loop_end"):
             item[key] = _number(float(getattr(clip, key)))
     if clip.is_midi_clip:
         notes = sorted(clip._notes, key=lambda n: (n.start_time, n.pitch))
@@ -130,13 +130,32 @@ def _device(device: Any) -> dict:
     item: dict[str, Any] = {"name": device.name, "class_name": device.class_name,
                             "parameters": {p.name: p.str_for_value(p.value)
                                            for p in device.parameters}}
+    sample = getattr(device, "sample", None)
+    if sample is not None:
+        item["sample"] = os.path.basename(sample.file_path)
+        item["reversed"] = bool(getattr(device, "reversed", False))
     pads = getattr(device, "drum_pads", None)
     if pads:
         item["pads"] = {str(p.note): p.name for p in pads if p.name or p.chains}
     return item
 
 
-def _track(track: Any) -> dict:
+def _automation(track: Any, lanes: dict) -> dict:
+    """Recorded Arrangement automation of the track's parameters, by
+    "mixer/<name>" or "<device>/<name>": [[beat, value], ...]."""
+    mixer = track.mixer_device
+    owned = [("mixer", p) for p in [mixer.volume, mixer.panning] + list(mixer.sends)]
+    owned += [(d.name, p) for d in track.devices for p in d.parameters]
+    found = {}
+    for owner, param in owned:
+        lane = lanes.get(id(param))
+        if lane and lane["parameter"] is param:
+            found["%s/%s" % (owner, param.name)] = [[_number(t), _number(v)]
+                                                    for t, v in lane["points"]]
+    return found
+
+
+def _track(track: Any, lanes: dict | None = None) -> dict:
     mixer = track.mixer_device
     item: dict[str, Any] = {
         "name": track.name, "type": "midi" if track.has_midi_input else "audio",
@@ -150,6 +169,9 @@ def _track(track: Any) -> dict:
     }
     if track.arrangement_clips:
         item["arrangement_clips"] = [_clip(c) for c in track.arrangement_clips]
+    automation = _automation(track, lanes or {})
+    if automation:
+        item["automation"] = automation
     routing = getattr(track, "input_routing_type", None)
     if not track.has_midi_input and routing is not None:
         item["input"] = routing.display_name
@@ -166,9 +188,10 @@ def describe_song(song: Any, browser: Any | None = None) -> dict:
         "is_playing": bool(song.is_playing),
         "loop": {"on": bool(song.loop), "start": _number(float(song.loop_start)),
                  "length": _number(float(song.loop_length))},
-        "tracks": [_track(t) for t in song.tracks],
-        "return_tracks": [_track(t) for t in song.return_tracks],
-        "master": _track(song.master_track),
+        "record_mode": bool(song.record_mode),
+        "tracks": [_track(t, song.automation) for t in song.tracks],
+        "return_tracks": [_track(t, song.automation) for t in song.return_tracks],
+        "master": _track(song.master_track, song.automation),
         "scenes": [{"name": s.name, "tempo": _number(float(s.tempo))} for s in song.scenes],
         "locators": sorted(({"name": c.name, "time": _number(float(c.time))}
                             for c in song.cue_points), key=lambda c: c["time"]),
@@ -224,7 +247,7 @@ class Simulator:
         self.check = check
         self.checks_file = Path(checks_file).expanduser() if checks_file else None
         self.initial: dict | None = None
-        self.song = fake_live.FakeSong()
+        self.song = fake_live.FakeSong(running_clock=True)
         self.surface = build_surface(self.module, self.song)
         self._running = threading.Event()
         self._thread: threading.Thread | None = None

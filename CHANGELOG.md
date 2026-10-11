@@ -17,10 +17,20 @@
   in-memory Live set (with an undo history that follows Live's rules), so the
   server and its tools work without Ableton; `--state-file` keeps the set as
   JSON.
-- **Eval suite** (`evals/`): 27 `claude plugin eval` cases, each against a
+- **Eval suite** (`evals/`): 30 `claude plugin eval` cases, each against a
   fresh simulated set, graded by deterministic checks of the resulting set
   (plus the reply where wording matters). A scripted correct solution of
   every case runs in the tests.
+
+- **Arrangement automation and transitions.** `write_arrangement_automation`
+  puts automation over a stretch of the Arrangement on MIDI tracks at once
+  (the notes there go into a Session clip with the envelope, laid back over
+  the stretch: Live 12.4 draws envelopes only on Session clips, and a copy
+  keeps them). `record_automation` records track automation on any track,
+  the main one included, by moving the parameter while the Arrangement
+  records. `design_transition` builds risers, reversed crashes, drum fills,
+  gaps before a drop and high-pass sweeps. All verified on Live 12.4,
+  including undoing each with `agent_changes`.
 
 ### Changed
 
@@ -41,6 +51,10 @@
 
 ### Fixed
 
+- While a client watched a resource (Claude Code does), the background
+  watcher's 2-second long polls held the connection the tools use, so a tool
+  call could wait up to 2 s per command. The watcher now has a connection of
+  its own. Found by the eval suite (a recorded fade lost whole seconds).
 - A server started before Live refused `create_locator` and the other tools
   that check the Remote Script's capabilities until it was restarted: the
   capabilities are now taken from every connection's hello.

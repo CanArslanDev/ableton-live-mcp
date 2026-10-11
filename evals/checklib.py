@@ -93,3 +93,17 @@ def no_changes(state: dict, initial: dict) -> bool:
     """Nothing in the set changed: no step entered Live's undo history."""
     return state["undo"]["steps"] == 0 and state["tracks"] == initial["tracks"] \
         and state["tempo"] == initial["tempo"]
+
+
+def played_notes(t: dict | None, start: float = 0.0, end: float = 1e9) -> list[list]:
+    """What a track's Arrangement plays between start and end, as Live plays its
+    clips (split, looped): [pitch, start, duration, velocity] at Arrangement times."""
+    from MCP_Server.transitions import unroll_notes
+
+    notes: list[dict] = []
+    for clip in (t or {}).get("arrangement_clips", []):
+        raw = [{"pitch": n[0], "start_time": n[1], "duration": n[2], "velocity": n[3]}
+               for n in clip.get("notes", [])]
+        notes += unroll_notes(raw, clip, start, end)
+    return sorted([[n["pitch"], n["start_time"], n["duration"], n["velocity"]] for n in notes],
+                  key=lambda n: (n[1], n[0]))

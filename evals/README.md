@@ -1,6 +1,6 @@
 # Eval suite
 
-27 tasks a producer would ask for, run by `claude plugin eval` against the
+30 tasks a producer would ask for, run by `claude plugin eval` against the
 plugin's real MCP server and the **simulator** (`ableton-mcp-simulator`: the
 real Remote Script over an in-memory Live set, no Ableton needed). Each run
 gets a fresh simulated set; when the agent is done, deterministic checks read
@@ -15,7 +15,7 @@ what is in the set, not what the agent says about it.
 | Composing | chord-progression, drum-beat, euclidean-hats, melody-in-key, bass-follows-chords |
 | Turkish music | makam-hicaz, usul-aksak |
 | Editing | transpose-clip, quantize-clip, filter-sweep |
-| Arrangement | locators, arrangement-layout |
+| Arrangement and transitions | locators, arrangement-layout, drum-fill, build-up, fade-out |
 | Browser | drum-kit |
 | Safety | preview-no-write, undo-tempo, missing-track |
 

@@ -79,6 +79,14 @@ When the scenes are ready, `build_arrangement(sections=[{"name": "Intro",
 "scene": 1}], locators=true)` lays them out with a locator per section. It
 overwrites those bars of the Arrangement, so ask first if it is not empty.
 
+Then the joins: `design_transition(kind=..., at_bar=<first bar of the new
+section>)` with `riser`, `reverse_cymbal`, `drum_fill` (fill=snare_roll |
+toms | build), `gap` (a beat of silence before a drop) or `filter_sweep`
+(MIDI tracks). Automation over a stretch: `write_arrangement_automation` on
+MIDI tracks (instant); `record_automation` on audio tracks, returns or the
+main track plays the stretch in real time, so say so before. Each is one
+`agent_changes(undo=1)` away from gone.
+
 Listen as you go: fire a clip with `manage_clip(action="fire", ...)` or a
 scene with `manage_scene(action="fire", scene=...)`, and use
 `render_and_analyze` for a check of the result. The prompts

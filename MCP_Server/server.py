@@ -1407,9 +1407,11 @@ _register_extended_tools(mcp, get_ableton_connection)
 _register_prompts(mcp)
 
 from . import live_updates as _live_updates  # noqa: E402
-from .extended_tools import asend as _asend  # noqa: E402
 
-live_updates = _live_updates.install(mcp, _updates_bus, _asend)
+# The watcher's long polls get a connection of their own (see live_updates)
+live_updates = _live_updates.install(
+    mcp, _updates_bus,
+    connect=lambda: AbletonConnection(host=ABLETON_HOST, port=live_port()))
 
 
 # Main execution

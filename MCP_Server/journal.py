@@ -8,7 +8,11 @@ history:
   tempo, mute) and one for its other changes (names, colors, clips, notes,
   devices, tracks): a batch mixing both takes two undos;
 - no step for a value set to what it already was, nor for transport, the
-  playhead, selection, loop, metronome, arm or solo.
+  playhead, selection, loop, metronome, arm, solo or the record, punch,
+  overdub and automation-arm buttons;
+- while the Arrangement records, a step for every value set, plus one for
+  the pass; the first undo takes the recorded automation, the rest are empty
+  (record_automation counts them and reports the total).
 
 `register_tool` opens an entry for each tool call, the connection reports each
 command with its result (`note_command`), `undo_steps` counts the steps by
@@ -50,9 +54,12 @@ READ_ONLY_METHODS = frozenset([
 
 # Properties and methods whose changes Live keeps out of the undo history
 # (measured on 12.4: transport, playhead, selection, loop, metronome, arm,
-# solo; the other view state by the same rule)
+# solo, the record, punch, overdub and automation-arm buttons, back to
+# arrangement; the other view state by the same rule)
 NO_UNDO_PROPERTIES = frozenset([
-    "is_playing", "current_song_time", "loop", "metronome", "arm", "solo",
+    "is_playing", "current_song_time", "loop", "metronome", "arm", "solo", "record_mode",
+    "punch_in", "punch_out", "session_automation_record", "arrangement_overdub",
+    "session_record", "back_to_arranger",
     "selected_track", "selected_scene", "selected_parameter", "selected_chain",
     "selected_drum_pad", "detail_clip", "highlighted_clip_slot", "follow_song", "draw_mode",
 ])
@@ -185,6 +192,14 @@ def note_command(command: str, params: dict | None, result: Any = None) -> None:
     entry = _current.get()
     if entry is not None:
         entry.steps += undo_steps(command, params, result)
+
+
+def add_steps(count: int) -> None:
+    """For a tool that knows its undo steps better than its commands tell
+    (a recorded automation pass is one step, whatever it sent)."""
+    entry = _current.get()
+    if entry is not None:
+        entry.steps += count
 
 
 def attach_snapshot(name: str) -> None:

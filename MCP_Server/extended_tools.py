@@ -32,7 +32,7 @@ from mcp.server.mcpserver.resolve import Elicit, Resolve
 
 from pydantic import BaseModel, Field
 
-from . import journal, music
+from . import journal, music, transitions
 from .connection import AbletonCommandError
 from .ui import panels as ui
 from .telemetry_decorator import telemetry_tool
@@ -781,6 +781,106 @@ def interpolate_points(points: list[dict], resolution: float) -> list[tuple[floa
     return out
 
 
+def envelope_steps(shape: str | None, points: list[dict] | None, length: float, low: float,
+                   high: float, cycles: float, resolution: float, pmin: float, pmax: float,
+                   normalized: bool) -> list[dict]:
+    """Envelope steps over 0..length (clip time) for clip_write_envelope: a
+    shape between low and high, or points; Live plays a step for its duration
+    (a zero-length step does nothing)."""
+    if shape:
+        raw = envelope_points(shape.lower(), 0.0, length, low, high, cycles, resolution)
+    elif points:
+        raw = interpolate_points(points, resolution)
+    else:
+        raise ValueError("Give a shape or points")
+    scale = (lambda v: pmin + (pmax - pmin) * v) if normalized else (lambda v: v)
+    return [{"time": round(t, 6), "value": scale(v), "duration": resolution}
+            for t, v in raw if t < length - 1e-9]
+
+
+# ── Arrangement stretches (see transitions.py for what Live 12.4 allows) ─────
+
+ARRANGEMENT_CLIP_FIELDS = ["name", "start_time", "end_time", "start_marker", "looping",
+                           "loop_start", "loop_end", "is_midi_clip", "color_index"]
+
+
+def bar_range(start_bar: float | None, bars: float | None, start: float | None = None,
+              end: float | None = None, default_bars: float = 1.0) -> tuple[float, float]:
+    """(start, end) in beats, from 1-based bars in the set's meter or from beats."""
+    beats_per_bar = song_context()["beats_per_bar"]
+    if start is None:
+        if start_bar is None:
+            raise ValueError("Give start_bar (1 = the first bar) or start (beats)")
+        start = (float(start_bar) - 1) * beats_per_bar
+    if end is None:
+        end = float(start) + float(bars if bars is not None else default_bars) * beats_per_bar
+    if end <= start:
+        raise ValueError("The stretch must end after it starts")
+    return float(start), float(end)
+
+
+def arrangement_notes(track: int | str, start: float, end: float) -> tuple[list[dict], list[dict]]:
+    """What the track's Arrangement plays between start and end: (the notes, at
+    Arrangement times, and the clips there)."""
+    tp = track_path(track)
+    clips = [dict(c, index=i) for i, c in enumerate(
+        lom_get(f"{tp} arrangement_clips", ARRANGEMENT_CLIP_FIELDS)["items"])]
+    clips = [c for c in clips if c["start_time"] < end and c["end_time"] > start]
+    notes: list[dict] = []
+    for clip in clips:
+        if clip.get("is_midi_clip"):
+            played = read_notes(f"{tp} arrangement_clips {clip['index']}")["notes"]
+            notes += transitions.unroll_notes(played, clip, start, end)
+    notes.sort(key=lambda n: (n["start_time"], n["pitch"]))
+    return notes, clips
+
+
+def rewrite_range(track: int | str, start: float, end: float, notes: list[dict],
+                  envelopes: list[tuple[str, list[dict]]] = (), name: str | None = None,
+                  color_index: int | None = None) -> dict:
+    """Lay a MIDI clip with `notes` (Arrangement times) and `envelopes`
+    [(parameter path, steps)] over the track's Arrangement from start to end.
+
+    Only Session clips take envelopes, so the clip is built in an empty
+    Session slot (a scene is added for it when none is free, and removed),
+    copied into the Arrangement, and deleted. What the copy lands on is split
+    around it, as in Live.
+    """
+    tp = track_path(track)
+    if not lom_get(tp, ["has_midi_input"])["has_midi_input"]:
+        raise ValueError("This works on MIDI tracks: Live takes envelopes only on Session clips "
+                         "and cannot rebuild audio from notes. For automation on an audio track, "
+                         "a return or the main track use record_automation")
+    slots = lom_get(f"{tp} clip_slots", ["has_clip"])["items"]
+    free = next((i for i, s in enumerate(slots) if not s.get("has_clip")), None)
+    added_scene = None
+    if free is None:
+        send("lom_call", {"path": "live_set", "method": "create_scene", "args": [-1]})
+        free = added_scene = len(slots)
+    slot = f"{tp} clip_slots {free}"
+    scratch = f"{slot} clip"
+    send("lom_call", {"path": slot, "method": "create_clip", "args": [float(end - start)]})
+    try:
+        ops = [op_set(scratch, "name", name)] if name else []
+        if color_index is not None:
+            ops.append(op_set(scratch, "color_index", int(color_index)))
+        if ops:
+            batch(ops)
+        if notes:
+            write_notes(scratch, [dict(n, start_time=round(n["start_time"] - start, 6))
+                                  for n in notes], "replace")
+        for parameter, steps in envelopes:
+            send("clip_write_envelope", {"clip_path": scratch, "parameter_path": parameter,
+                                         "points": steps})
+        send("lom_call", {"path": tp, "method": "duplicate_clip_to_arrangement",
+                          "args": [ref(scratch), float(start)]})
+    finally:
+        send("lom_call", {"path": slot, "method": "delete_clip"})
+        if added_scene is not None:
+            send("lom_call", {"path": "live_set", "method": "delete_scene", "args": [added_scene]})
+    return {"from_beat": start, "to_beat": end, **transitions.summary(notes)}
+
+
 # ── Registration ─────────────────────────────────────────────────────────────
 
 def register(mcp, get_connection: Callable[[], Any]) -> None:
@@ -1179,10 +1279,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - normalized=True: values are 0..1 of the parameter range; False: raw
           parameter units.
         - points=[] with shape=None just clears the envelope.
-        Times are clip-relative beats. Session clips only: Live's API refuses
-        envelope edits on Arrangement clips and has no track automation. To
-        get automation into the Arrangement, write it on a Session clip and
-        duplicate_to_arrangement — the copy keeps its envelopes.
+        Times are clip-relative beats. Session clips only (Live's API refuses
+        envelopes on Arrangement clips): write_arrangement_automation and
+        record_automation put automation into the Arrangement.
         """
         cp = clip_path(track, clip_index)
         pp = parameter_path(track, device, parameter)
@@ -2942,6 +3041,347 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             result["warnings"] = warnings
         if errors:
             result["errors"] = errors[:20]
+        return to_json(result)
+
+    # ── Arrangement automation and transitions ──────────────────────────────
+
+    @tool(destructive=True)
+    def write_arrangement_automation(track: int | str, parameter: int | str,
+                                     device: int | str = "mixer",
+                                     start_bar: float | None = None, bars: float | None = None,
+                                     start: float | None = None, end: float | None = None,
+                                     shape: str | None = None, points: list[dict] | None = None,
+                                     low: float = 0.0, high: float = 1.0, cycles: float = 1.0,
+                                     normalized: bool = True, resolution: float = 0.25) -> str:
+        """Automation over a stretch of the Arrangement on a MIDI track, at
+        once: the notes there go into a Session clip with the envelope (Live's
+        API draws envelopes only on those), laid back over the same stretch.
+        Settings of the clips it replaces there (transpose, their own
+        envelopes) are not kept; after the stretch the parameter is back where
+        it was. Audio tracks, returns, the main track: record_automation.
+
+        start_bar/bars (1-based) or start/end in beats; device, parameter,
+        shape, low/high and normalized as in write_clip_automation, or points
+        [{"time": beats from the start, "value"}].
+        """
+        s, e = bar_range(start_bar, bars, start, end)
+        pp = parameter_path(track, device, parameter)
+        info = lom_get(pp, ["min", "max", "name"])
+        steps = envelope_steps(shape, points, e - s, low, high, cycles, resolution,
+                               float(info["min"]), float(info["max"]), normalized)
+        notes, clips = arrangement_notes(track, s, e)
+        first = clips[0] if clips else {}
+        result = rewrite_range(track, s, e, notes, [(pp, steps)],
+                               name=first.get("name") or info["name"],
+                               color_index=first.get("color_index"))
+        result.update(parameter=info["name"], replaced_clips=len(clips))
+        return to_json(result)
+
+    @tool(destructive=True)
+    async def record_automation(track: int | str, parameter: int | str,
+                                device: int | str = "mixer",
+                                start_bar: float | None = None, bars: float | None = None,
+                                start: float | None = None, end: float | None = None,
+                                shape: str | None = None, points: list[dict] | None = None,
+                                low: float = 0.0, high: float = 1.0, cycles: float = 1.0,
+                                normalized: bool = True, hold: bool = False,
+                                ctx: Context | None = None) -> str:
+        """Track automation in the Arrangement on any track (audio, a return,
+        the main track): plays the stretch while Live records and moves the
+        parameter in time. Takes the stretch's length in real time, out loud;
+        armed tracks are disarmed and loop and punch off meanwhile (put back
+        after). Replaces that parameter's automation there; hold=False returns
+        to the value from before right after. Points about every 50 ms: smooth
+        for sweeps and fades. Arguments as in write_arrangement_automation.
+        """
+        s, e = await asyncio.to_thread(bar_range, start_bar, bars, start, end)
+        pp = parameter_path(track, device, parameter)
+        info = await asend("lom_get", {"path": pp, "properties": ["min", "max", "value", "name"]})
+        pmin, pmax, before = float(info["min"]), float(info["max"]), float(info["value"])
+        if not shape and not points:
+            raise ValueError("Give a shape or points")
+
+        def value_at(position: float) -> float:
+            if shape:
+                v = transitions.curve(shape.lower(), (position - s) / (e - s), low, high, cycles)
+            else:
+                v = transitions.points_value(points, position - s)
+            v = pmin + (pmax - pmin) * v if normalized else v
+            return min(pmax, max(pmin, v))
+
+        keys = ["is_playing", "loop", "punch_in", "punch_out", "record_mode",
+                "session_automation_record", "current_song_time", "tempo"]
+        song = await asend("lom_get", {"path": "live_set", "properties": keys})
+        if song["is_playing"]:
+            raise ValueError("Stop playback first: recording plays the stretch from its start")
+        armed = [i for i, t in enumerate((await asend("lom_get", {
+            "path": "live_set tracks", "properties": ["arm"]}))["items"]) if t.get("arm")]
+        seconds = (e - s + 1) * 60.0 / float(song["tempo"])
+        set_song = lambda prop, value: asend("lom_set", {  # noqa: E731
+            "path": "live_set", "property": prop, "value": value})
+        # Live 12.4 keeps an undo step for every value set while it records,
+        # plus one (measured with 2 to 48 values, spaced 10 ms to 300 ms): the
+        # first undo takes the automation, the rest are empty. Counted here,
+        # values sent only when they move.
+        written, steps, last = 0, 0, None
+        smallest = (pmax - pmin) * 0.002
+        # Progress twice a second, without waiting on it: the values must keep time
+        reports: set[asyncio.Task] = set()
+        reported = 0.0
+        with journal.not_recorded():
+            try:
+                await asend("batch", {"commands": [
+                    op_set("live_set", "loop", False), op_set("live_set", "punch_in", False),
+                    op_set("live_set", "punch_out", False),
+                    op_set("live_set", "session_automation_record", True)]
+                    + [op_set(f"live_set tracks {i}", "arm", False) for i in armed],
+                    "stop_on_error": False})
+                await asend("lom_call", {"path": "live_set", "method": "start_playing"})
+                await set_song("current_song_time", max(0.0, s - 1.0))
+                deadline = time.monotonic() + seconds + 10
+                recording = False
+                while True:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("Live did not play through the stretch in time")
+                    position = (await asend("lom_get", {
+                        "path": "live_set", "properties": ["current_song_time"]}))["current_song_time"]
+                    if not recording and position >= s - 0.05:
+                        await set_song("record_mode", True)
+                        recording, steps = True, 1
+                    if recording:
+                        at = min(position, e)
+                        value = value_at(at)
+                        if last is None or abs(value - last) >= smallest or position >= e:
+                            await asend("lom_set", {"path": pp, "property": "value",
+                                                    "value": value})
+                            written, steps, last = written + 1, steps + 1, value
+                        if time.monotonic() - reported >= 0.5:
+                            task = asyncio.create_task(report_progress(
+                                ctx, at - s, e - s, "Recording automation"))
+                            reports.add(task)
+                            task.add_done_callback(reports.discard)
+                            reported = time.monotonic()
+                        if position >= e:
+                            if not hold:
+                                await asend("lom_set", {"path": pp, "property": "value",
+                                                        "value": before})
+                                steps += 1
+                            break
+                    await asyncio.sleep(0.02)
+            finally:
+                await set_song("record_mode", False)
+                await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
+                if reports:
+                    await asyncio.wait(reports, timeout=2)
+                await asend("batch", {"commands": [
+                    op_set("live_set", key, song[key]) for key in
+                    ("loop", "punch_in", "punch_out", "session_automation_record",
+                     "current_song_time")]
+                    + [op_set(f"live_set tracks {i}", "arm", True) for i in armed],
+                    "stop_on_error": False})
+        journal.add_steps(steps)
+        return to_json({"parameter": info["name"], "from_beat": s, "to_beat": e,
+                        "points": written, "held": hold, "seconds": round(seconds, 1),
+                        "undo_steps": steps})
+
+    def track_named(name: str, create: bool = True) -> int | None:
+        names = [t["name"] for t in lom_get("live_set tracks", ["name"])["items"]]
+        if name in names:
+            return names.index(name)
+        if not create:
+            return None
+        send("lom_call", {"path": "live_set", "method": "create_midi_track", "args": [-1]})
+        send("lom_set", {"path": f"live_set tracks {len(names)}", "property": "name",
+                         "value": name})
+        return len(names)
+
+    def device_parameters(device: str) -> dict[str, dict]:
+        items = lom_get(f"{device} parameters", ["name", "min", "max", "is_quantized",
+                                                 "value_items"])["items"]
+        return {p["name"]: dict(p, index=i) for i, p in enumerate(items)}
+
+    def choose_item(parameter: dict, *wanted: str) -> float | None:
+        items = parameter.get("value_items") if parameter.get("is_quantized") else None
+        if not isinstance(items, list):
+            return None
+        for word in wanted:
+            for i, item in enumerate(items):
+                if word in str(item).lower():
+                    return float(parameter["min"]) + i
+        return None
+
+    def midi_tracks_playing(start: float, end: float) -> list[int]:
+        found = []
+        for i, t in enumerate(lom_get("live_set tracks", ["has_midi_input"])["items"]):
+            if t.get("has_midi_input") and arrangement_notes(i, start, end)[0]:
+                found.append(i)
+        return found
+
+    @tool(destructive=True)
+    def design_transition(kind: str, at_bar: float, bars: float | None = None,
+                          track: int | str | None = None,
+                          tracks: list[int | str] | None = None,
+                          fill: str = "snare_roll") -> str:
+        """Build a transition into the section that starts at `at_bar` (1-based)
+        in the Arrangement:
+
+        - riser: a climbing line in the set's key over the last `bars` (4) on a
+          "Riser" track (Operator, saw, filter opening, level rising)
+        - reverse_cymbal: a crash from Drum Hits, reversed in Simpler on a
+          "Reverse Cymbal" track, swelling into the downbeat (`bars`, 2, at most)
+        - drum_fill: the drum track's last `bars` (1) become a fill: fill =
+          snare_roll | toms | build; track: default the first with a Drum Rack
+        - gap: silence on MIDI tracks for the last `bars` (1/4 bar), the drop's
+          breath; tracks: default every MIDI track with notes there
+        - filter_sweep: a high-pass Auto Filter on each MIDI track in `tracks`
+          (default: those playing) sweeping up over the last `bars` (4), open
+          again on the downbeat (record_automation for audio tracks or the
+          main track)
+
+        Built as Arrangement clips (see write_arrangement_automation); undo with
+        agent_changes.
+        """
+        kind = kind.strip().lower().replace(" ", "_").replace("-", "_")
+        context = song_context()
+        bar = context["beats_per_bar"]
+        defaults = {"riser": 4, "reverse_cymbal": 2, "drum_fill": 1, "gap": 0.25,
+                    "filter_sweep": 4}
+        if kind not in defaults:
+            raise ValueError("kind must be " + ", ".join(defaults))
+        at = (float(at_bar) - 1) * bar
+        span = float(bars if bars is not None else defaults[kind]) * bar
+        start = at - span
+        if start < 0:
+            raise ValueError(f"at_bar {at_bar} leaves no room for {span:g} beats before it")
+        result: dict[str, Any] = {"kind": kind, "from_beat": start, "to_beat": at}
+
+        if kind == "riser":
+            index = track_named("Riser")
+            tp = track_path(index)
+            if not lom_get(f"{tp} devices", ["name"])["items"]:
+                send("lom_call", {"path": tp, "method": "insert_device", "args": ["Operator"]})
+            operator = f"{tp} devices 0"
+            params = device_parameters(operator)
+            ops = []
+            wave = params.get("Osc-A Wave")
+            saw = choose_item(wave, "saw 16", "saw") if wave else None
+            if saw is not None:
+                ops.append(op_set(f"{operator} parameters {wave['index']}", "value", saw))
+            if "Filter On" in params:
+                ops.append(op_set(f"{operator} parameters {params['Filter On']['index']}",
+                                  "value", 1.0))
+            if ops:
+                batch(ops, stop_on_error=False)
+            root = music.NOTE_NAMES.index(context["key"]) if context.get("key") else 0
+            notes = [dict(n, start_time=n["start_time"] + start) for n in
+                     transitions.riser_notes(span, 48 + root, context.get("scale"))]
+            envelopes = []
+            if "Filter Freq" in params:
+                p = params["Filter Freq"]
+                envelopes.append((f"{operator} parameters {p['index']}", envelope_steps(
+                    "exp_up", None, span, 0.3, 1.0, 1, 0.25, float(p["min"]), float(p["max"]),
+                    True)))
+            volume = f"{tp} mixer_device volume"
+            envelopes.append((volume, envelope_steps("ramp_up", None, span, 0.55, 0.85, 1, 0.25,
+                                                     0.0, 1.0, True)))
+            result.update(track="Riser", **rewrite_range(index, start, at, notes, envelopes,
+                                                         name="Riser"))
+        elif kind == "reverse_cymbal":
+            index = track_named("Reverse Cymbal")
+            tp = track_path(index)
+            devices = lom_get(f"{tp} devices", ["class_name"])["items"]
+            if not any(d.get("class_name") == "OriginalSimpler" for d in devices):
+                found = search_browser("crash", "drums", 10)["results"]
+                sample = next((r for r in found if r["kind"] == "sample"), None)
+                if sample is None:
+                    raise ValueError("No crash sample in the browser's Drums")
+                load_items(index, [(None, sample["id"])])
+                devices = lom_get(f"{tp} devices", ["class_name"])["items"]
+            simpler = f"{tp} devices " + str(next(
+                i for i, d in enumerate(devices) if d.get("class_name") == "OriginalSimpler"))
+            send("lom_call", {"path": simpler, "method": "reverse"})
+            info = lom_get(f"{simpler} sample", ["length", "sample_rate", "file_path"])
+            seconds = float(info["length"]) / float(info["sample_rate"] or 44100.0)
+            tempo = float(lom_get("live_set", ["tempo"])["tempo"])
+            length = min(span, seconds * tempo / 60.0)
+            if length < seconds * tempo / 60.0:  # start later in the reversed sample
+                params = device_parameters(simpler)
+                if "S Start" in params:
+                    p = params["S Start"]
+                    skip = 1 - length / (seconds * tempo / 60.0)
+                    send("lom_set", {"path": f"{simpler} parameters {p['index']}",
+                                     "property": "value", "value": float(p["min"]) + skip * (
+                                         float(p["max"]) - float(p["min"]))})
+            note = music._note(60, at - length, length, 110)
+            result.update(track="Reverse Cymbal", sample=os.path.basename(info["file_path"]),
+                          **rewrite_range(index, at - length, at, [note],
+                                          name="Reverse Cymbal"))
+        elif kind == "drum_fill":
+            if track is None:
+                tracks_info = lom_get("live_set tracks", ["name"])["items"]
+                track = next((i for i in range(len(tracks_info)) if drum_rack_path(i)), None)
+                if track is None:
+                    raise ValueError("No track with a Drum Rack; say which track")
+            rack = drum_rack_path(track)
+            pads = {}
+            if rack:
+                filled = {p["note"] for p in lom_get(f"{rack} drum_pads", ["note", "chains"])[
+                    "items"] if p.get("chains")}
+                if fill == "toms" and not {45, 47, 48, 50} & filled:
+                    fill = "snare_roll"  # no toms in this kit
+                    result["note"] = "No toms on the kit's pads: a snare roll instead"
+            notes, clips = arrangement_notes(track, start, at)
+            new = [dict(n, start_time=n["start_time"] + start)
+                   for n in transitions.fill_notes(span, fill, pads)]
+            first = clips[0] if clips else {}
+            result.update(track=lom_get(track_path(track), ["name"])["name"], fill=fill,
+                          **rewrite_range(track, start, at,
+                                          transitions.replace_span(notes, start, at, new),
+                                          name=first.get("name") or "Fill",
+                                          color_index=first.get("color_index")))
+        elif kind == "gap":
+            chosen = list(tracks) if tracks else midi_tracks_playing(start, at)
+            names = []
+            for t in chosen:
+                rewrite_range(t, start, at, [], name="Gap")
+                names.append(lom_get(track_path(t), ["name"])["name"])
+            result["tracks"] = names
+        else:  # filter_sweep
+            chosen = list(tracks) if tracks else midi_tracks_playing(start, at)
+            if not chosen:
+                raise ValueError("No MIDI track plays there; name tracks (record_automation for "
+                                 "audio tracks or the main track)")
+            names = []
+            for t in chosen:
+                tp = track_path(t)
+                devices = [d["name"] for d in lom_get(f"{tp} devices", ["name"])["items"]]
+                if "Auto Filter" in devices:
+                    index = devices.index("Auto Filter")
+                else:
+                    send("lom_call", {"path": tp, "method": "insert_device",
+                                      "args": ["Auto Filter"]})
+                    index = len(devices)
+                device = f"{tp} devices {index}"
+                params = device_parameters(device)
+                kind_param, frequency = params.get("Filter Type"), params.get("Frequency")
+                if frequency is None:
+                    raise ValueError("This Auto Filter has no Frequency parameter")
+                ops = [op_set(f"{device} parameters {frequency['index']}", "value",
+                              float(frequency["min"]))]
+                high_pass = choose_item(kind_param, "high") if kind_param else None
+                if high_pass is not None:
+                    ops.append(op_set(f"{device} parameters {kind_param['index']}", "value",
+                                      high_pass))
+                batch(ops, stop_on_error=False)
+                notes, clips = arrangement_notes(t, start, at)
+                first = clips[0] if clips else {}
+                steps = envelope_steps("exp_up", None, span, 0.0, 0.6, 1, 0.25,
+                                       float(frequency["min"]), float(frequency["max"]), True)
+                rewrite_range(t, start, at, notes,
+                              [(f"{device} parameters {frequency['index']}", steps)],
+                              name=first.get("name"), color_index=first.get("color_index"))
+                names.append(lom_get(tp, ["name"])["name"])
+            result["tracks"] = names
         return to_json(result)
 
     # ── Song, transport, view ────────────────────────────────────────────────

@@ -14,14 +14,18 @@ only to the streams that asked for that URI.
 
 A background task long-polls Live's event buffer (``poll_events`` with
 ``wait``) only while somebody is listening, and stops by itself when the last
-subscription or stream goes away.
+subscription or stream goes away. It has a connection of its own: a waiting
+poll holds its connection for up to two seconds, and on the tools' one every
+command would queue behind it (the Remote Script serves several clients, and
+its observers and event buffer are shared).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+import threading
+from typing import Any, Callable
 
 from mcp.server.subscriptions import InMemorySubscriptionBus, ResourceUpdated
 from mcp.types import EmptyResult, SubscribeRequestParams, UnsubscribeRequestParams
@@ -34,10 +38,46 @@ OVERVIEW_URI = "ableton://session/overview"
 STRUCTURE = [("live_set", "tracks"), ("live_set", "return_tracks"), ("live_set", "scenes")]
 
 
+class OwnConnection:
+    """A connection to Live used by one background task only."""
+
+    def __init__(self, connect: Callable[[], Any]) -> None:
+        self.connect = connect  # returns an AbletonConnection, not yet connected
+        self.connection: Any = None
+        self.lock = threading.Lock()
+
+    def send(self, command: str, params: dict, timeout: float | None = None) -> Any:
+        with self.lock:
+            if self.connection is None or self.connection.sock is None:
+                connection = self.connect()
+                if not connection.connect():
+                    raise ConnectionError(connection.last_error)
+                self.connection = connection
+            try:
+                if timeout is None:
+                    return self.connection.send_command(command, params)
+                return self.connection.send_command(command, params, timeout=timeout)
+            except (ConnectionError, OSError):
+                self.connection = None
+                raise
+
+    async def asend(self, command: str, params: dict | None = None,
+                    timeout: float | None = None) -> Any:
+        return await asyncio.to_thread(self.send, command, params or {}, timeout)
+
+    def close(self) -> None:
+        with self.lock:
+            if self.connection is not None:
+                self.connection.disconnect()
+                self.connection = None
+
+
 class LiveUpdates:
-    def __init__(self, bus: InMemorySubscriptionBus, asend) -> None:
+    def __init__(self, bus: InMemorySubscriptionBus, asend,
+                 close: Callable[[], None] | None = None) -> None:
         self.bus = bus
         self.asend = asend
+        self.close = close  # the watcher's own connection, when it stops
         self.sessions: dict[str, set[Any]] = {}  # uri → sessions (2025-era subscriptions)
         self.task: asyncio.Task | None = None
         self.structure_observers: set[int] = set()  # observers whose events touch the overview
@@ -96,6 +136,8 @@ class LiveUpdates:
                     await self.publish(OVERVIEW_URI)
         finally:
             await self._unobserve_structure()
+            if self.close is not None:
+                await asyncio.to_thread(self.close)
 
     async def publish(self, uri: str) -> None:
         await self.bus.publish(ResourceUpdated(uri=uri))
@@ -128,9 +170,17 @@ class LiveUpdates:
         self.owned.clear()
 
 
-def install(mcp: Any, bus: InMemorySubscriptionBus, asend) -> LiveUpdates:
-    """Serve resources/subscribe and start the watcher for listen streams."""
-    updates = LiveUpdates(bus, asend)
+def install(mcp: Any, bus: InMemorySubscriptionBus, asend=None,
+            connect: Callable[[], Any] | None = None) -> LiveUpdates:
+    """Serve resources/subscribe and start the watcher for listen streams.
+
+    The watcher talks to Live through `asend`, or a connection of its own made
+    with `connect` (what the server does)."""
+    close = None
+    if asend is None:
+        own = OwnConnection(connect)
+        asend, close = own.asend, own.close
+    updates = LiveUpdates(bus, asend, close)
     server = mcp._lowlevel_server  # no public API for subscribe handlers in mcp 2.x
     server.add_request_handler("resources/subscribe", SubscribeRequestParams,
                                updates.on_subscribe)

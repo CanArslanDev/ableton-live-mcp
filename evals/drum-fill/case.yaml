@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: drum-fill
+description: 'A fill in the Arrangement, the groove around it kept.'
+tags: [arrangement, drums, transitions]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    In the Arrangement, put a snare-roll fill on the drums in the bar right before bar 9.
+graders:
+  - name: fill
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:fill":\s*true'
+  - name: groove-kept
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:groove-kept":\s*true'

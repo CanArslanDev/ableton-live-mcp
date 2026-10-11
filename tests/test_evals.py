@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from MCP_Server import journal
+from MCP_Server import extended_tools, journal
 from MCP_Server import server as live_server
 from MCP_Server.simulator import Simulator, free_port, load_check
 
@@ -79,6 +79,12 @@ SOLUTIONS = {
     "filter-sweep": [("write_clip_automation", {"track": "Bass", "clip_index": 0,
                                                 "device": "Operator", "parameter": "Filter Freq",
                                                 "shape": "ramp_up", "low": 0.0, "high": 1.0})],
+    "drum-fill": [("design_transition", {"kind": "drum_fill", "at_bar": 9, "fill": "snare_roll"})],
+    "build-up": [("design_transition", {"kind": "riser", "at_bar": 9, "bars": 4}),
+                 ("design_transition", {"kind": "filter_sweep", "at_bar": 9, "bars": 4,
+                                        "tracks": ["Bass"]})],
+    "fade-out": [("record_automation", {"track": "master", "parameter": "volume", "start_bar": 13,
+                                        "bars": 4, "shape": "ramp_down", "hold": True})],
     "scenes": [("manage_scene", {"action": "create", "name": "Verse"}),
                ("manage_scene", {"action": "create", "name": "Chorus"})],
 }
@@ -89,6 +95,10 @@ UNTOUCHED_PASSES = {"set-overview", "preview-no-write", "missing-track", "delete
 @pytest.fixture
 def simulated_case(tmp_path, monkeypatch):
     started = []
+
+    # Other tests register the tools against their own connections; these run
+    # through the server's, as the plugin does
+    monkeypatch.setattr(extended_tools, "_get_connection", live_server.get_ableton_connection)
 
     def start(name):
         folder = EVALS / name
