@@ -135,3 +135,23 @@ def test_install_remote_script_tool(tmp_path, monkeypatch):
     monkeypatch.setattr(installer, "discover_user_library_remote_script_dirs", lambda: [])
     with pytest.raises(ToolError, match="No Ableton User Library found"):
         asyncio.run(server.call_tool("install_remote_script", {}))
+
+
+def test_package_data_covers_every_non_python_file():
+    """setuptools ships only .py files unless pyproject lists the others (the
+    MIDI Tools' JavaScript once went missing from the wheel this way)."""
+    import fnmatch
+    import re
+
+    section = ROOT.joinpath("pyproject.toml").read_text(encoding="utf-8").split(
+        "[tool.setuptools.package-data]", 1)[1].split("\n[", 1)[0]
+    patterns = []
+    for package, globs in re.findall(r'"([^"]+)"\s*=\s*\[([^\]]*)\]', section):
+        base = package.replace(".", "/")
+        patterns += [f"{base}/{g}" for g in re.findall(r'"([^"]+)"', globs)]
+    package = ROOT / "MCP_Server"
+    shipped = [p.relative_to(ROOT).as_posix() for p in package.rglob("*")
+               if p.is_file() and p.suffix not in (".py", ".pyc") and "__pycache__" not in p.parts
+               and p.name != ".DS_Store"]
+    missing = [f for f in shipped if not any(fnmatch.fnmatch(f, pattern) for pattern in patterns)]
+    assert not missing, f"not in [tool.setuptools.package-data]: {missing}"

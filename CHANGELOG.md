@@ -32,6 +32,12 @@
   gaps before a drop and high-pass sweeps. All verified on Live 12.4,
   including undoing each with `agent_changes`.
 
+- **MIDI Tools in Live's clip view.** `install_midi_tools` adds three Max for
+  Live MIDI Tools that run inside Live, without the server: Usul and Makam
+  Melody (Generate) and Makam Snap (Transform). Their JavaScript is a port
+  of the server's generators (the usuls match note for note) and lives in
+  the device. Verified in Live 12.4 with Max 9.1.4.
+
 ### Changed
 
 - **Less context per session and per call.** The core profile's tool

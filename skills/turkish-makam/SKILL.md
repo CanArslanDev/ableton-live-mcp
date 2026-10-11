@@ -26,6 +26,10 @@ uşşak are ascending (start near the karar), hüseynî and hicaz start around
 the güçlü and descend to the karar, and muhayyer starts from the upper
 octave.
 
+Inside Live without the assistant: `install_midi_tools()` adds Usul and
+Makam Melody to a MIDI clip's Generate tab and Makam Snap (notes to the
+nearest makam pitch) to its Transform tab.
+
 ## Usuls
 
 `generate_usul(track="Darbuka", usul="aksak", cycles=4, set_meter=true)` writes

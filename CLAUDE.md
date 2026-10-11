@@ -31,6 +31,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/companion.py` | Client for the Extensions SDK add-on: finds its session file, sends one command. |
 | `extension/` | AbletonMCP Companion, the Extensions SDK add-on (TypeScript): share selection, confirm dialog, pre-FX render. |
 | `MCP_Server/m4l_device.py` | Builds the AbletonMCP Analyzer (.amxd) as bytes: the Max patch as JSON. |
+| `MCP_Server/midi_tools.py`, `MCP_Server/midi_tools/*.js` | Max for Live MIDI Tools (Usul, Makam Melody, Makam Snap) for Live 12's Generate/Transform tabs: v8 code in a `v8.codebox`, tables written from `turkish.py`/`music.py`; `install_midi_tools`. |
 | `MCP_Server/analyzer.py` | UDP/OSC listener for the analyzer's messages; levels, bands, correlation, approximate LUFS. |
 | `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP) in uv-built environments; seconds→beats; the CLAP sound index. |
 | `MCP_Server/ml_worker.py` | The job side: runs in those environments, imports nothing from `MCP_Server`, talks JSON lines. |
@@ -231,6 +232,26 @@ Measured on Live 12.3.8:
   replaces a copy that still sends an older one.
 - The device file is generated, never committed: change `m4l_device.py`,
   bump `VERSION`, and check in Live (it must load and send).
+
+## MIDI Tools (verified in Live 12.4 with Max 9.1.4, 2026-10-11)
+
+- An .amxd of type `nagg` (generator) or `natt` (transformation), same
+  chunks as other devices (Live's templates: `Misc/Max MIDI Tools`). Files
+  in `<User Library>/MIDI Tools/Max Generators` and `Max Transformations`
+  appear under "User:" in the clip view's tool menus; `browser.load_item`
+  on one does nothing visible.
+- `live.miditool.in` sends the context from its right outlet, then the
+  notes; the context has `clip.time_selection_start/end` (the whole clip
+  when nothing is selected), `scale` and `seed`. `v8.codebox` keeps its
+  code in the patch (`code`, `filename: none`) and takes dicts as objects
+  (`msg_dictionary`, `outlet_dictionary`).
+- A transformation gets only the selected notes (after Generate, the new
+  notes stay selected). Banging `live.miditool.in` when a control changes
+  after Apply replaces that apply's result in place.
+- Checked by driving Live's UI: Quartz mouse events work (AppleScript
+  `click at` reaches the element but does not press it, and the tool tabs'
+  accessibility elements all report the first tab). Tests run the JS in
+  Node with Max's globals stood in for (`tests/test_midi_tools.py`).
 
 ## Machine learning (measured on an M-series Mac, 2026-10-11)
 

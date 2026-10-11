@@ -4181,6 +4181,23 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 / f"{m4l_device.NAME}.amxd")
 
     @tool(idempotent=True)
+    def install_midi_tools() -> str:
+        """Install the AbletonMCP MIDI Tools into Live 12's clip view (Max for
+        Live: Suite, or Standard with the add-on): Usul and Makam Melody under
+        Generate, Makam Snap under Transform. They run inside Live, without
+        this server: pick one in a MIDI clip's tool tabs, set it, Apply.
+        """
+        from . import als, midi_tools
+
+        libraries = als._user_libraries()
+        if not libraries:
+            raise RuntimeError("No User Library found to put the MIDI Tools in")
+        paths = midi_tools.install(libraries[:1])
+        return to_json({"installed": [str(p) for p in paths],
+                        "use": "In a MIDI clip's view: Generate › Usul or Makam Melody, "
+                               "Transform › Makam Snap (Live lists new files after a moment)"})
+
+    @tool(idempotent=True)
     async def install_analyzer(track: int | str = "master") -> str:
         """Put the AbletonMCP Analyzer on a track (default the master): a Max
         for Live audio effect that passes audio through and sends this server
