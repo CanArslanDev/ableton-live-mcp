@@ -51,6 +51,10 @@ ENVIRONMENTS = {
     "embed": Environment("3.12", ("torch>=2.4", "transformers>=4.45,<6", "soundfile>=0.12",
                                   "scipy>=1.11"),
                          "torch, transformers and the CLAP model, ~1.2 GB"),
+    # MusicGen small: the libraries above (one cached environment for both)
+    "generate": Environment("3.12", ("torch>=2.4", "transformers>=4.45,<6", "soundfile>=0.12",
+                                     "scipy>=1.11"),
+                            "torch, transformers and MusicGen small, ~2.5 GB"),
 }
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
@@ -84,7 +88,9 @@ def child_environment() -> dict[str, str]:
     for name in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT", "CONDA_PREFIX"):
         env.pop(name, None)
     env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", HF_HUB_DISABLE_TELEMETRY="1",
-               TOKENIZERS_PARALLELISM="false")
+               TOKENIZERS_PARALLELISM="false",
+               # an operation Apple's GPU lacks runs on the CPU instead of failing
+               PYTORCH_ENABLE_MPS_FALLBACK="1")
     return env
 
 
@@ -139,6 +145,42 @@ async def run(task: str, job: dict, report: ProgressCallback | None = None,
             process.kill()
             await process.wait()
         await logs
+
+
+# ── Audio generation (MusicGen) ──────────────────────────────────────────────
+
+MUSICGEN_MODEL = "facebook/musicgen-small"
+MUSICGEN_LICENSE = ("MusicGen's weights are CC-BY-NC 4.0: what it makes is for "
+                    "non-commercial use")
+MAX_GENERATED_SECONDS = 30.0
+
+
+def generation_prompt(prompt: str, tempo: float | None = None, key: str | None = None,
+                      scale_name: str | None = None) -> str:
+    """The prompt with the set's tempo and key, unless it already gives them:
+    MusicGen follows "120 bpm" and "in A minor" in the text."""
+    text = prompt.strip().rstrip(".")
+    lower = text.lower()
+    extra = []
+    if tempo and "bpm" not in lower:
+        extra.append(f"{tempo:g} bpm")
+    if key and " in " not in f" {lower} " and not any(
+            word in lower for word in ("major", "minor", "key of")):
+        extra.append(f"in {key} {(scale_name or 'major').lower()}")
+    return ", ".join([text] + extra)
+
+
+def generated_folder(libraries: list[Path]) -> Path:
+    """In the User Library, where Live's browser finds the files (and can put
+    them on Drum Rack pads); else ~/.ableton-mcp/generated."""
+    if libraries:
+        return libraries[0] / "Samples" / "AbletonMCP Generated"
+    return Path.home() / ".ableton-mcp" / "generated"
+
+
+def file_stem(prompt: str, when: str) -> str:
+    words = "".join(c if c.isalnum() else " " for c in prompt.lower()).split()
+    return ("-".join(words[:6]) or "sound") + "-" + when
 
 
 # ── Audio to MIDI: seconds to beats ──────────────────────────────────────────

@@ -62,6 +62,11 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
 - By description or example: `find_similar_sounds(text="dusty vinyl kick")` or
   `find_similar_sounds(like="/path/to/sound.wav")`; the first search in a
   folder indexes it, so warn that it takes a minute or two.
+- When nothing in the library fits, make it: `generate_audio(prompt="metallic
+  snare hit", seconds=1.5, track="Drums", drum_pad="snare")` or a loop onto an
+  audio track (MusicGen, on this computer; the set's tempo and key go into
+  the prompt). Say once that MusicGen's weights are licensed for
+  non-commercial use only, and that the first use downloads ~2.5 GB.
 
 ## From audio
 

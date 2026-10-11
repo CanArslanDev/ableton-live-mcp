@@ -33,7 +33,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/m4l_device.py` | Builds the AbletonMCP Analyzer (.amxd) as bytes: the Max patch as JSON. |
 | `MCP_Server/midi_tools.py`, `MCP_Server/midi_tools/*.js` | Max for Live MIDI Tools (Usul, Makam Melody, Makam Snap) for Live 12's Generate/Transform tabs: v8 code in a `v8.codebox`, tables written from `turkish.py`/`music.py`; `install_midi_tools`. |
 | `MCP_Server/analyzer.py` | UDP/OSC listener for the analyzer's messages; levels, bands, correlation, approximate LUFS. |
-| `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP) in uv-built environments; seconds→beats; the CLAP sound index. |
+| `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP, MusicGen) in uv-built environments; seconds→beats; the CLAP sound index; generation prompts and folders. |
 | `MCP_Server/ml_worker.py` | The job side: runs in those environments, imports nothing from `MCP_Server`, talks JSON lines. |
 | `MCP_Server/als.py` | Reads Live Set files (.als) without Live: settings, tracks, devices, clips and notes, samples, comparing and finding sets. Never writes them. |
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
@@ -276,6 +276,16 @@ Measured on Live 12.3.8:
   `laion/clap-htsat-unfused`: P@10 0.72 for text queries over 10 drum
   classes (chance 0.10), 0.62 sound-to-sound; ~0.06–0.1 s per sound, so
   indexing stops at 1,500 files per call (`INDEX_PER_CALL`).
+- MusicGen small (`facebook/musicgen-small`, transformers 5.19, torch
+  2.14): the first run downloaded ~2.4 GB in ~5 minutes; then a 6 s take
+  needs ~17–19 s in all (start, load, generate), an 8 s loop ~19 s. MPS
+  generates about twice as fast as the CPU (6.3 s against 13.6 s for 5 s).
+  One seed looked broken on MPS (all bass), but across seeds both devices
+  gave the same spectral spread and MPS kept "C major" prompts in C, so it
+  stays the default (the EnCodec decoder gives identical audio on either).
+  transformers 5.x no longer feeds MusicGen's `streamer`; progress comes
+  from a `LogitsProcessor`, called once per step. Weights CC-BY-NC 4.0.
+  Stable Audio Open (gated, needs a Hugging Face token) is not included.
 - `lowest`/`highest` use Live's note names: A1 = MIDI 45 = 110 Hz.
 - Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
   `ABLETON_MCP_ML_TESTS=1` adds a run with the real Basic Pitch model.
@@ -316,8 +326,9 @@ Measured on Live 12.3.8:
   2026-07-28; push updates and tests cover both. The original tools in `server.py` use `@legacy_tool("core" |
   "full")`; "full" ones only appear with `ABLETON_MCP_PROFILE=full`.
 - **Context cost.** Every tool's description and schema is sent to the model
-  each session (69 core tools ≈ 15k tokens, measured 2026-10-11, down from
-  22k), and every result on every call. So: `register_tool` strips pydantic
+  each session (69 core tools ≈ 15k tokens, down from 22k; with Phase 4's
+  tools 76 ≈ 16.7k, measured 2026-10-11), and every result on every call.
+  So: `register_tool` strips pydantic
   titles, `"default": null` and nullable `anyOf` from the advertised schema
   (`compact_schema`; validation still uses the signature); `to_json` writes
   compact JSON; notes go out as rows under `note_columns` (`note_table`, ~80%

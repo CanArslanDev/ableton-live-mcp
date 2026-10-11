@@ -3098,6 +3098,100 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             result["errors"] = errors[:20]
         return to_json(result)
 
+    # ── Generated audio (MusicGen) ───────────────────────────────────────────
+
+    @tool
+    async def generate_audio(prompt: str, seconds: float = 8.0, variations: int = 1,
+                             seed: int | None = None, track: int | str | None = None,
+                             clip_index: int | None = None,
+                             arrangement_time: float | None = None,
+                             drum_pad: int | str | None = None, follow_set: bool = True,
+                             ctx: Context | None = None) -> str:
+        """Make audio from a text prompt with MusicGen (small) on this computer
+        ("dusty lo-fi drum loop", "warm analog pad swell", "metallic snare hit")
+        and put it in the set:
+        - an audio track: a clip in clip_index (Session; default the first free
+          slot) or at arrangement_time (beats)
+        - a MIDI track: on its Drum Rack's drum_pad ("snare", "D1", 38), else
+          in a Simpler
+        - no track: the files only
+        Up to 30 s; variations makes that many takes (the first goes into the
+        set); follow_set adds the set's tempo and key to the prompt. Files go
+        to the User Library (Samples › AbletonMCP Generated). The first use
+        downloads ~2.5 GB. MusicGen's weights are CC-BY-NC 4.0: what it makes is
+        for non-commercial use, which the user should know.
+        """
+        from . import als, ml
+
+        if not 1.0 <= float(seconds) <= ml.MAX_GENERATED_SECONDS:
+            raise ValueError(f"seconds must be between 1 and {ml.MAX_GENERATED_SECONDS:g}")
+        if not 1 <= int(variations) <= 4:
+            raise ValueError("variations must be between 1 and 4")
+        text = prompt
+        if follow_set:
+            try:
+                context = await asyncio.to_thread(song_context, True)
+                tempo = (await asend("lom_get", {"path": "live_set",
+                                                 "properties": ["tempo"]}))["tempo"]
+                text = ml.generation_prompt(prompt, tempo, context.get("key"),
+                                            context.get("scale_name"))
+            except Exception as e:  # no Live to ask: the prompt as given
+                logger.debug("Prompt without the set's tempo and key: %s", e)
+        folder = ml.generated_folder(als._user_libraries())
+        job = {"prompt": text, "seconds": float(seconds), "variations": int(variations),
+               "seed": int(seed) if seed is not None else int(time.time()) % 100000,
+               "out_dir": str(folder), "stem": ml.file_stem(prompt, time.strftime("%Y%m%d-%H%M%S")),
+               "model": ml.MUSICGEN_MODEL}
+        result = await ml.run("generate", job, ml_progress(ctx))
+        payload: dict[str, Any] = {"files": result["files"], "prompt": text,
+                                   "seconds": result["seconds"], "seed": job["seed"],
+                                   "device": result["device"], "license": ml.MUSICGEN_LICENSE}
+        if track is not None:
+            payload["placed"] = await place_generated(track, result["files"][0], clip_index,
+                                                      arrangement_time, drum_pad)
+        return to_json(payload)
+
+    async def place_generated(track: int | str, file: str, clip_index: int | None,
+                              arrangement_time: float | None, drum_pad: int | str | None) -> dict:
+        tp = track_path(track)
+        info = await asend("lom_get", {"path": tp, "properties": ["name", "has_audio_input"]})
+        if info.get("has_audio_input"):
+            if arrangement_time is not None:
+                await asend("lom_call", {"path": tp, "method": "create_audio_clip",
+                                         "args": [file, float(arrangement_time)]})
+                return {"track": info["name"], "arrangement_time": arrangement_time}
+            slots = (await asend("lom_get", {"path": f"{tp} clip_slots",
+                                             "properties": ["has_clip"]}))["items"]
+            row = clip_index if clip_index is not None else next(
+                (i for i, s in enumerate(slots) if not s.get("has_clip")), None)
+            if row is None:
+                raise ValueError("No free Session slot on that track; give clip_index or "
+                                 "arrangement_time")
+            if slots[row].get("has_clip"):
+                raise ValueError(f"Slot {row} already holds a clip")
+            await asend("lom_call", {"path": f"{tp} clip_slots {int(row)}",
+                                     "method": "create_audio_clip", "args": [file]})
+            return {"track": info["name"], "clip_index": row}
+        # A MIDI track: through Live's browser, which lists the file after a moment
+        name = Path(file).stem
+        for _attempt in range(30):
+            try:
+                item_id, _label = await asyncio.to_thread(browser_item_id, name, "user_library")
+                break
+            except ValueError:
+                await asyncio.sleep(1.0)
+        else:
+            raise RuntimeError(f"Live's browser does not list {name} yet; it is in "
+                               f"{Path(file).parent}")
+        note = pad_note(drum_pad) if drum_pad is not None else None
+        if note is not None and await asyncio.to_thread(drum_rack_path, track) is None:
+            raise ValueError("That track has no Drum Rack for drum_pad")
+        loaded = await asyncio.to_thread(load_items, track, [(note, item_id)])
+        if not loaded.get("ok"):
+            raise RuntimeError(f"Live could not load it: {loaded.get('steps')}")
+        return {"track": info["name"], **({"drum_pad": note} if note is not None
+                                          else {"device": "Simpler"})}
+
     # ── Arrangement automation and transitions ──────────────────────────────
 
     @tool(destructive=True)

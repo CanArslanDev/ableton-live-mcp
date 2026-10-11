@@ -1513,3 +1513,67 @@ def test_memory_in_the_set_and_for_the_user(live_server):
     assert call("agent_changes")["changes"] == []
     with pytest.raises(Exception, match="No set note matches"):
         call("memory", action="forget", text="nothing like this")
+
+
+@pytest.fixture
+def fake_musicgen(live_server, tmp_path, monkeypatch):
+    """ml.run for "generate" without a model: a short sine per take, and Live's
+    browser listing the file as the real one does after a moment."""
+    import numpy as np
+    import soundfile as sf
+
+    from MCP_Server import als, ml
+
+    script, _call = live_server
+    monkeypatch.setattr(als, "_user_libraries", lambda: [tmp_path / "User Library"])
+    jobs = []
+
+    async def run(task, job, report=None, timeout=3600.0):
+        assert task == "generate"
+        jobs.append(job)
+        folder = Path(job["out_dir"])
+        folder.mkdir(parents=True, exist_ok=True)
+        files = []
+        for take in range(job["variations"]):
+            path = folder / f"{job['stem']}{'' if job['variations'] == 1 else f'-{take + 1}'}.wav"
+            tone = np.sin(np.linspace(0, 440 * 2 * np.pi * job["seconds"], int(32000 * job["seconds"])))
+            sf.write(str(path), (0.5 * tone).astype("float32"), 32000)
+            files.append(str(path))
+        browser = script.application().browser
+        browser.user_library.children.append(fake_live.FakeBrowserItem(Path(files[0]).name))
+        return {"files": files, "rate": 32000, "seconds": job["seconds"], "model": job["model"],
+                "device": "cpu"}
+
+    monkeypatch.setattr(ml, "run", run)
+    return jobs
+
+
+def test_generated_audio_lands_on_a_track_a_pad_or_a_simpler(live_server, fake_musicgen):
+    script, call = live_server
+    song = script._song
+    result = call("generate_audio", prompt="dusty lo-fi drum loop", seconds=4, track="Vox")
+    job = fake_musicgen[0]
+    # The set's tempo and key went into the prompt; the file into the User Library
+    assert job["prompt"] == "dusty lo-fi drum loop, 120 bpm, in C major"
+    assert "Samples/AbletonMCP Generated" in Path(job["out_dir"]).as_posix()
+    assert result["placed"] == {"track": "Vox", "clip_index": 0}
+    assert song.tracks[2].clip_slots[0].clip.file_path == result["files"][0]
+    assert "non-commercial" in result["license"]
+    # In the Arrangement
+    call("generate_audio", prompt="vinyl crackle", seconds=2, track="Vox", arrangement_time=8,
+         follow_set=False)
+    assert fake_musicgen[1]["prompt"] == "vinyl crackle"
+    assert song.tracks[2].arrangement_clips[-1].start_time == 8.0
+    # On a Drum Rack pad, and in a Simpler on a MIDI track without a rack
+    call("manage_track", action="create_midi", name="Gen Kit")
+    call("add_device", track="Gen Kit", device="Drum Rack")
+    placed = call("generate_audio", prompt="metallic snare hit", seconds=1, track="Gen Kit",
+                  drum_pad="snare", variations=2)
+    assert placed["placed"]["drum_pad"] == 38 and len(placed["files"]) == 2
+    rack = song.tracks[-1].devices[0]
+    assert next(p for p in rack.drum_pads if p.note == 38).name.startswith("metallic-snare-hit")
+    simpler = call("generate_audio", prompt="warm pad swell", seconds=2, track="Bass")
+    assert simpler["placed"]["device"] == "Simpler"
+    assert song.tracks[1].devices[-1].class_name == "OriginalSimpler"
+    with pytest.raises(Exception, match="seconds must be"):
+        call("generate_audio", prompt="x", seconds=60)

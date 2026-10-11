@@ -32,6 +32,12 @@
   gaps before a drop and high-pass sweeps. All verified on Live 12.4,
   including undoing each with `agent_changes`.
 
+- **Audio generation on this computer.** `generate_audio` makes a sound or
+  a loop from a text prompt with MusicGen small (in its own environment,
+  like the other models) and puts it in the set: a clip on an audio track,
+  a Drum Rack pad, or a Simpler. The set's tempo and key go into the prompt;
+  the files land in the User Library. MusicGen's weights are CC-BY-NC 4.0,
+  which the tool says (non-commercial use).
 - **Project memory.** `memory` keeps notes about a song inside the Live set
   (`Song.set_data`, saved with the set, no undo step) and the user's
   preferences in `~/.ableton-mcp/memory.json`; a keyed note replaces the

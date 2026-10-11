@@ -213,6 +213,76 @@ def embed(job: dict) -> dict:
             "model": name, "device": device}
 
 
+# ── Audio generation (MusicGen) ──────────────────────────────────────────────
+
+def generate(job: dict) -> dict:
+    """Text to audio with MusicGen: one WAV per variation, peak at -1 dBFS,
+    a 10 ms fade at the end."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from transformers import (AutoProcessor, LogitsProcessor, LogitsProcessorList,
+                              MusicgenForConditionalGeneration)
+
+    name = job.get("model") or "facebook/musicgen-small"
+    seconds = float(job["seconds"])
+    variations = max(1, int(job.get("variations", 1)))
+    progress(0.02, "loading MusicGen")
+    processor = AutoProcessor.from_pretrained(name)
+    model = MusicgenForConditionalGeneration.from_pretrained(name).eval()
+    device = torch_device(torch, job.get("device"))
+    rate = int(model.config.audio_encoder.sampling_rate)
+    tokens = int(seconds * float(model.config.audio_encoder.frame_rate)) + 4
+
+    # Called once per generated step (transformers 5.x no longer feeds
+    # MusicGen's streamer), so it can tell how far a take has got
+    class Progress(LogitsProcessor):
+        def __init__(self, index: int) -> None:
+            self.index, self.done = index, 0
+
+        def __call__(self, input_ids, scores):
+            self.done += 1
+            if self.done % 25 == 0:
+                share = (self.index + min(1.0, self.done / tokens)) / variations
+                progress(0.08 + 0.88 * share, f"generating {self.index + 1} of {variations}")
+            return scores
+
+    def make(index: int, on: str) -> "np.ndarray":
+        nonlocal model
+        model = model.to(on)
+        inputs = processor(text=[job["prompt"]], padding=True, return_tensors="pt").to(on)
+        torch.manual_seed(int(job.get("seed", 0)) + index)
+        with torch.no_grad():
+            audio = model.generate(**inputs, do_sample=True, guidance_scale=3.0,
+                                   max_new_tokens=tokens,
+                                   logits_processor=LogitsProcessorList([Progress(index)]))
+        return audio[0, 0].float().cpu().numpy()
+
+    out_dir = Path(job["out_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    for index in range(variations):
+        try:
+            audio = make(index, device)
+        except RuntimeError as e:  # Apple's GPU can fail where the CPU does not
+            if device == "cpu":
+                raise
+            progress(0.08, f"{device} failed ({str(e)[:80]}); on the CPU")
+            device = "cpu"
+            audio = make(index, device)
+        audio = audio[: int(seconds * rate)]
+        peak = float(np.max(np.abs(audio))) or 1.0
+        audio = audio * (10 ** (-1 / 20) / peak)
+        fade = min(len(audio), int(0.01 * rate))
+        if fade:
+            audio[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=audio.dtype)
+        path = out_dir / f"{job['stem']}{'' if variations == 1 else f'-{index + 1}'}.wav"
+        sf.write(str(path), audio, rate, subtype="PCM_24")
+        files.append(str(path))
+    return {"files": files, "rate": rate, "seconds": round(len(audio) / rate, 3),
+            "model": name, "device": device}
+
+
 def echo(job: dict) -> dict:
     """For tests: the protocol without any library."""
     import time
@@ -224,7 +294,8 @@ def echo(job: dict) -> dict:
     return job
 
 
-TASKS = {"separate": separate, "transcribe": transcribe, "embed": embed, "echo": echo}
+TASKS = {"separate": separate, "transcribe": transcribe, "embed": embed, "generate": generate,
+         "echo": echo}
 
 
 def main() -> int:

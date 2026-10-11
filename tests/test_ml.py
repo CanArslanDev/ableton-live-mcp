@@ -131,3 +131,14 @@ def test_real_transcription(tmp_path):
 def test_worker_has_no_server_imports():
     source = Path(ml.WORKER).read_text(encoding="utf-8")
     assert "MCP_Server" not in source.split('"""', 2)[2]
+
+
+def test_generation_prompts_take_the_sets_tempo_and_key_unless_given():
+    from MCP_Server import ml
+
+    assert ml.generation_prompt("lo-fi drums.", 92, "A", "Minor") == "lo-fi drums, 92 bpm, in A minor"
+    assert ml.generation_prompt("techno at 130 BPM in F minor", 120, "C", "Major") == \
+        "techno at 130 BPM in F minor"
+    assert ml.generation_prompt("ambient pad", None, None) == "ambient pad"
+    assert ml.file_stem("Dark, gritty 808 kick!", "20261011-1200") == "dark-gritty-808-kick-20261011-1200"
+    assert ml.generated_folder([]).name == "generated"
