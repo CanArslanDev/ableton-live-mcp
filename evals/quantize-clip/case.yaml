@@ -1,0 +1,31 @@
+schema_version: "1.1"
+name: quantize-clip
+description: 'Quantizes a loose clip to 16ths.'
+tags: [editing]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    The bass clip is sloppy. Quantize it to 16th notes.
+graders:
+  - name: same-notes
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:same-notes":\s*true'
+  - name: on-grid
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:on-grid":\s*true'
+  - name: nearest
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:nearest":\s*true'

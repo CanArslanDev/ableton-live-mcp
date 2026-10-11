@@ -44,7 +44,9 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
 | `MCP_Server/telemetry*.py`, `MCP_Server/dataset/` | Inherited from upstream. Inactive without the unshipped `MCP_Server/config.py`. |
-| `tests/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums). |
+| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices). Tests and the simulator use it. |
+| `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
+| `evals/` | `claude plugin eval` suite: 27 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
 | `packaging/build_mcpb.py`, `packaging/mcpb/` | Claude Desktop extension: manifest template, icon, build script (fills in version and tools). |
 | `.claude-plugin/`, `skills/` | Claude Code plugin (MCP server + skills) and its marketplace entry. |
 | `.github/workflows/` | CI (tests, lint, wheel/sdist/.mcpb) and tag-triggered GitHub releases. |
@@ -58,6 +60,9 @@ uv run ableton-mcp-install-script              # copy script into Live's User Li
 uv run ableton-mcp-install-script --sync-bundle  # copy repo script → bundled copy
 uv run ableton-mcp                             # run the MCP server (stdio)
 uv run ableton-mcp-doctor                      # diagnose versions, copies, connection, Live log
+uv run ableton-mcp-simulator                   # a fake Live set to run the server against
+claude plugin eval . --scaffold --allow-real-servers \
+  --allow-tools "mcp__plugin_ableton-live_ableton__*" --ablation none -j 4   # evals/
 uvx ruff check .                               # lint (rules in pyproject.toml)
 uv run python packaging/build_mcpb.py          # dist/ableton-live-mcp-<version>.mcpb (needs Node.js)
 claude plugin validate .                       # plugin manifest + skills
@@ -341,7 +346,12 @@ Measured on Live 12.3.8:
 
 - `tests/test_lom_bridge.py` drives the script's handlers directly and, in the
   `live_server` fixture, runs the real TCP server + real MCP tools against
-  `fake_live.FakeSong`. Extend `fake_live.py` when a tool touches new LOM
-  surface.
+  `fake_live.FakeSong`. Extend `MCP_Server/fake_live.py` when a tool touches
+  new LOM surface; its undo follows `journal.py`'s rules, so keep both in step
+  with what Live does.
+- `tests/test_evals.py` runs a scripted correct solution of every eval case
+  through the real server's tools against the simulator; a new case needs one
+  in `SOLUTIONS`. The server takes Live's port from the session file
+  (`connection.live_port`), which is how eval runs find their simulator.
 - Anything that depends on real Live behaviour (undo, routing objects, recording)
   must also be checked against a running Live before claiming it works.

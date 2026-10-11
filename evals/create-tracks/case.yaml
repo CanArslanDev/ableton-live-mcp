@@ -1,0 +1,31 @@
+schema_version: "1.1"
+name: create-tracks
+description: 'Creates and names a MIDI and an audio track.'
+tags: [tracks]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Add a MIDI track called Lead Synth and an audio track called Guitar DI.
+graders:
+  - name: lead-synth
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:lead-synth":\s*true'
+  - name: guitar-di
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:guitar-di":\s*true'
+  - name: others-kept
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:others-kept":\s*true'

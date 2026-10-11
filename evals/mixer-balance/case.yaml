@@ -1,0 +1,38 @@
+schema_version: "1.1"
+name: mixer-balance
+description: 'Volume, pan and a send by their displayed values.'
+tags: [mixing]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Mixing time: bring the Bass down to -6 dB, pan the Vox 20% left, and send the Vox to the
+    reverb return at about -12 dB.
+graders:
+  - name: bass-volume
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:bass-volume":\s*true'
+  - name: vox-pan
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:vox-pan":\s*true'
+  - name: vox-reverb-send
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:vox-reverb-send":\s*true'
+  - name: drums-untouched
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:drums-untouched":\s*true'

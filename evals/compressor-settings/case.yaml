@@ -1,0 +1,31 @@
+schema_version: "1.1"
+name: compressor-settings
+description: 'Adds a device and sets it by display.'
+tags: [mixing, devices]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Put a compressor on the Vox track with a 4:1 ratio and the threshold at -20 dB.
+graders:
+  - name: compressor
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:compressor":\s*true'
+  - name: ratio
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:ratio":\s*true'
+  - name: threshold
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:threshold":\s*true'

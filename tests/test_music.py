@@ -364,3 +364,17 @@ def test_euclidean_rhythms():
     kicks = [n["start_time"] for n in notes if n["pitch"] == 36]
     assert kicks == [0.0, 0.75, 1.5, 2.0, 2.75, 3.5]
     assert [n["velocity"] for n in notes if n["pitch"] == 36][:2] == [120, 100]
+
+
+def test_a_makam_melody_arrives_through_its_first_tetrachord():
+    # Hicaz on D: G F# Eb D, so its augmented second is always heard
+    for seed in range(40):
+        notes = music.melody("D", "hicaz", 4, "D2", "D4", seed=seed)
+        assert [n["pitch"] % 12 for n in notes[-4:]] == [7, 6, 3, 2], seed
+        assert all(50 <= n["pitch"] <= 74 for n in notes)  # D2..D4, C3 = 60 as in Live
+    # Rast on G (the key may name the makam): C B A G
+    tail = music.melody("G rast", None, 2, "G2", "G4", seed=1)[-4:]
+    assert [n["pitch"] % 12 for n in tail] == [0, 11, 9, 7]
+    # Western scales still just end on the tonic
+    assert all(music.melody("A", "minor", 4, seed=s)[-1]["pitch"] % 12 == 9 for s in range(20))
+    assert music.names_makam("D", "hicaz") and not music.names_makam("D", "hijaz")

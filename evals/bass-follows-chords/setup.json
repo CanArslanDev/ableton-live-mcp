@@ -1,0 +1,119 @@
+[
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set",
+   "method": "create_midi_track",
+   "args": [
+    -1
+   ]
+  }
+ },
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set tracks 3",
+   "property": "name",
+   "value": "Keys"
+  }
+ },
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set tracks 3 clip_slots 0",
+   "method": "create_clip",
+   "args": [
+    16.0
+   ]
+  }
+ },
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set tracks 3 clip_slots 0 clip",
+   "property": "name",
+   "value": "Chords"
+  }
+ },
+ {
+  "type": "clip_write_notes",
+  "params": {
+   "track_index": 3,
+   "clip_index": 0,
+   "notes": [
+    {
+     "pitch": 57,
+     "start_time": 0,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 60,
+     "start_time": 0,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 64,
+     "start_time": 0,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 53,
+     "start_time": 4,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 57,
+     "start_time": 4,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 60,
+     "start_time": 4,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 55,
+     "start_time": 8,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 60,
+     "start_time": 8,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 64,
+     "start_time": 8,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 55,
+     "start_time": 12,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 59,
+     "start_time": 12,
+     "duration": 4,
+     "velocity": 100
+    },
+    {
+     "pitch": 62,
+     "start_time": 12,
+     "duration": 4,
+     "velocity": 100
+    }
+   ]
+  }
+ }
+]

@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: usul-aksak
+description: 'An usul and its meter.'
+tags: [composing, turkish, drums]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Put the aksak usul on the Drums track and set the time signature to match it.
+graders:
+  - name: meter
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:meter":\s*true'
+  - name: pattern
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:pattern":\s*true'

@@ -1,14 +1,19 @@
-"""A small in-memory imitation of Live's Object Model for tests.
+"""A small in-memory imitation of Live's Object Model, for the tests and the
+simulator (simulator.py).
 
 Covers what the bridge and the extended tools touch: song, tracks, mixer,
 devices, parameters, clip slots, clips with the Live 11 note API, scenes,
 views and property listeners. Objects carry ``_live_ptr`` like real LOM
-objects, so the bridge treats them as Live objects.
+objects, so the bridge treats them as Live objects. Parameter names follow
+Live 12.4 ("Output", "1 Q A"); displays imitate Live's closely enough for
+setting values by display.
 """
 
 import math
 import sys
 import types
+
+from .journal import NO_UNDO_PROPERTIES, PARAMETER_PROPERTIES
 
 
 class FakeEnum(int):
@@ -34,6 +39,10 @@ class FakeEnum(int):
 
 WarpMode = FakeEnum.define("WarpMode", ["beats", "tones", "texture", "re_pitch", "complex",
                                         "rex", "complex_pro"])
+Quantization = FakeEnum.define("Quantization", [
+    "q_no_q", "q_8_bars", "q_4_bars", "q_2_bars", "q_bar", "q_half", "q_half_triplet",
+    "q_quarter", "q_quarter_triplet", "q_eight", "q_eight_triplet", "q_sixtenth",
+    "q_sixtenth_triplet", "q_thirtytwoth"])
 RecordingQuantization = FakeEnum.define("RecordingQuantization", [
     "rec_q_no_q", "rec_q_quarter", "rec_q_eight", "rec_q_eight_triplet",
     "rec_q_eight_eight_triplet", "rec_q_sixtenth", "rec_q_sixtenth_triplet",
@@ -49,7 +58,8 @@ def install_fake_live_module():
     live = types.ModuleType("Live")
     live.Clip = types.SimpleNamespace(MidiNoteSpecification=MidiNoteSpecification,
                                       WarpMode=WarpMode)
-    live.Song = types.SimpleNamespace(RecordingQuantization=RecordingQuantization)
+    live.Song = types.SimpleNamespace(RecordingQuantization=RecordingQuantization,
+                                      Quantization=Quantization)
     sys.modules["Live"] = live
     return live
 
@@ -116,8 +126,8 @@ def freq_display(value):
 
 
 class FakeEnvelope(FakeObj):
-    def __init__(self):
-        super(FakeEnvelope, self).__init__(steps=[])
+    def __init__(self, parameter=None):
+        super(FakeEnvelope, self).__init__(steps=[], parameter=parameter)
 
     def insert_step(self, time, duration, value):
         self.steps.append((time, duration, value))
@@ -170,7 +180,7 @@ class FakeClip(FakeObj):
         return self.envelopes.get(id(param))
 
     def create_automation_envelope(self, param):
-        env = FakeEnvelope()
+        env = FakeEnvelope(param)
         self.envelopes[id(param)] = env
         return env
 
@@ -244,13 +254,106 @@ def _drum_rack():
     return rack
 
 
+def _log_display(low, high, unit_low, unit_high=None, split=1000.0, digits=2):
+    """A logarithmic control (frequency, time) shown like Live: "90.0 Hz", "10.0 kHz"."""
+    def show(value):
+        amount = low * (high / low) ** value
+        if unit_high and amount >= split:
+            return "%.*f %s" % (digits, amount / split, unit_high)
+        return "%.*f %s" % (digits if amount < 100 else 1, amount, unit_low)
+    return show
+
+
+def _hz(name, value=0.5):
+    return FakeParam(name, value, display=_log_display(10.0, 22000.0, "Hz", "kHz"))
+
+
+def _db(name, value=0.0, low=-36.0, high=36.0):
+    return FakeParam(name, value, low, high, display=lambda v: "%.1f dB" % v)
+
+
+def _percent(name, value=0.0, high=100.0):
+    return FakeParam(name, value, 0.0, high, display=lambda v: "%.0f %%" % v)
+
+
+def _ms(name, value=0.5, low=0.1, high=1000.0):
+    return FakeParam(name, value, display=_log_display(low, high, "ms", "s"))
+
+
+def _choice(name, items, index=0):
+    return FakeParam(name, index, 0, len(items) - 1, items=list(items))
+
+
+def _switch(name, on=False):
+    return _choice(name, ["Off", "On"], 1 if on else 0)
+
+
+EQ_FILTER_TYPES = ["High Pass 48dB", "High Pass 12dB", "Low Shelf", "Bell", "Notch",
+                   "High Shelf", "Low Pass 12dB", "Low Pass 48dB"]
+
+
+def _eq_eight():
+    params = []
+    for band, kind, hz in ((1, 0, 0.05), (2, 2, 0.3), (3, 3, 0.45), (4, 3, 0.6),
+                           (5, 3, 0.7), (6, 3, 0.8), (7, 5, 0.85), (8, 7, 0.95)):
+        params += [_switch("%d Filter On A" % band, band not in (1, 8)),
+                   _choice("%d Filter Type A" % band, EQ_FILTER_TYPES, kind),
+                   _hz("%d Frequency A" % band, hz),
+                   _db("%d Gain A" % band, 0.0, -15.0, 15.0),
+                   FakeParam("%d Q A" % band, 0.71, 0.1, 18.0)]
+    return FakeDevice("EQ Eight", "Eq8", params + [_db("Output", 0.0, -12.0, 12.0)])
+
+
+def _instrument(name, class_name):
+    return lambda: FakeDevice(name, class_name, [
+        _hz("Filter Freq", 0.8), FakeParam("Filter Res", 0.2), _db("Volume", -12.0, -70.0, 6.0)])
+
+
 # What Track.insert_device builds (Live 12.3+), by browser name
 INSERTABLE = {
     "Drum Rack": _drum_rack,
     "Compressor": _compressor,
     "Utility": lambda: FakeDevice("Utility", "StereoGain", [
         FakeParam("Bass Mono", 0, 0, 1, items=["Off", "On"]),
-        FakeParam("Gain", 0.0, -1.0, 1.0)]),
+        FakeParam("Gain", 0.0, -1.0, 1.0),
+        FakeParam("Bass Freq", 0.3, display=_log_display(50.0, 500.0, "Hz")),
+        _percent("Stereo Width", 100.0, 400.0), _switch("Mono")]),
+    "EQ Eight": _eq_eight,
+    "Saturator": lambda: FakeDevice("Saturator", "Saturator", [
+        _db("Drive", 0.0, -36.0, 36.0),
+        _choice("Type", ["Analog Clip", "Soft Sine", "Bass Shaper", "Medium Curve",
+                         "Hard Curve", "Sinoid Fold", "Digital Clip", "Waveshaper"]),
+        _db("Output", 0.0, -36.0, 0.0), _percent("Dry/Wet", 100.0)]),
+    "Glue Compressor": lambda: FakeDevice("Glue Compressor", "GlueCompressor", [
+        _db("Threshold", 0.0, -40.0, 0.0),
+        _choice("Ratio", ["2", "4", "10"]),
+        _choice("Attack", [".01", ".1", ".3", "1", "3", "10", "30"], 3),
+        _choice("Release", [".1", ".2", ".4", ".6", ".8", "1.2", "A"], 6),
+        _db("Output", 0.0, -20.0, 20.0), _percent("Dry/Wet", 100.0)]),
+    "Drum Buss": lambda: FakeDevice("Drum Buss", "DrumBuss", [
+        _percent("Drive"), _percent("Crunch"), FakeParam("Transients", 0.0, -1.0, 1.0),
+        _percent("Boom"), _db("Output", 0.0, -36.0, 12.0), _percent("Dry/Wet", 100.0)]),
+    "Reverb": lambda: FakeDevice("Reverb", "Reverb", [
+        FakeParam("Decay Time", 0.4, display=_log_display(0.2, 60.0, "s")),
+        _ms("Predelay", 0.3, 0.5, 250.0), FakeParam("Size", 50.0, 0.22, 500.0),
+        _percent("Dry/Wet", 50.0)]),
+    "Delay": lambda: FakeDevice("Delay", "Delay", [
+        _percent("Feedback", 40.0), _hz("Filter Freq", 0.6), _percent("Dry/Wet", 50.0)]),
+    "Chorus-Ensemble": lambda: FakeDevice("Chorus-Ensemble", "Chorus2", [
+        FakeParam("Rate", 0.3, display=_log_display(0.01, 20.0, "Hz")), _percent("Amount", 50.0),
+        _percent("Dry/Wet", 50.0)]),
+    "Auto Filter": lambda: FakeDevice("Auto Filter", "AutoFilter2", [
+        _choice("Filter Type", ["Lowpass", "Highpass", "Bandpass", "Notch", "Morph"]),
+        _hz("Frequency", 0.9), _percent("Resonance", 20.0), _percent("LFO Amount"),
+        _percent("Dry/Wet", 100.0)]),
+    "Limiter": lambda: FakeDevice("Limiter", "Limiter", [
+        _db("Gain", 0.0, -24.0, 24.0), _db("Ceiling", 0.0, -24.0, 0.0),
+        _choice("Mode", ["Standard", "Soft Clip", "True Peak"])]),
+    "Operator": _instrument("Operator", "Operator"),
+    "Drift": _instrument("Drift", "Drift"),
+    "Wavetable": _instrument("Wavetable", "InstrumentVector"),
+    "Analog": _instrument("Analog", "UltraAnalog"),
+    "Simpler": _instrument("Simpler", "OriginalSimpler"),
 }
 
 
@@ -306,7 +409,99 @@ class FakeTrack(FakeObj):
         return device
 
 
+# ── Undo history, by the rules measured on Live 12.4 (see journal.py) ───────
+
+# Bookkeeping of the fakes themselves, never part of an undo step
+_NOT_SET_STATE = frozenset(["_listeners", "undo_log", "calls", "_undo", "_redo", "_open_step"])
+_MISSING = object()
+
+
+def _capture(root):
+    """The state of every FakeObj reachable from root: {id: (obj, {attr: value})},
+    lists and dicts copied so later changes to them show."""
+    seen = {}
+    stack = [root]
+    while stack:
+        obj = stack.pop()
+        if isinstance(obj, (list, tuple)):
+            stack.extend(obj)
+            continue
+        if not isinstance(obj, FakeObj) or id(obj) in seen:
+            continue
+        state = {}
+        for key, value in vars(obj).items():
+            if key in _NOT_SET_STATE:
+                continue
+            if isinstance(value, list):
+                state[key] = list(value)
+                stack.extend(value)
+            elif isinstance(value, dict):
+                state[key] = dict(value)
+                stack.extend(value.values())
+            else:
+                state[key] = value
+                stack.append(value)
+        seen[id(obj)] = (obj, state)
+    return seen
+
+
+def _same(a, b):
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(x is y or x == y for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(a[k] is b[k] or a[k] == b[k] for k in a)
+    return a is b or a == b
+
+
+def _changes(before, after):
+    """(obj, attr, old, new) for each attribute that changed and Live would undo."""
+    found = []
+    for key, (obj, old_state) in before.items():
+        if key not in after:
+            continue  # no longer in the set: the list that held it changed
+        new_state = after[key][1]
+        for attr in set(old_state) | set(new_state):
+            if attr in NO_UNDO_PROPERTIES:
+                continue
+            old, new = old_state.get(attr, _MISSING), new_state.get(attr, _MISSING)
+            if not _same(old, new):
+                found.append((obj, attr, old, new))
+    return found
+
+
+def _apply(changes, use_old):
+    for obj, attr, old, new in changes:
+        value = old if use_old else new
+        current = vars(obj).get(attr, _MISSING)
+        if value is _MISSING:
+            vars(obj).pop(attr, None)
+        elif isinstance(value, list) and isinstance(current, list):
+            current[:] = value
+        elif isinstance(value, dict) and isinstance(current, dict):
+            current.clear()
+            current.update(value)
+        else:
+            setattr(obj, attr, value)
+
+
+# Live 12's Key & Scale names and their intervals (scale_intervals follows scale_name)
+LIVE_SCALES = {
+    "Major": [0, 2, 4, 5, 7, 9, 11], "Minor": [0, 2, 3, 5, 7, 8, 10],
+    "Dorian": [0, 2, 3, 5, 7, 9, 10], "Mixolydian": [0, 2, 4, 5, 7, 9, 10],
+    "Lydian": [0, 2, 4, 6, 7, 9, 11], "Phrygian": [0, 1, 3, 5, 7, 8, 10],
+    "Locrian": [0, 1, 3, 5, 6, 8, 10], "Harmonic Minor": [0, 2, 3, 5, 7, 8, 11],
+    "Melodic Minor": [0, 2, 3, 5, 7, 9, 11], "Major Pentatonic": [0, 2, 4, 7, 9],
+    "Minor Pentatonic": [0, 3, 5, 7, 10], "Whole Tone": [0, 2, 4, 6, 8, 10],
+    "Phrygian Dominant": [0, 1, 4, 5, 7, 8, 10], "Minor Blues": [0, 3, 5, 6, 7, 10],
+}
+
+
 class FakeSong(FakeObj):
+    def __setattr__(self, name, value):
+        FakeObj.__setattr__(self, name, value)
+        if name == "scale_name" and value in LIVE_SCALES:
+            FakeObj.__setattr__(self, "scale_intervals", list(LIVE_SCALES[value]))
+
     def __init__(self):
         tracks = [FakeTrack("Drums", devices=[FakeDevice(
                       "Kit", "DrumGroupDevice",
@@ -331,23 +526,59 @@ class FakeSong(FakeObj):
             scenes=[FakeObj(name="Intro", tempo=120.0), FakeObj(name="Drop", tempo=120.0)],
             cue_points=[], swing_amount=0.0, metronome=False, record_mode=False,
             midi_recording_quantization=RecordingQuantization(0),
-            root_note=0, scale_name="Major", scale_intervals=[0, 2, 4, 5, 7, 9, 11])
+            clip_trigger_quantization=Quantization(4), groove_amount=1.0,
+            session_record=False, arrangement_overdub=False, session_automation_record=False,
+            root_note=0, scale_name="Major", scale_mode=False,
+            scale_intervals=[0, 2, 4, 5, 7, 9, 11])
         object.__setattr__(self, "view", FakeObj(selected_track=tracks[0], detail_clip=None))
         object.__setattr__(self, "undo_log", [])
+        object.__setattr__(self, "_undo", [])
+        object.__setattr__(self, "_redo", [])
+        object.__setattr__(self, "_open_step", None)
 
+    # Like Live 12.4: what changed between begin and end becomes one step for
+    # parameter changes and one for the rest; nothing changed, no step
     def begin_undo_step(self):
         self.undo_log.append("begin")
+        object.__setattr__(self, "_open_step", _capture(self))
 
     def end_undo_step(self):
         self.undo_log.append("end")
+        before = self._open_step
+        object.__setattr__(self, "_open_step", None)
+        if before is None:
+            return
+        changes = _changes(before, _capture(self))
+        steps = [[c for c in changes if c[1] not in PARAMETER_PROPERTIES],
+                 [c for c in changes if c[1] in PARAMETER_PROPERTIES]]
+        steps = [s for s in steps if s]
+        if steps:
+            self._undo.extend(steps)
+            del self._redo[:]
 
-    can_undo = True
+    @property
+    def can_undo(self):
+        return bool(self._undo)
+
+    @property
+    def can_redo(self):
+        return bool(self._redo)
+
+    def _step(self, source, target, use_old):
+        if source:
+            changes = source.pop()
+            _apply(changes, use_old)
+            target.append(changes)
+        if self._open_step is not None:  # the undo itself is no new step
+            object.__setattr__(self, "_open_step", _capture(self))
 
     def undo(self):
         self.undo_log.append("undo")
+        self._step(self._undo, self._redo, True)
 
     def redo(self):
         self.undo_log.append("redo")
+        self._step(self._redo, self._undo, False)
 
     def delete_scene(self, index):
         del self.scenes[index]
@@ -385,8 +616,20 @@ class FakeSong(FakeObj):
         else:
             self.scenes.insert(index, scene)
 
+    def start_playing(self):
+        self.is_playing = True
+
+    def continue_playing(self):
+        self.is_playing = True
+
     def stop_playing(self):
         self.is_playing = False
+
+    def stop_all_clips(self, quantized=True):
+        for track in self.tracks:
+            for slot in track.clip_slots:
+                if slot.clip is not None:
+                    slot.clip.is_playing = False
 
 
 class FakeBrowserItem(FakeObj):

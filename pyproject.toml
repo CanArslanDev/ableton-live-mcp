@@ -45,6 +45,7 @@ dataset = ["supabase>=2.0.0"]
 ableton-mcp = "MCP_Server.server:main"
 ableton-mcp-install-script = "MCP_Server.remote_script_install:main"
 ableton-mcp-doctor = "MCP_Server.doctor:main"
+ableton-mcp-simulator = "MCP_Server.simulator:main"
 
 [project.urls]
 Homepage = "https://github.com/CanArslanDev/ableton-live-mcp"

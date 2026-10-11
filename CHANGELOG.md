@@ -8,12 +8,19 @@
   session and, with `undo=N`, takes back exactly the undo steps those changes
   made, counted the way Live 12.4 records them (parameter and other changes
   are separate steps; unchanged values, transport, selection, arm and solo
-  make none). Parameter
-  changes leave an automatic snapshot (the last 10), which still works after
-  the user edited the set. The seven generators, `transform_clip_notes` and
-  `apply_midi_tool` take `preview=true`. Deleting a track, scene, clip or
-  device asks the user first in clients with MCP elicitation, in both
-  protocol versions.
+  make none). Parameter changes leave an automatic snapshot (the last 10),
+  which still works after the user edited the set. The seven generators,
+  `transform_clip_notes` and `apply_midi_tool` take `preview=true`. Deleting a
+  track, scene, clip or device asks the user first in clients with MCP
+  elicitation, in both protocol versions.
+- **Simulator.** `ableton-mcp-simulator` runs the real Remote Script over an
+  in-memory Live set (with an undo history that follows Live's rules), so the
+  server and its tools work without Ableton; `--state-file` keeps the set as
+  JSON.
+- **Eval suite** (`evals/`): 27 `claude plugin eval` cases, each against a
+  fresh simulated set, graded by deterministic checks of the resulting set
+  (plus the reply where wording matters). A scripted correct solution of
+  every case runs in the tests.
 
 ### Changed
 
@@ -26,6 +33,17 @@
   profile. Results are compact JSON (a quarter to a half smaller), and notes
   come as rows under `note_columns` (an 8-bar melody: 885 characters instead
   of about 4,100).
+- The server takes Live's port from the session file the Remote Script
+  writes (`ABLETON_PORT` still wins).
+- Makam melodies arrive on the karar through the makam's first tetrachord
+  (G F# Eb D in Hicaz on D), so its characteristic intervals are always
+  heard; before, one 4-bar Hicaz melody in five never played its F#.
+
+### Fixed
+
+- A server started before Live refused `create_locator` and the other tools
+  that check the Remote Script's capabilities until it was restarted: the
+  capabilities are now taken from every connection's hello.
 
 ## 2.0.0 — 2026-10-11
 

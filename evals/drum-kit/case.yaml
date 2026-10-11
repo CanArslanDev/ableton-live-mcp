@@ -1,0 +1,50 @@
+schema_version: "1.1"
+name: drum-kit
+description: 'A Drum Rack built from one-shot samples.'
+tags: [drums, browser]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Build me a drum kit on a new MIDI track called Kit 2, using an 808 kick, a tight snare,
+    and closed and open hi-hats from my samples.
+graders:
+  - name: track
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:track":\s*true'
+  - name: drum-rack
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:drum-rack":\s*true'
+  - name: kick
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:kick":\s*true'
+  - name: snare
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:snare":\s*true'
+  - name: closed-hat
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:closed-hat":\s*true'
+  - name: open-hat
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:open-hat":\s*true'

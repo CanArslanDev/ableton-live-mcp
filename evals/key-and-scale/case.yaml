@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: key-and-scale
+description: 'Sets Live 12''s Key & Scale.'
+tags: [session]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    My next song is in D Dorian. Set the project's key and scale to that.
+graders:
+  - name: root
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:root":\s*true'
+  - name: scale
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:scale":\s*true'

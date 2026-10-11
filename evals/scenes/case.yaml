@@ -1,0 +1,31 @@
+schema_version: "1.1"
+name: scenes
+description: 'Creates named scenes.'
+tags: [session]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Create two new scenes called Verse and Chorus.
+graders:
+  - name: verse
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:verse":\s*true'
+  - name: chorus
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:chorus":\s*true'
+  - name: kept
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:kept":\s*true'

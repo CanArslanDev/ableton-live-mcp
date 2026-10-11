@@ -120,6 +120,21 @@ def scale_intervals(scale: str | Iterable[int]) -> list[int]:
     return SCALES[key]
 
 
+def names_makam(key: str, scale: str | Iterable[int] | None = None) -> bool:
+    """Whether the scale (or the one the key names, "D hicaz") is a Turkish makam."""
+    if scale is None:
+        parts = key.strip().split(None, 1)
+        scale = parts[1] if len(parts) > 1 else None
+    if not isinstance(scale, str):
+        return False
+    name = scale.strip().lower().replace(" ", "_").replace("-", "_")
+    if _SCALE_ALIASES.get(name, name) in SCALES:
+        return False
+    from . import turkish
+
+    return turkish.find_makam(scale) is not None
+
+
 def parse_key(key: str, scale: str | Iterable[int] | None = None) -> tuple[int, list[int]]:
     """"A minor" / "F#m" / "Eb" (+ optional scale) → (root pitch class, intervals)."""
     text = key.strip()
@@ -643,12 +658,18 @@ def melody(key: str, scale: str | Iterable[int] | None = None, bars: int = 4,
                 if candidates:
                     pitch = min(candidates, key=lambda p: abs(p - pitch))
             notes.append(_note(pitch, beat, d * 0.95, velocity + (8 if t == 0 else 0)))
-    # Resolve the phrase onto the tonic
+    # Resolve the phrase onto the tonic. A makam arrives on its karar through
+    # its first tetrachord, the descent that names it (G F# Eb D in Hicaz on D)
     if notes:
-        last = notes[-1]
-        tonic = min((p for p in pool if p % 12 == root), key=lambda p: abs(p - last["pitch"]),
-                    default=last["pitch"])
-        last["pitch"] = tonic
+        steps = [3, 2, 1, 0] if names_makam(key, scale) and len(intervals) >= 4 else [0]
+        tail = notes[-len(steps):]
+        steps = steps[len(steps) - len(tail):]
+        tonics = [p for p in pool if p % 12 == root and p + intervals[steps[0]] <= pool[-1]] \
+            or [p for p in pool if p % 12 == root]
+        if tonics:
+            tonic = min(tonics, key=lambda p: abs(p - tail[-1]["pitch"]))
+            for note, step in zip(tail, steps):
+                note["pitch"] = tonic + intervals[step]
     return notes
 
 

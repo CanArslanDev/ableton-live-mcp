@@ -15,10 +15,9 @@ from .dataset import dataset_enabled, get_recorder
 from .dataset.trajectory_decorator import trajectory_tool
 from .tooling import register_tool
 from .ui import ui_extension
-from .connection import AbletonCommandError, AbletonConnection  # noqa: F401  (re-exported)
+from .connection import AbletonCommandError, AbletonConnection, live_port  # noqa: F401  (re-exported)
 
 ABLETON_HOST = os.environ.get("ABLETON_HOST", "localhost")
-ABLETON_PORT = int(os.environ.get("ABLETON_PORT", "9877"))
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -231,8 +230,9 @@ def _get_ableton_connection_locked():
         last_error = None
         for attempt in range(1, max_attempts + 1):
             try:
-                logger.info(f"Connecting to Ableton at {ABLETON_HOST}:{ABLETON_PORT} (attempt {attempt}/{max_attempts})...")
-                _ableton_connection = AbletonConnection(host=ABLETON_HOST, port=ABLETON_PORT)
+                port = live_port()
+                logger.info(f"Connecting to Ableton at {ABLETON_HOST}:{port} (attempt {attempt}/{max_attempts})...")
+                _ableton_connection = AbletonConnection(host=ABLETON_HOST, port=port)
                 if _ableton_connection.connect():
                     logger.info("Created new persistent connection to Ableton")
                     return _ableton_connection

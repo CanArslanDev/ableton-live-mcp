@@ -277,7 +277,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 292 tests, no Live or models required
+uv run --with pytest pytest -q            # 329 tests, no Live or models required
 (cd extension && npm ci && npm test)       # the Extensions SDK add-on
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb
@@ -289,10 +289,27 @@ CI (`.github/workflows/ci.yml`) runs the tests on macOS and Linux with Python
 the sdist and the `.mcpb`. Pushing a `v<version>` tag publishes them as a GitHub
 release.
 
-`tests/fake_live.py` is an in-memory imitation of the Live Object Model; the
-end-to-end tests run the real Remote Script TCP server and the real MCP tools
-against it. See [CLAUDE.md](CLAUDE.md) for the conventions (the bundled script
-copy, version bumps, main-thread rules, Live quirks).
+`MCP_Server/fake_live.py` is an in-memory imitation of the Live Object Model;
+the end-to-end tests run the real Remote Script TCP server and the real MCP
+tools against it. See [CLAUDE.md](CLAUDE.md) for the conventions (the bundled
+script copy, version bumps, main-thread rules, Live quirks).
+
+### Without Live: the simulator and the eval suite
+
+`uv run ableton-mcp-simulator` serves that imitation through the real Remote
+Script, the way Live does, so the server and its tools run without Ableton
+(no sound; the browser holds a few samples). Point a server at it with
+`ABLETON_MCP_SESSION_FILE=~/.ableton-mcp/simulator-session.json`.
+
+[`evals/`](evals/README.md) holds 27 `claude plugin eval` cases (mixing,
+composing, makams and usuls, arrangement, safety) that run the plugin's real
+server against a fresh simulated set each time and check the resulting set,
+not the reply:
+
+```bash
+claude plugin eval . --scaffold --allow-real-servers \
+  --allow-tools "mcp__plugin_ableton-live_ableton__*" --ablation none -j 4
+```
 
 ## Privacy
 

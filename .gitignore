@@ -72,3 +72,6 @@ local_tests/
 
 # Lock files (optional - uncomment if you don't want to track)
 # uv.lock
+
+# Eval runs (claude plugin eval)
+evals/results/

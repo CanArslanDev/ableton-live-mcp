@@ -3078,9 +3078,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         from . import doctor as diagnostics
 
+        from .connection import live_port
+
         host = os.environ.get("ABLETON_HOST", "127.0.0.1")
-        port = int(os.environ.get("ABLETON_PORT", "9877"))
-        return to_json(diagnostics.run("127.0.0.1" if host == "localhost" else host, port))
+        return to_json(diagnostics.run("127.0.0.1" if host == "localhost" else host, live_port()))
 
     @tool(idempotent=True)
     def install_remote_script() -> str:

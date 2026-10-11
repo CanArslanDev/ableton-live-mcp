@@ -56,6 +56,19 @@ def script_version_ok() -> bool:
     return str(info.get("script_version") or "") == EXPECTED_REMOTE_SCRIPT_VERSION
 
 
+def remember(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep what the script reported about itself (its hello reply, or
+    get_script_info): every connection refreshes it, so a server started
+    before Live, or a script updated since, is seen as it is now."""
+    global _script_info, _handshake_done
+    info = dict(result, expected_version=EXPECTED_REMOTE_SCRIPT_VERSION, error=None,
+                up_to_date=str(result.get("script_version") or "") == EXPECTED_REMOTE_SCRIPT_VERSION)
+    with _lock:
+        _script_info = info
+        _handshake_done = True
+    return info
+
+
 def handshake(send_command) -> dict[str, Any]:
     """Query Live for script info. On old scripts, get_script_info is unknown."""
     global _script_info, _handshake_done

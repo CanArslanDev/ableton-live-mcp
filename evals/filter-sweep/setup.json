@@ -1,0 +1,53 @@
+[
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set tracks 1 clip_slots 0",
+   "method": "create_clip",
+   "args": [
+    16.0
+   ]
+  }
+ },
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set tracks 1 clip_slots 0 clip",
+   "property": "name",
+   "value": "Riff"
+  }
+ },
+ {
+  "type": "clip_write_notes",
+  "params": {
+   "track_index": 1,
+   "clip_index": 0,
+   "notes": [
+    {
+     "pitch": 40,
+     "start_time": 0,
+     "duration": 2,
+     "velocity": 100
+    },
+    {
+     "pitch": 43,
+     "start_time": 4,
+     "duration": 2,
+     "velocity": 100
+    },
+    {
+     "pitch": 45,
+     "start_time": 8,
+     "duration": 2,
+     "velocity": 100
+    },
+    {
+     "pitch": 47,
+     "start_time": 12,
+     "duration": 2,
+     "velocity": 100
+    }
+   ]
+  }
+ }
+]

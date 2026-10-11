@@ -60,6 +60,14 @@ def read_session() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def live_port() -> int:
+    """ABLETON_PORT, else the port the Remote Script published, else 9877."""
+    if os.environ.get("ABLETON_PORT"):
+        return int(os.environ["ABLETON_PORT"])
+    port = (read_session() or {}).get("port")
+    return port if isinstance(port, int) and 0 < port < 65536 else 9877
+
+
 def session_token() -> str | None:
     """ABLETON_MCP_TOKEN wins (for setups where the file is out of reach)."""
     return os.environ.get("ABLETON_MCP_TOKEN") or (read_session() or {}).get("token")
@@ -116,6 +124,10 @@ class AbletonConnection:
             self.protocol, self.script_info = 1, None
             return
         self.protocol = 2
+        if isinstance(self.script_info, dict) and self.script_info.get("script_version"):
+            from .script_handshake import remember
+
+            remember(self.script_info)
 
     def disconnect(self) -> None:
         with self._lock:

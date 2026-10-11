@@ -1,0 +1,65 @@
+[
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set tracks 1 clip_slots 0",
+   "method": "create_clip",
+   "args": [
+    4.0
+   ]
+  }
+ },
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set tracks 1 clip_slots 0 clip",
+   "property": "name",
+   "value": "Loose"
+  }
+ },
+ {
+  "type": "clip_write_notes",
+  "params": {
+   "track_index": 1,
+   "clip_index": 0,
+   "notes": [
+    {
+     "pitch": 40,
+     "start_time": 0.03,
+     "duration": 0.2,
+     "velocity": 100
+    },
+    {
+     "pitch": 40,
+     "start_time": 0.98,
+     "duration": 0.2,
+     "velocity": 100
+    },
+    {
+     "pitch": 43,
+     "start_time": 1.52,
+     "duration": 0.2,
+     "velocity": 100
+    },
+    {
+     "pitch": 45,
+     "start_time": 2.04,
+     "duration": 0.2,
+     "velocity": 100
+    },
+    {
+     "pitch": 47,
+     "start_time": 2.71,
+     "duration": 0.2,
+     "velocity": 100
+    },
+    {
+     "pitch": 45,
+     "start_time": 3.26,
+     "duration": 0.2,
+     "velocity": 100
+    }
+   ]
+  }
+ }
+]

@@ -1,0 +1,18 @@
+[
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set",
+   "property": "root_note",
+   "value": 2
+  }
+ },
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set",
+   "property": "scale_name",
+   "value": "Minor"
+  }
+ }
+]

@@ -16,8 +16,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import fake_live  # noqa: E402
+from MCP_Server import fake_live
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1320,14 +1319,34 @@ def test_agent_changes_lists_and_undoes_exactly_what_a_call_made(live_server):
     assert len(call("agent_changes")["changes"]) == 2
 
     undos = song.undo_log.count("undo")
+    bass = song.tracks[1]
     result = call("agent_changes", undo=1)
     assert song.undo_log.count("undo") - undos == made
     assert [c["tool"] for c in result["undone"]] == ["generate_chord_progression"]
+    # The fake undoes like Live: the clip is gone, the volume change made before stays
+    assert not bass.clip_slots[3].has_clip
+    assert bass.mixer_device.volume.str_for_value(bass.mixer_device.volume.value) == "-6.0 dB"
     assert call("agent_changes", undo=5)["undo_steps"] == 1  # only the mixer change is left
+    assert bass.mixer_device.volume.value == 0.85
     with pytest.raises(Exception, match="Nothing of the agent's to undo"):
         call("agent_changes", undo=1)
     # The undo itself is not recorded as a change
     assert [c.get("undone") for c in call("agent_changes")["changes"]] == [True, True]
+
+
+def test_changes_that_live_keeps_out_of_its_undo_history_are_not_counted(live_server):
+    from MCP_Server import journal
+
+    journal.clear()
+    script, call = live_server
+    call("set_track_mixer", track="Bass", volume_db=-6)
+    call("set_track_mixer", track="Bass", volume_db=-6, solo=True)  # same volume; solo: no step
+    call("transport", action="play")
+    # Listed for its snapshot (solo changed), but nothing for Live's undo; playing: not at all
+    assert [(c["tool"], c["undo_steps"]) for c in call("agent_changes")["changes"]] == [
+        ("set_track_mixer", 0), ("set_track_mixer", 1)]
+    assert call("agent_changes", undo=1)["undo_steps"] == 1
+    assert script._song.tracks[1].mixer_device.volume.value == 0.85
 
 
 def test_a_snapshot_restore_keeps_the_state_it_replaces(live_server):

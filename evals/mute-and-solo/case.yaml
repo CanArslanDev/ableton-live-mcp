@@ -1,0 +1,31 @@
+schema_version: "1.1"
+name: mute-and-solo
+description: 'Mute one track, solo another, leave the rest.'
+tags: [mixing]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Mute the drums and solo the vocal track.
+graders:
+  - name: drums-muted
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:drums-muted":\s*true'
+  - name: vox-solo
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:vox-solo":\s*true'
+  - name: bass-untouched
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:bass-untouched":\s*true'

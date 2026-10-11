@@ -1,0 +1,32 @@
+schema_version: "1.1"
+name: arrangement-layout
+description: 'Session clips laid out as sections.'
+tags: [arrangement]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Lay out the arrangement from my Session clips: 4 bars of just drums, then 8 bars of drums
+    and bass.
+graders:
+  - name: drums-all-along
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:drums-all-along":\s*true'
+  - name: bass-from-bar-5
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:bass-from-bar-5":\s*true'
+  - name: no-bass-in-intro
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:no-bass-in-intro":\s*true'

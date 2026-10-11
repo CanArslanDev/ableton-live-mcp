@@ -1,0 +1,26 @@
+schema_version: "1.1"
+name: euclidean-hats
+description: 'A Euclidean rhythm, E(5,8).'
+tags: [composing, drums]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    On the Drums track, give the closed hi-hat a Euclidean rhythm: 5 hits spread as evenly as
+    possible over 8 sixteenth-note steps.
+graders:
+  - name: hats-written
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:hats-written":\s*true'
+  - name: five-of-eight
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:five-of-eight":\s*true'

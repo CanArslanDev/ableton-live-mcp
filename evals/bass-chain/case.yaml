@@ -1,0 +1,31 @@
+schema_version: "1.1"
+name: bass-chain
+description: 'A processing chain for a bass.'
+tags: [mixing, devices]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Set up a typical mixing chain on the Bass track.
+graders:
+  - name: chain
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:chain":\s*true'
+  - name: compression
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:compression":\s*true'
+  - name: eq
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:eq":\s*true'

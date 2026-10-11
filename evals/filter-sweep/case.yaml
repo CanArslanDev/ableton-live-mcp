@@ -1,0 +1,32 @@
+schema_version: "1.1"
+name: filter-sweep
+description: 'Clip automation of a device parameter.'
+tags: [automation]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Add a filter sweep to the bass clip: the Operator's filter should open from closed to
+    fully open over the clip's four bars.
+graders:
+  - name: envelope
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:envelope":\s*true'
+  - name: opens
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:opens":\s*true'
+  - name: over-four-bars
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:over-four-bars":\s*true'

@@ -296,10 +296,13 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Diagnose the Ableton MCP setup.")
     parser.add_argument("--host", default=os.environ.get("ABLETON_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("ABLETON_PORT", "9877")))
+    parser.add_argument("--port", type=int, default=None,
+                        help="Live's port (default: ABLETON_PORT, else the one Live published)")
     parser.add_argument("--json", action="store_true", help="print the raw JSON report")
     args = parser.parse_args(argv)
-    report = run(args.host, args.port)
+    from .connection import live_port
+
+    report = run(args.host, args.port or live_port())
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:

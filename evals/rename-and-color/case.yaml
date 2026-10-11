@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: rename-and-color
+description: 'Renames and recolors a track.'
+tags: [tracks]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 30
+  timeout_seconds: 300
+  prompt: |
+    Rename the Vox track to Lead Vocal and make it red.
+graders:
+  - name: renamed
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:renamed":\s*true'
+  - name: red
+    type: regex
+    target:
+      source: file
+      path: checks.json
+    pattern: '"check:red":\s*true'
