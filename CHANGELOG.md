@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `manage_track` lists its actions (`create_midi`, `create_audio`,
+  `create_return`, `delete`, …) as an enum in its input schema, so a client
+  or a registry sees what it can do without reading the description. An
+  unknown action is refused with the list of valid ones; actions are now
+  matched exactly (lowercase).
+
+### Fixed
+
+- The .mcpb manifest summed up `lom_call_method` as "Call any LOM method,
+  e.g.": a tool's summary no longer ends at "e.g." or "i.e.".
+
 ## 2.1.0 — 2026-10-11
 
 The Remote Script is unchanged (2.0.0): no reinstall or Live restart needed.

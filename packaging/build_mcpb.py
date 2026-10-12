@@ -45,10 +45,11 @@ def project_version() -> str:
 
 
 def _summary(description: str | None, limit: int = 200) -> str:
-    """The first sentence of a tool description, on one line."""
+    """The first sentence of a tool description, on one line ("e.g." and "i.e."
+    do not end it)."""
     paragraph = (description or "").strip().split("\n\n")[0]
     text = " ".join(paragraph.split())
-    match = re.match(r"(.+?[.:;])(\s|$)", text)
+    match = re.match(r"(.+?(?<!\be\.g)(?<!\bi\.e)[.:;])(\s|$)", text)
     sentence = match.group(1) if match else text
     sentence = sentence.rstrip(":;") + ("." if sentence.endswith((":", ";")) else "")
     return sentence if len(sentence) <= limit else sentence[:limit - 1].rstrip() + "…"

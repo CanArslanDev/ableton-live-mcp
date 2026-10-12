@@ -63,6 +63,9 @@ def test_tool_summary_is_the_first_sentence():
     assert summary("Do a thing. Then more.\n\nDetails") == "Do a thing."
     assert summary("Kinds of edit:\n- a\n- b") == "Kinds of edit."
     assert summary("x " * 200).endswith("…")
+    # an abbreviation is not the end of the sentence
+    assert summary('Call any method, e.g. path="a"; then more.') == 'Call any method, e.g. path="a".'
+    assert summary("Keep it, i.e. leave it. More.") == "Keep it, i.e. leave it."
 
 
 def test_mcpb_stage_has_what_uv_needs(tmp_path):

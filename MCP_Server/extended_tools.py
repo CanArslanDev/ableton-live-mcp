@@ -24,7 +24,7 @@ import shlex
 import tempfile
 import time
 from pathlib import Path
-from typing import Annotated, Any, Callable
+from typing import Annotated, Any, Callable, Literal
 
 from mcp.server.elicitation import AcceptedElicitation, ElicitationResult
 from mcp.server.mcpserver import Context
@@ -1055,19 +1055,18 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return to_json(batch_summary(batch(ops)))
 
     @tool(destructive=True)
-    def manage_track(action: str, track: int | str | None = None, name: str | None = None,
+    def manage_track(action: Literal["create_midi", "create_audio", "create_return", "delete",
+                                     "duplicate", "rename", "set_color", "fold", "unfold"],
+                     track: int | str | None = None, name: str | None = None,
                      color: str | int | None = None, index: int = -1,
                      go_ahead: Annotated[ElicitationResult[_Confirm],
                                         Resolve(ask_track_delete)] = GO_AHEAD) -> str:
         """Create, delete, duplicate, rename, recolor or fold tracks.
 
-        action: create_midi | create_audio | create_return | delete | duplicate |
-                rename | set_color | fold | unfold
         - index: insert position for create_* (-1 = end)
         - color: hex "#RRGGBB" or a Live color index (0-69)
         """
         require_go_ahead(go_ahead)
-        action = action.lower()
         if action in ("create_midi", "create_audio", "create_return"):
             ops = []
             if action == "create_return":

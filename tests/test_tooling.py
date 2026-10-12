@@ -35,6 +35,14 @@ def test_core_profile_drops_duplicated_original_tools(monkeypatch):
     assert "get_session_overview" in tools
 
 
+def test_manage_track_lists_its_actions_in_the_schema(monkeypatch):
+    # create_midi_track is not in the core profile; the schema shows what replaces it
+    tools = _server_tools(monkeypatch, "core")
+    action = tools["manage_track"].input_schema["properties"]["action"]
+    assert {"create_midi", "create_audio", "create_return", "delete"} <= set(action["enum"])
+    assert "lom_call_method" in tools
+
+
 def test_full_profile_keeps_every_original_tool(monkeypatch):
     tools = _server_tools(monkeypatch, "full")
     for name in ("set_tempo", "fire_clip", "get_clip_notes", "create_midi_track",
