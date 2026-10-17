@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 2.1.2 — 2026-10-17
+
+### Added
+
+- `build_tracks` builds Drum Racks (a sample per pad, with settings), audio
+  tracks with clips that start at the file's start (Live's warp analysis
+  otherwise moves them to the first transient), mute, and Simplers with
+  warping off. A sample named with its extension is found by exact name,
+  waiting up to `sample_wait_s` for Live to list a file just written. Checked
+  in Live 12.4.2: reference-dissector's PIRAMIT plan (an 808, six drum pads,
+  675 notes, five stems) builds in 4.9 s, every setting as planned.
 
 ### Fixed
 

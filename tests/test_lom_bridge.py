@@ -1079,6 +1079,29 @@ def test_build_tracks_builds_a_set_from_a_spec(live_server):
     assert "sidechain from Nowhere" in again["tracks"][1]["problems"][0]
 
 
+def test_build_tracks_drum_rack_and_audio_tracks(live_server, tmp_path):
+    import numpy as np
+    import soundfile as sf
+    script, call = live_server
+    song = script._song
+    stem = tmp_path / "drums.wav"
+    sf.write(stem, np.zeros((4410, 2)), 44100)
+    spec = [{"name": "Drums", "instrument": {"drum_rack": {
+                "36": {"sample": "Kick 808 Long.wav", "settings": {"Volume": "0.0 dB"}},
+                "42": {"sample": "hihat closed"}}},
+             "clips": [{"start": 0, "length": 4, "notes": [{"pitch": 36, "start_time": 0, "duration": 1}]}]},
+            {"name": "REF drums", "kind": "audio", "mute": True,
+             "audio_clips": [{"file": str(stem), "start": 0.0}]}]
+    result = call("build_tracks", tracks=spec, replace=True, sample_wait_s=0)
+    drums, ref = result["tracks"]
+    assert not drums["problems"] and not ref["problems"], result
+    assert drums["instrument"]["36"].endswith("Kick 808 Long.wav")
+    assert drums["instrument"]["42"].endswith("Hihat Closed 1.wav")
+    track = next(t for t in song.tracks if t.name == "REF drums")
+    assert track.mute and ref["audio_clips"][0]["warping"] is False
+    assert ref["audio_clips"][0]["start_marker"] == 0.0
+
+
 def test_build_drum_kit_fills_general_midi_pads(live_server):
     script, call = live_server
     song = script._song

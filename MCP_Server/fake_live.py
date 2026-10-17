@@ -829,7 +829,8 @@ class FakeBrowser(FakeObj):
         pad = rack.view.selected_drum_pad if rack is not None else None
         stem = item.name.rsplit(".", 1)[0]
         if pad is not None:
-            pad.chains = [FakeObj(name=stem)]
+            # as in Live: the pad's chain holds a Simpler with the sample
+            pad.chains = [FakeObj(name=stem, devices=[FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5))])]
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:
