@@ -249,6 +249,10 @@ class FakeClipSlot(FakeObj):
         self.clip = None
         self.has_clip = False
 
+    def stop(self):
+        if self.clip is not None:
+            self.clip.is_playing = False
+
     def duplicate_clip_to(self, target):
         target.clip = FakeClip(name=self.clip.name, length=self.clip.length)
         target.has_clip = True
@@ -790,6 +794,21 @@ class FakeSong(FakeObj):
             for slot in track.clip_slots:
                 if slot.clip is not None:
                     slot.clip.is_playing = False
+
+
+class FakeAppView(FakeObj):
+    """Application.view: which views were shown or focused, in order."""
+    def __init__(self):
+        super(FakeAppView, self).__init__(shown=[])
+
+    def show_view(self, name):
+        self.shown.append(name)
+
+    def focus_view(self, name):
+        self.shown.append(name)
+
+    def is_view_visible(self, name):
+        return name in self.shown
 
 
 class FakeBrowserItem(FakeObj):

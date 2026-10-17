@@ -50,11 +50,11 @@ def test_full_profile_keeps_every_original_tool(monkeypatch):
         assert name in tools
 
 
-def test_dataset_tools_need_recording_to_be_possible(monkeypatch):
-    # No MCP_Server/config.py in the repository, so telemetry is off
+def test_no_dataset_tools(monkeypatch):
+    # the upstream telemetry/dataset recorder was removed (2.2.0)
     tools = _server_tools(monkeypatch, "full")
-    for name in ("set_dataset_consent", "submit_intent", "rate_last_action",
-                 "record_audition"):
+    for name in ("set_dataset_consent", "submit_intent", "rate_last_action", "prefer_candidate",
+                 "reject_last_action", "record_audition"):
         assert name not in tools
 
 

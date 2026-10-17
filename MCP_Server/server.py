@@ -9,10 +9,6 @@ import threading
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List, Union
 
-from .telemetry import is_telemetry_enabled, record_startup
-from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
-from .dataset import dataset_enabled, get_recorder
-from .dataset.trajectory_decorator import trajectory_tool
 from .tooling import register_tool
 from .ui import ui_extension
 from .connection import AbletonCommandError, AbletonConnection, live_port  # noqa: F401  (re-exported)
@@ -30,12 +26,6 @@ async def server_lifespan(server: MCPServer) -> AsyncIterator[Dict[str, Any]]:
     try:
         logger.info("AbletonMCP server starting up")
 
-        # Record startup event for telemetry
-        try:
-            record_startup()
-        except Exception as e:
-            logger.debug(f"Failed to record startup telemetry: {e}")
-
         script_info = None
         try:
             ableton = get_ableton_connection()
@@ -47,66 +37,13 @@ async def server_lifespan(server: MCPServer) -> AsyncIterator[Dict[str, Any]]:
             logger.warning(f"Could not connect to Ableton on startup: {str(e)}")
             logger.warning("Make sure the Ableton Remote Script is running")
 
-        if dataset_enabled():
-            try:
-                recorder = get_recorder()
-                if recorder:
-                    logger.info(
-                        "Dataset recording enabled → Supabase session %s",
-                        recorder.session_id,
-                    )
-                from .script_handshake import script_has_capability
-                from .dataset.passive_poller import start_passive_poller
-
-                # Runs even without Live-UI events: it also settles implicit
-                # preferences for agent actions.
-                start_passive_poller()
-                if not script_has_capability("drain_passive_events"):
-                    logger.warning(
-                        "Passive Live listeners unavailable — Remote Script outdated "
-                        "or not loaded. Restart Ableton after script update."
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to start dataset recorder: {e}")
-        else:
-            reason = "unknown"
-            try:
-                from .config import telemetry_config  # noqa: F401
-                from .telemetry import get_telemetry_consent, is_telemetry_enabled
-
-                if not is_telemetry_enabled():
-                    reason = "telemetry disabled (config.enabled=False or DISABLE_TELEMETRY)"
-                elif not get_telemetry_consent():
-                    reason = "no dataset consent yet — the user has not opted in"
-                else:
-                    reason = "ABLETON_MCP_DISABLE_DATASET or unexpected gate failure"
-            except Exception:
-                reason = "MCP_Server/config.py missing or unreadable (gitignored; required for Supabase)"
-            logger.info("Dataset recording off — %s", reason)
-
         yield {"script_info": script_info}
     finally:
         global _ableton_connection
-        try:
-            from .dataset.passive_poller import stop_passive_poller
-
-            stop_passive_poller()
-        except Exception as e:
-            logger.debug(f"Failed to stop passive poller: {e}")
         if _ableton_connection:
             logger.info("Disconnecting from Ableton on shutdown")
             _ableton_connection.disconnect()
             _ableton_connection = None
-        try:
-            recorder = get_recorder()
-            if recorder:
-                # Bounded wait so queued rows land before the daemon worker
-                # is killed at exit.
-                recorder.end(timeout=float(
-                    os.environ.get("ABLETON_MCP_DATASET_FLUSH_SEC", "5")
-                ))
-        except Exception as e:
-            logger.debug(f"Failed to end dataset session: {e}")
         logger.info("AbletonMCP server shut down")
 
 def _package_version() -> str:
@@ -151,19 +88,6 @@ def legacy_tool(tier: str, **hints):
     """
     def decorate(fn):
         return register_tool(mcp, fn, tier=tier, legacy=True, **hints)
-    return decorate
-
-
-def dataset_tool(**hints):
-    """Register a dataset-recording tool, but only where recording can happen.
-
-    Without MCP_Server/config.py (it is not in this repository) these tools
-    could only answer that recording is off, so they are left out.
-    """
-    def decorate(fn):
-        if not is_telemetry_enabled():
-            return fn
-        return register_tool(mcp, fn, legacy=True, **hints)
     return decorate
 
 
@@ -215,14 +139,6 @@ def _get_ableton_connection_locked():
             except Exception:
                 pass
             _ableton_connection = None
-            # Passive events stop arriving while disconnected, so any cached
-            # state hash may describe a Live session that has since moved on.
-            try:
-                recorder = get_recorder()
-                if recorder:
-                    recorder.invalidate_cached_state()
-            except Exception:
-                pass
     
     # Connection doesn't exist or is invalid, create a new one
     if _ableton_connection is None:
@@ -261,68 +177,7 @@ def _get_ableton_connection_locked():
 
 # Core Tool endpoints
 
-@dataset_tool(idempotent=True)
-def set_dataset_consent(ctx: Context, consent: bool, user_said: str = "") -> str:
-    """Record the user's answer to the dataset consent question.
-
-    Call this ONLY after the user has answered in their own words. Never infer
-    the answer, never call it on their behalf, and never call it because
-    contributing seems helpful — consent the user did not give is not consent.
-    If they have not been asked yet, ask first and wait for their reply.
-
-    Parameters:
-    - consent: True if the user agreed to contribute, False if they declined
-    - user_said: The user's reply, quoted as closely as possible
-    """
-    # Intentionally undecorated: recording this call would mean collecting data
-    # from someone who may have just declined.
-    try:
-        from .dataset.consent import record_consent
-
-        state = record_consent(consent, quote=user_said)
-    except Exception as e:
-        logger.error(f"Could not record dataset consent: {str(e)}")
-        return f"Error recording consent: {str(e)}"
-
-    if not consent:
-        return (
-            "Recorded: dataset contribution declined. Nothing is uploaded, and "
-            "you will not be asked again."
-        )
-
-    try:
-        from .telemetry import refresh_consent_from_dataset
-
-        refresh_consent_from_dataset()
-        recorder = get_recorder()
-        # Under opt-in the poller is almost never started at boot — consent did
-        # not exist yet — so a grant has to start it here or passive Live events
-        # would be missed for the rest of the session. Idempotent and
-        # self-gating, so this is safe even if startup did start it.
-        from .dataset.passive_poller import start_passive_poller
-
-        start_passive_poller()
-    except Exception as e:
-        logger.error(f"Consent saved but recording failed to start: {str(e)}")
-        return (
-            "Consent saved, but recording could not start in this session. "
-            "It will begin after a restart."
-        )
-
-    if recorder is None:
-        return (
-            "Consent saved, but recording is unavailable (telemetry may be "
-            f"disabled). State: {state}."
-        )
-    return (
-        "Thank you — this session is now being contributed to the open dataset. "
-        "Say so at any time to stop, or set ABLETON_MCP_DISABLE_DATASET=1."
-    )
-
-
 @legacy_tool("full", read_only=True)
-@telemetry_tool("get_session_info")
-@trajectory_tool("get_session_info")
 def get_session_info(ctx: Context) -> str:
     """Get detailed information about the current Ableton session
     """
@@ -336,8 +191,6 @@ def get_session_info(ctx: Context) -> str:
 
 
 @legacy_tool("full", read_only=True)
-@telemetry_tool("get_remote_script_info")
-@trajectory_tool("get_remote_script_info", modifying=False)
 def get_remote_script_info(ctx: Context) -> str:
     """
     Report Ableton Remote Script version and capabilities (handshake).
@@ -358,8 +211,6 @@ def get_remote_script_info(ctx: Context) -> str:
         return f"Error getting remote script info: {str(e)}"
 
 @legacy_tool("full", read_only=True)
-@telemetry_tool("get_track_info")
-@trajectory_tool("get_track_info")
 def get_track_info(ctx: Context, track_index: int) -> str:
     """
     Get detailed information about a specific track in Ableton.
@@ -377,8 +228,6 @@ def get_track_info(ctx: Context, track_index: int) -> str:
 
 
 @legacy_tool("full", read_only=True)
-@telemetry_tool("get_clip_notes")
-@trajectory_tool("get_clip_notes")
 def get_clip_notes(
     ctx: Context,
     track_index: int,
@@ -411,8 +260,6 @@ def get_clip_notes(
 
 
 @legacy_tool("full", read_only=True)
-@telemetry_tool("get_device_parameters")
-@trajectory_tool("get_device_parameters")
 def get_device_parameters(
     ctx: Context,
     track_index: int,
@@ -438,8 +285,6 @@ def get_device_parameters(
 
 
 @legacy_tool("full", idempotent=True)
-@rich_telemetry_tool("set_device_parameter")
-@trajectory_tool("set_device_parameter")
 def set_device_parameter(
     ctx: Context,
     track_index: int,
@@ -479,19 +324,16 @@ def set_device_parameter(
 
 
 @legacy_tool("full", read_only=True)
-@telemetry_tool("get_session_snapshot")
-@trajectory_tool("get_session_snapshot")
 def get_session_snapshot(
     ctx: Context,
     include_notes: bool = True,
     include_params: bool = True,
 ) -> str:
     """
-    Capture a full project state snapshot for trajectory recording.
+    Capture a full project state snapshot.
 
     Includes session metadata, every track (mixer, devices, session clips,
     arrangement clips), optional MIDI notes, and optional device parameters.
-    Used to version musical state S_t → S_{t+1}.
 
     Parameters:
     - include_notes: Include MIDI note arrays in clips (default True)
@@ -518,8 +360,6 @@ def get_session_snapshot(
 
 
 @legacy_tool("full")
-@telemetry_tool("create_midi_track")
-@trajectory_tool("create_midi_track")
 def create_midi_track(ctx: Context, index: int = -1) -> str:
     """
     Create a new MIDI track in the Ableton session.
@@ -537,8 +377,6 @@ def create_midi_track(ctx: Context, index: int = -1) -> str:
 
 
 @legacy_tool("full")
-@telemetry_tool("create_audio_track")
-@trajectory_tool("create_audio_track")
 def create_audio_track(ctx: Context, index: int = -1) -> str:
     """
     Create a new audio track in the Ableton session.
@@ -559,8 +397,6 @@ def create_audio_track(ctx: Context, index: int = -1) -> str:
 
 
 @legacy_tool("full", idempotent=True)
-@rich_telemetry_tool("set_track_name")
-@trajectory_tool("set_track_name")
 def set_track_name(ctx: Context, track_index: int, name: str) -> str:
     """
     Set the name of a track.
@@ -578,8 +414,6 @@ def set_track_name(ctx: Context, track_index: int, name: str) -> str:
         return f"Error setting track name: {str(e)}"
 
 @legacy_tool("full")
-@rich_telemetry_tool("create_clip")
-@trajectory_tool("create_clip")
 def create_clip(ctx: Context, track_index: int, clip_index: int, length: float = 4.0) -> str:
     """
     Create a new MIDI clip in the specified track and clip slot.
@@ -602,8 +436,6 @@ def create_clip(ctx: Context, track_index: int, clip_index: int, length: float =
         return f"Error creating clip: {str(e)}"
 
 @legacy_tool("core")
-@rich_telemetry_tool("create_audio_clip")
-@trajectory_tool("create_audio_clip")
 def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str) -> str:
     """
     Create a new audio clip in an audio track's clip slot by importing a file.
@@ -631,8 +463,6 @@ def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str
         return f"Error creating audio clip: {str(e)}"
 
 @legacy_tool("full")
-@rich_telemetry_tool("add_notes_to_clip", capture_notes=True)
-@trajectory_tool("add_notes_to_clip")
 def add_notes_to_clip(
     ctx: Context,
     track_index: int,
@@ -660,7 +490,6 @@ def add_notes_to_clip(
         return f"Error adding notes to clip: {str(e)}"
 
 @legacy_tool("full", destructive=True)
-@rich_telemetry_tool("clear_notes_from_clip")
 def clear_notes_from_clip(
     ctx: Context,
     track_index: int,
@@ -701,8 +530,6 @@ def clear_notes_from_clip(
         return f"Error clearing notes from clip: {str(e)}"
 
 @legacy_tool("full", idempotent=True)
-@rich_telemetry_tool("set_clip_name")
-@trajectory_tool("set_clip_name")
 def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str) -> str:
     """
     Set the name of a clip.
@@ -725,8 +552,6 @@ def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str) ->
         return f"Error setting clip name: {str(e)}"
 
 @legacy_tool("full", idempotent=True)
-@rich_telemetry_tool("set_arrangement_clip_name")
-@trajectory_tool("set_arrangement_clip_name")
 def set_arrangement_clip_name(ctx: Context, track_index: int, clip_index: int, name: str) -> str:
     """
     Set the name of a clip placed in the Arrangement timeline.
@@ -750,8 +575,6 @@ def set_arrangement_clip_name(ctx: Context, track_index: int, clip_index: int, n
         return f"Error setting arrangement clip name: {str(e)}"
 
 @legacy_tool("full", idempotent=True)
-@rich_telemetry_tool("set_tempo")
-@trajectory_tool("set_tempo")
 def set_tempo(ctx: Context, tempo: float) -> str:
     """
     Set the tempo of the Ableton session.
@@ -769,8 +592,6 @@ def set_tempo(ctx: Context, tempo: float) -> str:
 
 
 @legacy_tool("full")
-@rich_telemetry_tool("load_instrument_or_effect")
-@trajectory_tool("load_instrument_or_effect")
 def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
     """
     Load an instrument or effect onto a track using its URI.
@@ -801,8 +622,6 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
         return f"Error loading instrument by URI: {str(e)}"
 
 @legacy_tool("full")
-@telemetry_tool("fire_clip")
-@trajectory_tool("fire_clip")
 def fire_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Start playing a clip.
@@ -823,8 +642,6 @@ def fire_clip(ctx: Context, track_index: int, clip_index: int) -> str:
         return f"Error firing clip: {str(e)}"
 
 @legacy_tool("full")
-@telemetry_tool("stop_clip")
-@trajectory_tool("stop_clip")
 def stop_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Stop playing a clip.
@@ -846,7 +663,6 @@ def stop_clip(ctx: Context, track_index: int, clip_index: int) -> str:
 
 
 @legacy_tool("full", destructive=True)
-@telemetry_tool("delete_clip")
 def delete_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Delete the clip in the given clip slot, freeing it for reuse.
@@ -876,8 +692,6 @@ def delete_clip(ctx: Context, track_index: int, clip_index: int) -> str:
 
 
 @legacy_tool("full")
-@telemetry_tool("start_playback")
-@trajectory_tool("start_playback")
 def start_playback(ctx: Context) -> str:
     """Start playing the Ableton session.
     """
@@ -890,8 +704,6 @@ def start_playback(ctx: Context) -> str:
         return f"Error starting playback: {str(e)}"
 
 @legacy_tool("full")
-@telemetry_tool("stop_playback")
-@trajectory_tool("stop_playback")
 def stop_playback(ctx: Context) -> str:
     """Stop playing the Ableton session.
     """
@@ -904,8 +716,6 @@ def stop_playback(ctx: Context) -> str:
         return f"Error stopping playback: {str(e)}"
 
 @legacy_tool("full", read_only=True)
-@rich_telemetry_tool("get_browser_tree")
-@trajectory_tool("get_browser_tree")
 def get_browser_tree(ctx: Context, category_type: str = "all") -> str:
     """
     Get a hierarchical tree of browser categories from Ableton.
@@ -969,8 +779,6 @@ def get_browser_tree(ctx: Context, category_type: str = "all") -> str:
             return f"Error getting browser tree: {error_msg}"
 
 @legacy_tool("full", read_only=True)
-@rich_telemetry_tool("get_browser_items_at_path")
-@trajectory_tool("get_browser_items_at_path")
 def get_browser_items_at_path(ctx: Context, path: str) -> str:
     """
     Get browser items at a specific path in Ableton's browser.
@@ -1012,8 +820,6 @@ def get_browser_items_at_path(ctx: Context, path: str) -> str:
             return f"Error getting browser items at path: {error_msg}"
 
 @legacy_tool("full")
-@rich_telemetry_tool("load_drum_kit")
-@trajectory_tool("load_drum_kit")
 def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) -> str:
     """
     Load a drum rack and then load a specific drum kit into it.
@@ -1065,8 +871,6 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
 # ── Arrangement view tools ────────────────────────────────────────────────────
 
 @legacy_tool("full", idempotent=True)
-@telemetry_tool("switch_to_arrangement_view")
-@trajectory_tool("switch_to_arrangement_view")
 def switch_to_arrangement_view(ctx: Context) -> str:
     """Switch Ableton's main window to the Arrangement view.
     """
@@ -1080,8 +884,6 @@ def switch_to_arrangement_view(ctx: Context) -> str:
 
 
 @legacy_tool("full", idempotent=True)
-@rich_telemetry_tool("set_arrangement_time")
-@trajectory_tool("set_arrangement_time")
 def set_arrangement_time(ctx: Context, time: float) -> str:
     """
     Move the arrangement playhead to a specific position.
@@ -1099,8 +901,6 @@ def set_arrangement_time(ctx: Context, time: float) -> str:
 
 
 @legacy_tool("full", read_only=True)
-@telemetry_tool("get_arrangement_clips")
-@trajectory_tool("get_arrangement_clips")
 def get_arrangement_clips(ctx: Context, track_index: int) -> str:
     """
     List all clips placed in the Arrangement timeline for a track.
@@ -1120,8 +920,6 @@ def get_arrangement_clips(ctx: Context, track_index: int) -> str:
 
 
 @legacy_tool("core")
-@rich_telemetry_tool("duplicate_to_arrangement")
-@trajectory_tool("duplicate_to_arrangement")
 def duplicate_to_arrangement(
     ctx: Context,
     track_index: int,
@@ -1154,7 +952,6 @@ def duplicate_to_arrangement(
 
 
 @legacy_tool("core", idempotent=True)
-@rich_telemetry_tool("create_locator")
 def create_locator(
     ctx: Context,
     name: str,
@@ -1186,218 +983,6 @@ def create_locator(
     except Exception as e:
         logger.error(f"Error creating locator: {str(e)}")
         return f"Error creating locator: {str(e)}"
-
-
-# ── Dataset / preference tools (Supabase trajectory recording) ─────────────────
-
-@dataset_tool()
-@telemetry_tool("submit_intent")
-@trajectory_tool("submit_intent", modifying=False)
-def submit_intent(
-    ctx: Context,
-    text: str,
-    level: int = 5,
-    user_prompt: str = "",
-) -> str:
-    """
-    Record the human's creative intent for subsequent actions in this session.
-
-    Call this before a sequence of edits so trajectory steps are conditioned on intent.
-    Levels: 1=atomic, 2=musical op, 3=section, 4=song, 5=creative goal.
-
-    Requires telemetry consent. Data is stored in Supabase (same project as telemetry).
-
-    Parameters:
-    - text: Natural-language intent (e.g. "make the chorus feel bigger")
-    - level: Hierarchical intent level 1–5 (default 5)
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
-    """
-    recorder = get_recorder()
-    if recorder is None:
-        return (
-            "Dataset recording is off (telemetry disabled or user has not consented)."
-        )
-    try:
-        event = recorder.set_intent(text=text, level=level)
-        return (
-            f"Recorded intent {event.intent_id} (level {level}): {text!r}. "
-            f"Session: {recorder.session_id}"
-        )
-    except Exception as e:
-        logger.error(f"Error submitting intent: {str(e)}")
-        return f"Error submitting intent: {str(e)}"
-
-
-@dataset_tool()
-@telemetry_tool("rate_last_action")
-@trajectory_tool("rate_last_action", modifying=False)
-def rate_last_action(
-    ctx: Context,
-    rating: str,
-    tags: str = "",
-    note: str = "",
-    user_prompt: str = "",
-) -> str:
-    """
-    Rate the most recent recorded action (or the track after an edit).
-
-    Ratings: better | same | worse | keep | reject | thumbs_up | thumbs_down
-    Optional tags (comma-separated): groove, harmony, melody, sound, arrangement,
-    energy, mix, emotion
-
-    Requires telemetry consent.
-
-    Parameters:
-    - rating: Preference label
-    - tags: Comma-separated aspect tags
-    - note: Optional free-text reason
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
-    """
-    recorder = get_recorder()
-    if recorder is None:
-        return (
-            "Dataset recording is off (telemetry disabled or user has not consented)."
-        )
-    try:
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-        event = recorder.record_preference(
-            rating=rating.strip().lower(),
-            tags=tag_list,
-            note=note or None,
-        )
-        target = event.target_action_id or "none"
-        return f"Recorded preference {rating!r} for action {target}"
-    except Exception as e:
-        logger.error(f"Error rating action: {str(e)}")
-        return f"Error rating action: {str(e)}"
-
-
-@dataset_tool()
-@telemetry_tool("prefer_candidate")
-@trajectory_tool("prefer_candidate", modifying=False)
-def prefer_candidate(
-    ctx: Context,
-    candidate_a: str,
-    candidate_b: str,
-    winner: str,
-    reason: str = "",
-    user_prompt: str = "",
-) -> str:
-    """
-    Record a pairwise preference between two candidate actions or auditions.
-
-    winner should be 'a', 'b', or an explicit candidate id matching A or B.
-
-    Requires telemetry consent.
-
-    Parameters:
-    - candidate_a: Id / URI / label for option A
-    - candidate_b: Id / URI / label for option B
-    - winner: 'a', 'b', or the winning id
-    - reason: Optional reason ("C has the right attack")
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
-    """
-    recorder = get_recorder()
-    if recorder is None:
-        return (
-            "Dataset recording is off (telemetry disabled or user has not consented)."
-        )
-    try:
-        w = winner.strip().lower()
-        if w == "a":
-            w = candidate_a
-        elif w == "b":
-            w = candidate_b
-        event = recorder.record_preference(
-            rating="pairwise",
-            winner=w,
-            candidate_a=candidate_a,
-            candidate_b=candidate_b,
-            note=reason or None,
-        )
-        return f"Recorded pairwise preference: winner={w!r} (event {event.event_id})"
-    except Exception as e:
-        logger.error(f"Error recording pairwise preference: {str(e)}")
-        return f"Error recording pairwise preference: {str(e)}"
-
-
-@dataset_tool()
-@telemetry_tool("reject_last_action")
-@trajectory_tool("reject_last_action", modifying=False)
-def reject_last_action(
-    ctx: Context,
-    reason: str = "",
-    user_prompt: str = "",
-) -> str:
-    """
-    Mark the last action as rejected (exploration / preference boundary).
-
-    Use when the human undoes or discards an agent edit. Requires telemetry consent.
-
-    Parameters:
-    - reason: Optional why it was rejected
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
-    """
-    recorder = get_recorder()
-    if recorder is None:
-        return (
-            "Dataset recording is off (telemetry disabled or user has not consented)."
-        )
-    try:
-        event = recorder.record_preference(
-            rating="reject",
-            note=reason or None,
-        )
-        return f"Recorded rejection for action {event.target_action_id or 'none'}"
-    except Exception as e:
-        logger.error(f"Error rejecting action: {str(e)}")
-        return f"Error rejecting action: {str(e)}"
-
-
-@dataset_tool()
-@rich_telemetry_tool("record_audition")
-@trajectory_tool("record_audition", modifying=False)
-def record_audition(
-    ctx: Context,
-    uri: str,
-    kept: bool = False,
-    search_query: str = "",
-    dwell_ms: float = 0.0,
-    user_prompt: str = "",
-) -> str:
-    """
-    Log a browser/preset/sample audition (keep or reject) for preference learning.
-
-    Call once per candidate auditioned. Does not load the device — use
-    load_instrument_or_effect when kept=True and you want to commit.
-
-    Requires telemetry consent.
-
-    Parameters:
-    - uri: Browser item URI (or stable preset/sample id)
-    - kept: Whether this candidate was kept
-    - search_query: Optional search text that led here (e.g. "analog bass")
-    - dwell_ms: Optional time spent auditioning
-    - user_prompt: The original user prompt that led to this tool call (for telemetry)
-    """
-    recorder = get_recorder()
-    if recorder is None:
-        return (
-            "Dataset recording is off (telemetry disabled or user has not consented)."
-        )
-    try:
-        event = recorder.record_audition(
-            uri=uri,
-            kept=kept,
-            search_query=search_query or None,
-            dwell_ms=dwell_ms if dwell_ms > 0 else None,
-        )
-        status = "kept" if kept else "rejected"
-        return f"Recorded audition ({status}) uri={uri!r} event={event.event_id}"
-    except Exception as e:
-        logger.error(f"Error recording audition: {str(e)}")
-        return f"Error recording audition: {str(e)}"
-
 
 
 from .extended_tools import register as _register_extended_tools

@@ -43,7 +43,7 @@ READ_ONLY_COMMANDS = frozenset([
     "get_browser_items_at_path", "get_arrangement_clips", "get_clip_notes",
     "get_device_parameters", "get_session_snapshot", "inspect_rack", "lom_get",
     "clip_get_notes", "get_session_overview", "list_observers", "observe", "unobserve",
-    "hello", "get_script_info", "drain_passive_events", "poll_events", "browser_search",
+    "hello", "get_script_info", "poll_events", "browser_search",
 ])
 READ_ONLY_METHODS = frozenset([
     "str_for_value", "available_main_views", "value_at_time", "events_in_range",

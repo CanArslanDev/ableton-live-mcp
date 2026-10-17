@@ -35,7 +35,6 @@ from pydantic import BaseModel, Field
 from . import journal, memory as notes_store, music, transitions
 from .connection import AbletonCommandError
 from .ui import panels as ui
-from .telemetry_decorator import telemetry_tool
 from .tooling import register_tool
 
 logger = logging.getLogger("AbletonMCPServer")
@@ -907,7 +906,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             options = dict(hints)
             if options.pop("preview", False):
                 f = previewable(f)
-            return register_tool(mcp, telemetry_tool(f.__name__)(f), **options)
+            return register_tool(mcp, f, **options)
         return decorate(fn) if fn is not None else decorate
 
     # ── Generic LOM access ───────────────────────────────────────────────────
@@ -2649,7 +2648,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             info = lom_get(dp, ["name", "class_name", "visible_macro_count",
                                 "variation_count", "selected_variation_index", "chains"])
             params = lom_get(f"{dp} parameters", ["name", "value"])["items"]
-            count = info.get("visible_macro_count") or 8
+            # an unreadable property comes back as an error dict, not a number
+            count = info.get("visible_macro_count")
+            count = count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 8
             info["macros"] = [{"macro": i, "name": p["name"], "value": p["value"]}
                               for i, p in enumerate(params[1:count + 1], start=1)]
             return to_json(info)

@@ -45,7 +45,6 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
-| `MCP_Server/telemetry*.py`, `MCP_Server/dataset/` | Inherited from upstream. Inactive without the unshipped `MCP_Server/config.py`. |
 | `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |

@@ -79,12 +79,10 @@ def build_surface(module: types.ModuleType, song: Any | None = None) -> Any:
     song = song if song is not None else fake_live.FakeSong()
     surface = module.AbletonMCP.__new__(module.AbletonMCP)
     surface._song = song
-    surface._passive_events = []
-    surface._passive_lock = threading.Lock()
     surface._lom_init()
     surface.schedule_message = lambda _delay, callback: callback()
     browser = fake_live.FakeBrowser(song)
-    application = fake_live.FakeObj(view=fake_live.FakeObj(), browser=browser)
+    application = fake_live.FakeObj(view=fake_live.FakeAppView(), browser=browser)
     surface.application = lambda: application
     surface._transport_init()
     return surface

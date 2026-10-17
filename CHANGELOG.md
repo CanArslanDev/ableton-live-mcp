@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.2.0 — 2026-10-17
+
+Remote Script 2.1.0: reinstall it (`ableton-mcp-install-script`) and restart
+Live.
+
+### Removed
+
+- The telemetry and dataset recorder inherited from upstream
+  (`MCP_Server/telemetry*.py`, `MCP_Server/dataset/`, ~3,200 lines, the
+  `dataset` extra with `supabase`). It was inactive in this fork (it needed an
+  unshipped `MCP_Server/config.py`), but it read a Supabase service key from
+  the environment and its six tools (`set_dataset_consent`, `submit_intent`,
+  `rate_last_action`, `prefer_candidate`, `reject_last_action`,
+  `record_audition`) were in the source. The server now reads no credentials.
+- The Remote Script's passive listeners (on tempo, signature, playback and
+  every track, clip slot and mixer) and `drain_passive_events`: only the
+  dataset recorder read them, and they ran in Live all the time.
+
+### Fixed
+
+- `rack_control` (info) crashed on a device that does not report
+  `visible_macro_count` (an error dict was added to a number).
+
+### Tests
+
+- Every tool is now called by at least one test (18 were not): the original
+  full-profile tools run through the real Remote Script on the fake Live.
+
 ## 2.1.2 — 2026-10-17
 
 ### Added

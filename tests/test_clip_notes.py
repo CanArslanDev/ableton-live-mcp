@@ -21,13 +21,7 @@ import MCP_Server.server as server
 
 
 def call(tool, *args, **kwargs):
-    """Invoke a tool function whichever shape it has.
-
-    @trajectory_tool returns a coroutine even around a sync tool body: the
-    dataset consent dialog is awaited, and the SDK runs a sync tool directly
-    on the event loop where that is impossible. Tools without that decorator
-    stay plain functions.
-    """
+    """Invoke a tool function, sync or async."""
     result = tool(*args, **kwargs)
     if inspect.iscoroutine(result):
         return asyncio.run(result)
@@ -63,26 +57,6 @@ def fake_conn(monkeypatch):
         monkeypatch.setattr(server, "get_ableton_connection", lambda: conn)
         return conn
     return _make
-
-
-@pytest.fixture(autouse=True)
-def _silence_telemetry(monkeypatch):
-    """Make the telemetry side-effect in the tool decorators a no-op, so tests
-    are hermetic and never touch the network."""
-    class _Dummy:
-        def record_event(self, *a, **k):
-            pass
-    import MCP_Server.telemetry_decorator as td
-    monkeypatch.setattr(td, "get_telemetry", lambda: _Dummy(), raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _no_consent_prompt(monkeypatch):
-    """A tool result gets the dataset-consent question appended while the user
-    has never been asked. That depends on the developer's own ~/.ableton-mcp
-    state, and it would corrupt the JSON these tests parse. Pin it off."""
-    import MCP_Server.dataset.consent as consent
-    monkeypatch.setattr(consent, "maybe_consent_notice", lambda: "")
 
 
 @pytest.fixture(autouse=True)

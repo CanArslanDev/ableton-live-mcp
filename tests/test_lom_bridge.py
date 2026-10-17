@@ -59,12 +59,11 @@ def script():
     module = _load_script_module()
     surface = module.AbletonMCP.__new__(module.AbletonMCP)
     surface._song = fake_live.FakeSong()
-    surface._passive_events = []
-    surface._passive_lock = __import__("threading").Lock()
     surface._lom_init()
     surface.schedule_message = lambda delay, fn: fn()
     browser = fake_live.FakeBrowser(surface._song)
-    surface.application = lambda: fake_live.FakeObj(view=fake_live.FakeObj(), browser=browser)
+    app = fake_live.FakeObj(view=fake_live.FakeAppView(), browser=browser)
+    surface.application = lambda: app
     surface.module = module
     return surface
 
@@ -1642,3 +1641,95 @@ def test_generated_audio_lands_on_a_track_a_pad_or_a_simpler(live_server, fake_m
     assert song.tracks[1].devices[-1].class_name == "OriginalSimpler"
     with pytest.raises(Exception, match="seconds must be"):
         call("generate_audio", prompt="x", seconds=60)
+
+
+# ── Every tool by name at least once (the tools no other test reached) ───────
+
+def test_generic_tools_lom_set_run_batch_select_and_theory(live_server):
+    script, call = live_server
+    song = script._song
+    call("lom_set_property", path="live_set", property="tempo", value=128.0)
+    assert song.tempo == 128.0
+    result = call("run_batch", commands=[
+        {"type": "lom_set", "params": {"path": "live_set tracks 1", "property": "name", "value": "Sub"}},
+        {"type": "lom_get", "params": {"path": "live_set", "properties": ["tempo"]}}])
+    assert song.tracks[1].name == "Sub" and result["failed"] == 0
+    assert result["results"][1]["result"]["tempo"] == 128.0
+    call("select_in_live", track="Sub")
+    assert song.view.selected_track is song.tracks[1]
+    theory = call("music_theory", key="A minor", progression="i iv v")
+    assert theory["root"] == "A" and theory["scale_notes"][2] == "C" and len(theory["progression"]) == 3
+
+
+def test_set_clip_properties_and_rack_control(live_server):
+    script, call = live_server
+    song = script._song
+    call("manage_clip", action="create_session_clip", track="Bass", clip_index=0, length=4.0)
+    call("set_clip_properties", track="Bass", clip_index=0, name="Riff", looping=True, loop_end=2.0)
+    clip = song.tracks[1].clip_slots[0].clip
+    assert clip.name == "Riff" and clip.loop_end == 2.0
+    # the fake Kit has no visible_macro_count: that used to crash (an error dict + 1)
+    info = call("rack_control", track="Drums", device="Kit")
+    assert info["name"] == "Kit" and isinstance(info["macros"], list)
+
+
+def test_audio_analysis_tools(live_server, tmp_path):
+    import numpy as np
+    import soundfile as sf
+    script, call = live_server
+    path = tmp_path / "tone.wav"
+    t = np.arange(2 * 44100) / 44100
+    sf.write(path, np.stack([0.25 * np.sin(2 * np.pi * 440 * t)] * 2, 1), 44100)
+    report = call("analyze_audio_file", path=str(path))
+    assert -20 < report["integrated_lufs"] < -10 and report["clipped_samples"] == 0
+    vox = script._song.tracks[2]
+    vox.create_audio_clip(str(path), 0.0)
+    clip_report = call("analyze_clip_audio", track="Vox", arrangement_clip_index=0)
+    assert clip_report["integrated_lufs"] == report["integrated_lufs"]
+
+
+def test_find_live_sets_and_install_midi_tools(live_server, tmp_path, monkeypatch):
+    import als_sets
+
+    from MCP_Server import als
+    script, call = live_server
+    als_sets.write_set(tmp_path / "Song Project" / "Song.als", als_sets.song())
+    found = call("find_live_sets", folder=str(tmp_path))
+    assert found["sets_found"] == 1 and found["sets"][0]["file"].endswith("Song.als")
+    library = tmp_path / "User Library"
+    library.mkdir()
+    monkeypatch.setattr(als, "_user_libraries", lambda: [library])
+    installed = call("install_midi_tools")
+    assert len(installed["installed"]) == 3 and all(p.endswith(".amxd") for p in installed["installed"])
+
+
+def test_original_tools_against_the_script(live_server, monkeypatch):
+    """The original (full-profile) tools, through the real Remote Script."""
+    import MCP_Server.script_handshake as sh
+    import MCP_Server.server as server
+    from MCP_Server.server import AbletonConnection
+    script, _call = live_server
+    song = script._song
+    connection = AbletonConnection(host="127.0.0.1", port=script.module.DEFAULT_PORT)
+    monkeypatch.setattr(server, "get_ableton_connection", lambda: connection)
+    monkeypatch.setattr(sh, "require_capability", lambda name: None)
+    try:
+        info = json.loads(server.get_track_info(None, 1))
+        assert info["name"] == "Bass"
+        params = json.loads(server.get_device_parameters(None, 1, 0))
+        assert any(p["name"] == "Filter Freq" for p in params["device"]["parameters"])
+        assert "Renamed" in server.set_track_name(None, 1, "Low")
+        assert song.tracks[1].name == "Low"
+        song.tracks[1].create_midi_clip(0.0, 4.0)
+        assert "Renamed arrangement clip" in server.set_arrangement_clip_name(None, 1, 0, "Verse")
+        assert song.tracks[1].arrangement_clips[0].name == "Verse"
+        song.tracks[1].clip_slots[0].create_clip(4.0)
+        assert "Stopped" in server.stop_clip(None, 1, 0)
+        assert json.loads(server.delete_clip(None, 1, 0))
+        assert song.tracks[1].clip_slots[0].clip is None
+        assert "Arrangement" in server.switch_to_arrangement_view(None)
+        assert script.application().view.shown[-1] == "Arranger"
+        assert "beat 8" in server.set_arrangement_time(None, 8.0)
+        assert song.current_song_time == 8.0
+    finally:
+        connection.disconnect()

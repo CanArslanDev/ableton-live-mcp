@@ -329,11 +329,10 @@ claude plugin eval . --scaffold --allow-real-servers \
 
 ## Privacy
 
-Nothing leaves your machine. The upstream project's optional telemetry and
-dataset modules are still in the code but inactive here: they need a
-credentials file (`MCP_Server/config.py`) that is not part of this repository,
-and without it no consent question is shown and nothing is sent. Set
-`ABLETON_MCP_DISABLE_TELEMETRY=true` to switch them off explicitly.
+Nothing leaves your machine. The server talks only to Live on localhost and
+reads no credentials. The upstream project's telemetry and dataset recorder
+(Supabase) were removed in 2.2.0; the Remote Script no longer installs the
+listeners that fed it.
 
 ## License
 
