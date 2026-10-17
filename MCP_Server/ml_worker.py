@@ -129,6 +129,16 @@ def separate(job: dict) -> dict:
 
 # ── Audio to MIDI (Basic Pitch) ──────────────────────────────────────────────
 
+# Basic Pitch's lowest note is A0 (MIDI 21, 27.5 Hz). A minimum frequency under
+# it turns into a negative bin index and every note is dropped: 25 Hz gave 0
+# notes on a bass stem where 30 Hz gave 232 (measured with basic-pitch 0.4.0).
+LOWEST_HZ = 27.5
+
+
+def frequency_floor(hz: float | None) -> float | None:
+    return None if hz is None else max(float(hz), LOWEST_HZ)
+
+
 def transcribe(job: dict) -> dict:
     from basic_pitch import ICASSP_2022_MODEL_PATH
     from basic_pitch.inference import Model, predict
@@ -141,7 +151,7 @@ def transcribe(job: dict) -> dict:
         onset_threshold=float(job.get("onset_threshold", 0.5)),
         frame_threshold=float(job.get("frame_threshold", 0.3)),
         minimum_note_length=float(job.get("minimum_note_ms", 127.7)),
-        minimum_frequency=job.get("minimum_frequency"),
+        minimum_frequency=frequency_floor(job.get("minimum_frequency")),
         maximum_frequency=job.get("maximum_frequency"),
         multiple_pitch_bends=False,
         melodia_trick=bool(job.get("melodia_trick", True)))

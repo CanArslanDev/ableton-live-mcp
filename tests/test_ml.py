@@ -23,6 +23,15 @@ def test_worker_protocol_round_trip():
     assert seen == [(0.5, "echo")]
 
 
+def test_a_result_far_over_64_kb_comes_back():
+    """A dense stem's notes are one JSON line of several MB (asyncio's default
+    line limit, 64 KB, failed with "Separator is found, but chunk is longer")."""
+    notes = [{"start": i * 0.01, "end": i * 0.01 + 0.2, "pitch": 60, "bend": [0] * 40}
+             for i in range(20000)]
+    result = asyncio.run(ml.run("echo", {"notes": notes}))
+    assert len(result["notes"]) == 20000
+
+
 def test_worker_errors_reach_the_caller():
     with pytest.raises(RuntimeError, match="ValueError: no model here"):
         asyncio.run(ml.run("echo", {"fail": "no model here"}))
@@ -142,3 +151,10 @@ def test_generation_prompts_take_the_sets_tempo_and_key_unless_given():
     assert ml.generation_prompt("ambient pad", None, None) == "ambient pad"
     assert ml.file_stem("Dark, gritty 808 kick!", "20261011-1200") == "dark-gritty-808-kick-20261011-1200"
     assert ml.generated_folder([]).name == "generated"
+
+
+def test_minimum_frequency_never_goes_under_basic_pitchs_lowest_note():
+    from MCP_Server import ml_worker
+    assert ml_worker.frequency_floor(25.0) == 27.5
+    assert ml_worker.frequency_floor(41.2) == 41.2
+    assert ml_worker.frequency_floor(None) is None

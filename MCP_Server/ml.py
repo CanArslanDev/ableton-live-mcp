@@ -59,6 +59,10 @@ ENVIRONMENTS = {
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
+# The worker answers with one JSON line: a dense 3-minute stem's notes (with
+# pitch bends) are several MB, far over asyncio's default 64 KB line limit
+LINE_LIMIT = 256 * 1024 * 1024
+
 
 def uv_executable() -> str:
     """uv, which set up the server too (uv sets $UV for what it runs)."""
@@ -99,7 +103,7 @@ async def run(task: str, job: dict, report: ProgressCallback | None = None,
     """Run one job and return its result; raise with the worker's message on failure."""
     process = await asyncio.create_subprocess_exec(
         *command(task), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, env=child_environment())
+        stderr=asyncio.subprocess.PIPE, env=child_environment(), limit=LINE_LIMIT)
     log: deque[str] = deque(maxlen=60)
 
     async def read_log() -> None:
