@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.1 — 2026-10-17
 
 Remote Script 2.0.1: reinstall it (`ableton-mcp-install-script`) and restart
 Live for the browser fix; everything else works with 2.0.0.
