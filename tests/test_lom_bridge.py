@@ -1048,6 +1048,37 @@ def test_browser_tools_search_load_and_preview(live_server):
     assert browser.previewing is None
 
 
+def test_build_tracks_builds_a_set_from_a_spec(live_server):
+    script, call = live_server
+    song = script._song
+    before = len(song.tracks)
+    spec = [{"name": "Kick", "instrument": {"sample": "kick 808 long"}, "volume_db": -6.0,
+             "clips": [{"start": 0, "length": 8, "name": "A",
+                        "notes": [{"pitch": "C1", "start_time": t, "duration": 1, "velocity": 100}
+                                  for t in range(8)]}]},
+            {"name": "808 Bass", "instrument": "Operator",
+             # the fake Compressor offers the set's own Drums and Bass as sidechain sources
+             "effects": [{"device": "Compressor", "settings": {"Ratio": 4.0}, "sidechain_from": "Drums"}],
+             "clips": [{"start": 16, "length": 4, "notes": [{"pitch": 24, "start_time": 0, "duration": 4}]}]}]
+    result = call("build_tracks", tracks=spec)
+    assert [r["track"] for r in result["tracks"]] == ["Kick", "808 Bass"]
+    assert all(not r["problems"] for r in result["tracks"]), result
+    assert len(song.tracks) == before + 2
+    kick, bass = song.tracks[-2], song.tracks[-1]
+    assert kick.name == "Kick" and bass.name == "808 Bass"
+    assert [d.name for d in bass.devices] == ["Operator", "Compressor"]
+    assert bass.devices[1].input_routing_type.display_name == "Drums"
+    assert result["tracks"][0]["notes"] == 8 and result["sidechains"] == 1
+    assert kick.arrangement_clips[0].name == "A"
+    assert bass.arrangement_clips[0].start_time == 16
+    # again with replace: the same two tracks, not four; a source Live does not
+    # offer is reported, not raised
+    spec[1]["effects"][0]["sidechain_from"] = "Nowhere"
+    again = call("build_tracks", tracks=spec, replace=True)
+    assert len(song.tracks) == before + 2
+    assert "sidechain from Nowhere" in again["tracks"][1]["problems"][0]
+
+
 def test_build_drum_kit_fills_general_midi_pads(live_server):
     script, call = live_server
     song = script._song

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+Remote Script 2.0.1: reinstall it (`ableton-mcp-install-script`) and restart
+Live for the browser fix; everything else works with 2.0.0.
+
+### Added
+
+- `build_tracks` builds MIDI tracks from a spec in one call: instrument (a
+  device by name or a sample from the browser), settings, effects with
+  Compressor sidechains (routed once every track exists), fader and pan, and
+  Arrangement clips with their notes. Problems (a sidechain source Live does
+  not offer, a setting that failed) are reported per track.
+- `capture_stems` lists stems that reached full scale (`clipped`, and
+  `clipped_samples` per stem); `mix_doctor` says so in its findings.
+
+### Fixed
+
+- `render_and_analyze`, `capture_stems` and `mix_doctor` recorded from
+  wherever the playhead was, not from `start_beat`: Live applies a playhead
+  move only after the command that made it, and the move and
+  `continue_playing` went in one batch. The playhead is now moved first and
+  read back.
+- `audio_to_midi` and the other ML jobs failed on results over 64 KB
+  ("Separator is found, but chunk is longer than limit"), such as a dense
+  3-minute stem's notes.
+- `audio_to_midi` returned no notes when `lowest` was under A0 (27.5 Hz,
+  Basic Pitch's lowest note); the floor is raised to it.
+- Browser ids went stale during long searches ("Unknown id"): results shared
+  the 4096-entry object registry and a walk of ~12,000 samples evicted them.
+  They now have a registry of their own (Remote Script 2.0.1).
+- `edit_clip_notes` says note times count from the clip's start (also for an
+  Arrangement clip placed later); `apply_device_chain` says Gate's sidechain
+  cannot be set from a script.
+
 ### Changed
 
 - `manage_track` lists its actions (`create_midi`, `create_audio`,

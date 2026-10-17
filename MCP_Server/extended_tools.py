@@ -2448,6 +2448,92 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         "devices": [name for name, _settings in spec["devices"]],
                         "ok": applied["ok"], "settings": applied["steps"]})
 
+    @tool(destructive=True)
+    def build_tracks(tracks: list[dict], replace: bool = False) -> str:
+        """Build MIDI tracks from a spec in one call, e.g. to rebuild a set the
+        Trial cannot save from a JSON file. Each track:
+          {"name": "Kick",
+           "instrument": "Operator" | {"sample": "<browser query or file name>"},
+           "settings": {"Volume": "0.0 dB", ...},      # on the instrument
+           "effects": [{"device": "Compressor", "settings": {...},
+                        "sidechain_from": "Kick"}],    # Compressor only
+           "volume_db": -6.0, "pan": 0.0,              # pan -1..1
+           "clips": [{"start": 0, "length": 64, "name": "A",
+                      "notes": [{"pitch": 36, "start_time": 0, "duration": 1,
+                                 "velocity": 100}]}]}  # times from the clip start
+        Settings take display text ("-12 dB", "200 ms") or raw numbers.
+        Sidechains are routed once every track exists. replace=True first
+        deletes tracks that already have these names.
+        """
+        names = [str(t["name"]) for t in tracks]
+        if len(set(names)) != len(names):
+            raise ValueError("Track names must be unique")
+        if replace:
+            existing = lom_get("live_set tracks", ["name"])["items"]
+            for index in sorted((i for i, t in enumerate(existing) if t.get("name") in names), reverse=True):
+                send("lom_call", {"path": "live_set", "method": "delete_track", "args": [index]})
+        report, sidechains = [], []
+        for spec in tracks:
+            created = send("lom_call", {"path": "live_set", "method": "create_midi_track", "args": [-1]})
+            tp = f"id {created['result']['$id']}"
+            ops = [op_set(tp, "name", spec["name"])]
+            row: dict[str, Any] = {"track": spec["name"], "problems": []}
+            instrument = spec.get("instrument")
+            if isinstance(instrument, dict) and instrument.get("sample"):
+                items = lom_get("live_set tracks", ["name"])["items"]
+                index = next(i for i, t in enumerate(items) if t.get("$id") == created["result"]["$id"])
+                item_id, label = browser_item_id(instrument["sample"], "samples")
+                loaded = load_items(index, [(None, item_id)])
+                if not loaded["ok"]:
+                    row["problems"].append(f"could not load {label}")
+                row["instrument"] = label
+                device_ids = [d["$id"] for d in lom_get(f"{tp} devices", ["name"])["items"]][:1]
+            elif instrument:
+                device_ids = inserted_device_ids(tp, [[str(instrument), 0]])
+                row["instrument"] = str(instrument)
+            else:
+                device_ids = []
+            chain = [(device_ids[0], spec.get("settings") or {})] if device_ids else []
+            effects = spec.get("effects") or []
+            if effects:
+                ids = inserted_device_ids(tp, [[fx["device"]] for fx in effects])
+                for fx, device_id in zip(effects, ids):
+                    chain.append((device_id, fx.get("settings") or {}))
+                    if fx.get("sidechain_from"):
+                        sidechains.append((device_id, str(fx["sidechain_from"]), spec["name"]))
+            for device_id, settings in chain:
+                if settings:
+                    names_map = resolve_parameter_names(f"id {device_id}", list(settings))
+                    ops += setting_ops(f"id {device_id}", settings, names_map)
+            if spec.get("volume_db") is not None:
+                ops.append(op_display(f"{tp} mixer_device volume", f"{float(spec['volume_db']):.1f} dB"))
+            if spec.get("pan") is not None:
+                ops.append(op_set(f"{tp} mixer_device panning", "value", float(spec["pan"])))
+            applied = batch_summary(batch(ops, stop_on_error=False))
+            row["problems"] += [step for step in applied["steps"] if isinstance(step, dict) and "error" in step]
+            row["devices"] = [d["name"] for d in lom_get(f"{tp} devices", ["name"])["items"]]
+            row["notes"] = 0
+            for clip in spec.get("clips") or []:
+                created_clip = send("lom_call", {"path": tp, "method": "create_midi_clip",
+                                                 "args": [float(clip["start"]), float(clip["length"])]})
+                cp = f"id {created_clip['result']['$id']}"
+                if clip.get("name"):
+                    send("lom_set", {"path": cp, "property": "name", "value": clip["name"]})
+                notes = [dict(n, pitch=music.parse_note(n["pitch"])) for n in clip.get("notes") or []]
+                for a in range(0, len(notes), 500):
+                    write_notes(cp, notes[a:a + 500], "replace" if a == 0 else "add")
+                row["notes"] += len(notes)
+            report.append(row)
+        for device_id, source, owner in sidechains:
+            device = f"id {device_id}"
+            try:
+                send("lom_set", {"path": device, "property": "input_routing_type", "value": ref(
+                    f"{device} available_input_routing_types {shlex.quote(source)}")})
+            except Exception as e:  # Gate and most devices have no sidechain input here
+                next(r for r in report if r["track"] == owner)["problems"].append(
+                    f"sidechain from {source}: {e}")
+        return to_json({"tracks": report, "sidechains": len(sidechains)})
+
     @tool(idempotent=True)
     def set_device_parameter_by_name(track: int | str, device: int | str,
                                      parameter: int | str, value: float | None = None,
