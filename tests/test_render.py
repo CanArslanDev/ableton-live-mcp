@@ -39,7 +39,9 @@ class ScriptedLive:
                 return {"tempo": 120.0, "loop": True, "loop_start": 0.0, "metronome": True,
                         "record_mode": False, "is_playing": False, "current_song_time": 4.0}
             if path == "live_set":
-                return {"current_song_time": 10_000.0}
+                # where the playhead was moved, once; then past the section's end
+                moved, self.playhead = getattr(self, "playhead", None), None
+                return {"current_song_time": 10_000.0 if moved is None else moved}
             if path == "live_set tracks":
                 return {"items": [dict(t) for t in self.tracks], "length": len(self.tracks)}
             if path == f"id {RENDER_ID} arrangement_clips":
@@ -69,6 +71,9 @@ class ScriptedLive:
                        for i, c in enumerate(commands)]
             return {"results": results, "completed": len(results), "failed": 0,
                     "total": len(commands)}
+        if command == "lom_set" and params["property"] == "current_song_time":
+            self.playhead = params["value"]
+            return {}
         if command == "lom_call" and params["method"] == "delete_track":
             index = params["args"][0]
             self.deleted.append(self.tracks.pop(index)["$id"])
@@ -194,7 +199,9 @@ class MultiLive:
                 return {"tempo": 120.0, "loop": False, "loop_start": 0.0, "metronome": False,
                         "record_mode": False, "is_playing": False, "current_song_time": 0.0}
             if path == "live_set":
-                return {"current_song_time": 10_000.0}
+                # where the playhead was moved, once; then past the section's end
+                moved, self.playhead = getattr(self, "playhead", None), None
+                return {"current_song_time": 10_000.0 if moved is None else moved}
             if path == "live_set tracks":
                 return {"items": [dict(t) for t in self.tracks]}
             if path.endswith("arrangement_clips"):
@@ -229,6 +236,9 @@ class MultiLive:
                         self.labels[track_id] = c["params"]["value"][len("MCP Rec "):]
             return {"results": [{"status": "success", "result": {}} for _ in commands],
                     "failed": 0}
+        if command == "lom_set" and params["property"] == "current_song_time":
+            self.playhead = params["value"]
+            return {}
         if command == "lom_call" and params["method"] == "delete_track":
             self.deleted.append(self.tracks.pop(params["args"][0])["$id"])
             return {}
@@ -270,3 +280,30 @@ def test_compare_to_reference_with_files(tmp_path, stem_files):
     assert report["mix"]["file"].endswith("Hats.wav")
     assert any(m["type"] == "Low Shelf" for m in report["eq_moves"])
     assert "2 Filter Type A" in report["eq_eight_settings"]
+
+
+def test_playhead_is_moved_before_playing_starts(wav):
+    """Live moves the playhead only after the command that set it returns, so the
+    move must come in its own call, before the batch that starts playing."""
+    live = ScriptedLive(wav)
+    _render(live, start_beat=32, length_beats=4)
+    moved = next(i for i, (c, p) in enumerate(live.sent)
+                 if c == "lom_set" and p["property"] == "current_song_time")
+    starts = next(i for i, (c, p) in enumerate(live.sent) if c == "batch" and any(
+        s["params"].get("method") == "continue_playing" for s in p["commands"]))
+    assert moved < starts
+    assert live.sent[moved][1]["value"] == 32.0
+    assert not any(s["params"].get("property") == "current_song_time"
+                   for s in live.sent[starts][1]["commands"])
+
+
+def test_capture_stems_reports_clipped_stems(tmp_path):
+    rate = 22050
+    t = np.arange(rate) / rate
+    loud = _stereo(np.clip(1.5 * np.sin(2 * np.pi * 110 * t), -1, 1))
+    files = {name: _write(tmp_path / f"{name}.wav", sig) for name, sig in
+             (("Kick", loud), ("Bass", 0.1 * loud), ("Hats", 0.1 * loud), ("Master", loud))}
+    result = _call(MultiLive(files), "capture_stems", length_beats=8)
+    assert set(result["clipped"]) == {"Kick", "Master"}
+    assert result["stems"]["Kick"]["clipped_samples"] > 0
+    assert "clipped_samples" not in result["stems"]["Bass"]

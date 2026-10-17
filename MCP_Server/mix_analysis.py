@@ -120,6 +120,9 @@ def masking_report(stems: dict[str, tuple[np.ndarray, int]], top: int = 8) -> di
     return {"pairs": pairs[:top], "bands": [f"{n} {lo}-{hi} Hz" for n, lo, hi in MASKING_BANDS]}
 
 
+CLIP_LEVEL = 0.9999  # ~-0.001 dBFS: a fixed-point recording's ceiling
+
+
 def stem_summary(data: np.ndarray, rate: int) -> dict:
     """Loudness, peak, low-end content and stereo picture of one stem."""
     lufs, _short, _lra = integrated_loudness(data, rate)
@@ -131,6 +134,10 @@ def stem_summary(data: np.ndarray, rate: int) -> dict:
     summary = {"lufs": lufs, "peak_dbfs": round(20 * math.log10(peak), 1) if peak > 0 else None,
                "band_energy_percent": shares,
                "main_band": max(shares, key=shares.get) if total > 1e-19 else None}
+    # recordings are fixed-point: anything that reached full scale was cut off
+    clipped = int(np.count_nonzero(np.abs(data) >= CLIP_LEVEL)) if data.size else 0
+    if clipped:
+        summary["clipped_samples"] = clipped
     if data.ndim == 2 and data.shape[1] >= 2:
         left, right = data[:, 0], data[:, 1]
         denom = float(np.sqrt((left ** 2).sum() * (right ** 2).sum()))
@@ -147,6 +154,10 @@ def stem_findings(summaries: dict[str, dict]) -> list[str]:
         if s["lufs"] <= -60:
             notes.append(f"{label}: silent in this section.")
             continue
+        if s.get("clipped_samples"):
+            notes.append(f"{label}: {s['clipped_samples']} samples reached full scale in the "
+                         "recording and were cut off — lower its level (or the master's) "
+                         "before judging it.")
         low = s["band_energy_percent"]["sub"] + s["band_energy_percent"]["low bass"]
         if low > 15 and not any(word in label.lower() for word in _LOW_END_PARTS):
             notes.append(f"{label}: {low:.0f}% of its energy is below 120 Hz — high-pass it "

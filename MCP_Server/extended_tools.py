@@ -1400,6 +1400,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - remove_ids: delete the notes in note_ids
         Note fields: pitch (MIDI or "C3"), start_time, duration, velocity (1-127),
         mute, probability (0-1), velocity_deviation (-127..127), release_velocity.
+        start_time is in beats from the clip's start, also for an Arrangement
+        clip that starts later in the song: notes past the clip's end are silent.
         """
         prepared = []
         for n in notes or []:
@@ -2421,7 +2423,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - pad: low cut, chorus, long reverb, wider image
         - master: subsonic cut, 2:1 glue, bass mono, true-peak limiter at -1 dB
         - sidechain_duck: compressor keyed from `sidechain_from` (e.g. the kick)
-        Use track="master" for the master chain.
+        Use track="master" for the master chain. Only Compressor exposes its
+        sidechain input to scripts (input_routing_type); Gate's cannot be set.
         """
         from . import device_recipes
 
@@ -3880,8 +3883,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 begin += [op_call(f"id {i} clip_slots {slot}", "fire", float(length_beats))
                           for i in temp.values()]
             else:
+                # Live moves the playhead only after the command that set it
+                # returns: moved in the same batch as continue_playing, the
+                # section played from wherever the playhead was. Move it first.
+                await move_playhead(start)
                 begin += [op_set("live_set", "loop", False),
-                          op_set("live_set", "current_song_time", start),
                           op_set("live_set", "record_mode", True),
                           op_call("live_set", "continue_playing")]
             seconds = length_beats * 60.0 / float(song["tempo"])
@@ -3942,6 +3948,20 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         else:
             section["start_beat"] = start
         return {"files": files, "section": section}
+
+    async def move_playhead(beat: float, tries: int = 20) -> None:
+        """Put the Arrangement playhead on `beat` and wait until Live has done it."""
+        await asend("lom_set", {"path": "live_set", "property": "current_song_time",
+                                "value": float(beat)})
+        for _ in range(tries):
+            now = await asend("lom_get", {"path": "live_set",
+                                          "properties": ["current_song_time"]})
+            if abs(float(now["current_song_time"]) - float(beat)) < 1e-3:
+                return
+            await asyncio.sleep(0.05)
+        raise RuntimeError(f"Live did not move the playhead to beat {beat:g} "
+                           f"(it is at {now['current_song_time']:g}); is the Arrangement "
+                           "long enough to reach it?")
 
     async def stem_sources(tracks: list[int | str] | None,
                            include_master: bool) -> list[tuple[str, str]]:
@@ -4034,7 +4054,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     for label, path in recorded["files"].items()}
 
         stems = await asyncio.to_thread(summarise)
-        return to_json({"section": recorded["section"], "stems": stems})
+        result: dict[str, Any] = {"section": recorded["section"], "stems": stems}
+        clipped = [label for label, s in stems.items() if s.get("clipped_samples")]
+        if clipped:
+            result["clipped"] = clipped
+        return to_json(result)
 
     @tool(ui=ui.MIX)
     async def mix_doctor(start_beat: float | None = None, length_beats: float = 16.0,
