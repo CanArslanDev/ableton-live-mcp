@@ -3,7 +3,9 @@
 ## 2.2.0 — 2026-10-17
 
 Remote Script 2.1.0: reinstall it (`ableton-mcp-install-script`) and restart
-Live.
+Live. Checked in Live 12.4.3: the script loads without errors, recordings
+start at `start_beat`, `build_tracks`, browser ids, clipping reports and
+`watch_live` events work as before.
 
 ### Removed
 

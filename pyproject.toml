@@ -1,6 +1,6 @@
 [project]
 name = "ableton-live-mcp"
-version = "2.1.2"
+version = "2.2.0"
 description = "Full Ableton Live control for AI assistants over MCP: the whole Live Object Model, music generators and audio analysis"
 readme = "README.md"
 requires-python = ">=3.10"
