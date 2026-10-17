@@ -1018,6 +1018,17 @@ def test_browser_search_walks_in_slices_and_returns_loadable_ids(script):
                                     within=["Drum Hits", "Cowbell"])
 
 
+def test_browser_ids_outlast_many_lom_objects(script):
+    """A long walk (12,000 samples) used to push its results out of the shared
+    4096-entry registry: browser_load then failed with "Unknown id"."""
+    found = run(script, "browser_search", query="kick", roots=["drums"])["results"]
+    item_id = found[0]["$id"]
+    for _ in range(5000):  # far more objects than LOM_REGISTRY_MAX
+        script._lom_register(object())
+    assert run(script, "lom_get", path=f"id {item_id}", properties=["name"])["name"] == \
+        found[0]["name"]
+
+
 def test_browser_tools_search_load_and_preview(live_server):
     script, call = live_server
     song = script._song

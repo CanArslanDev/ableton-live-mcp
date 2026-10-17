@@ -36,7 +36,7 @@ MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
 # Bumped whenever the TCP command surface changes; the MCP server compares
 # this to EXPECTED_REMOTE_SCRIPT_VERSION.
-SCRIPT_VERSION = "2.0.0"
+SCRIPT_VERSION = "2.0.1"
 # 2: newline-terminated JSON, request ids echoed, hello with a session token.
 # Requests without a newline (protocol 1 clients) are still understood.
 PROTOCOL_VERSION = 2
@@ -121,6 +121,10 @@ except NameError:
 
 LOM_MAX_LIST_ITEMS = 512
 LOM_REGISTRY_MAX = 4096
+# Browser search results live apart from the LOM objects: a walk of the
+# samples (~12,000 items) used to push its own early results, and every
+# other id, out of the shared 4096 before they could be loaded
+BROWSER_REGISTRY_MAX = 65536
 LOM_EVENT_BUFFER_MAX = 2000
 # Generous enough for any real clip; Live clamps note windows itself.
 NOTE_TIME_SPAN = 1000000.0
@@ -231,6 +235,7 @@ class LomMixin(object):
 
     def _lom_init(self):
         self._lom_registry = collections.OrderedDict()
+        self._browser_registry = collections.OrderedDict()
         self._observers = {}
         self._observer_seq = 0
         self._events = []
@@ -326,9 +331,11 @@ class LomMixin(object):
             key = int(token)
         except (TypeError, ValueError):
             raise LomError("Invalid id %r" % (token,))
-        if key not in self._lom_registry:
-            raise LomError("Unknown id %d — read the object again to get a fresh id" % key)
-        return self._lom_registry[key]
+        if key in self._lom_registry:
+            return self._lom_registry[key]
+        if key in self._browser_registry:
+            return self._browser_registry[key]
+        raise LomError("Unknown id %d — read the object again to get a fresh id" % key)
 
     def _lom_register(self, obj):
         key = getattr(obj, "_live_ptr", None)
@@ -959,7 +966,18 @@ class LomMixin(object):
             kind = "item"
         return {"name": name, "root": trail[0], "path": "/".join(trail[1:] + [name]),
                 "kind": kind, "source": getattr(item, "source", ""),
-                "uri": getattr(item, "uri", ""), "$id": self._lom_register(item)}
+                "uri": getattr(item, "uri", ""), "$id": self._browser_register(item)}
+
+    def _browser_register(self, item):
+        """Like _lom_register, in the browser's own (larger) registry."""
+        key = id(item)
+        registry = self._browser_registry
+        if key in registry:
+            registry.pop(key)
+        registry[key] = item
+        while len(registry) > BROWSER_REGISTRY_MAX:
+            registry.popitem(last=False)
+        return key
 
     def _overview_track(self, track, kind, index):
         mixer = track.mixer_device
