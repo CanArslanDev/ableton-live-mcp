@@ -191,9 +191,13 @@ Measured on Live 12.3.8:
   a cue at the *old* position (and would delete a cue there). Move the
   playhead in one call, toggle in the next (`place_locators`); the script's
   `create_locator` toggles on the next update via `schedule_message`.
-  `record_section` likewise moves it in a call of its own and waits for it
-  before `continue_playing`: in one batch the section played from wherever
-  the playhead was (checked in 12.4).
+- **Where playback starts** (12.4.2, measured): `continue_playing` resumes
+  where Live last stopped, even after `current_song_time` was set (and read
+  back) while stopped; `start_playing` starts at `Song.start_time`, which
+  takes effect inside the same batch. `record_section` therefore sets
+  `start_time` and calls `start_playing`, and puts `start_time` back (it
+  leaves no undo step). With `continue_playing` every section was recorded
+  from the last stop position, the requested section somewhere inside the file.
 - **Tunings:** `Song.tuning_system` is None until a tuning is loaded, and
   `browser.load_item` on an `.ascl` in User Library › Tunings does not load it
   (12.4) — the user double-clicks it. Live picks up new files there after a

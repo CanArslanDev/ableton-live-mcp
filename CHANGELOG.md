@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Recordings now really start at `start_beat` in Live 12.4.2. 2.1.1 moved the
+  playhead before `continue_playing`, but `continue_playing` resumes where
+  Live last stopped whatever the playhead says; recording now sets
+  `Song.start_time` and calls `start_playing` (checked in Live: a section at
+  beat 32 gives a 4.07 s file with its first hit at 0.9 ms).
+
 ## 2.1.1 — 2026-10-17
 
 Remote Script 2.0.1: reinstall it (`ableton-mcp-install-script`) and restart

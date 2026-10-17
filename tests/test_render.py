@@ -37,7 +37,8 @@ class ScriptedLive:
             path, props = params["path"], params.get("properties") or []
             if path == "live_set" and "tempo" in props:
                 return {"tempo": 120.0, "loop": True, "loop_start": 0.0, "metronome": True,
-                        "record_mode": False, "is_playing": False, "current_song_time": 4.0}
+                        "record_mode": False, "is_playing": False, "current_song_time": 4.0,
+                        "start_time": 4.0}
             if path == "live_set":
                 # where the playhead was moved, once; then past the section's end
                 moved, self.playhead = getattr(self, "playhead", None), None
@@ -197,7 +198,8 @@ class MultiLive:
             path, props = params["path"], params.get("properties") or []
             if path == "live_set" and "tempo" in props:
                 return {"tempo": 120.0, "loop": False, "loop_start": 0.0, "metronome": False,
-                        "record_mode": False, "is_playing": False, "current_song_time": 0.0}
+                        "record_mode": False, "is_playing": False, "current_song_time": 0.0,
+                        "start_time": 0.0}
             if path == "live_set":
                 # where the playhead was moved, once; then past the section's end
                 moved, self.playhead = getattr(self, "playhead", None), None
@@ -282,19 +284,20 @@ def test_compare_to_reference_with_files(tmp_path, stem_files):
     assert "2 Filter Type A" in report["eq_eight_settings"]
 
 
-def test_playhead_is_moved_before_playing_starts(wav):
-    """Live moves the playhead only after the command that set it returns, so the
-    move must come in its own call, before the batch that starts playing."""
+def test_recording_starts_playback_at_start_beat(wav):
+    """Live 12.4.2 (measured): continue_playing resumes where Live last stopped,
+    whatever current_song_time was set to while stopped; start_playing starts
+    at start_time. So the section is started with start_time + start_playing,
+    and start_time is put back afterwards."""
     live = ScriptedLive(wav)
     _render(live, start_beat=32, length_beats=4)
-    moved = next(i for i, (c, p) in enumerate(live.sent)
-                 if c == "lom_set" and p["property"] == "current_song_time")
-    starts = next(i for i, (c, p) in enumerate(live.sent) if c == "batch" and any(
-        s["params"].get("method") == "continue_playing" for s in p["commands"]))
-    assert moved < starts
-    assert live.sent[moved][1]["value"] == 32.0
-    assert not any(s["params"].get("property") == "current_song_time"
-                   for s in live.sent[starts][1]["commands"])
+    _create, _configure, start, restore = live.batches()
+    sets = [(c["params"].get("property"), c["params"].get("value")) for c in start if c["type"] == "lom_set"]
+    calls = [c["params"]["method"] for c in start if c["type"] == "lom_call"]
+    assert ("start_time", 32.0) in sets and calls[-1] == "start_playing"
+    assert "continue_playing" not in calls
+    assert sets.index(("start_time", 32.0)) < len(sets)
+    assert {"type": "lom_set", "params": {"path": "live_set", "property": "start_time", "value": 4.0}} in restore
 
 
 def test_capture_stems_reports_clipped_stems(tmp_path):

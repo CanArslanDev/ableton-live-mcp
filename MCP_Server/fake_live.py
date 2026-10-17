@@ -491,7 +491,7 @@ class FakeTrack(FakeObj):
 
 # Bookkeeping of the fakes themselves, never part of an undo step
 _NOT_SET_STATE = frozenset(["_listeners", "undo_log", "calls", "_undo", "_redo", "_open_step",
-                            "_position", "_clock", "_pass", "_pass_closing", "_pass_starting",
+                            "_position", "_clock", "_stopped_at", "_pass", "_pass_closing", "_pass_starting",
                             "running_clock", "_data"])
 _MISSING = object()
 
@@ -643,7 +643,7 @@ class FakeSong(FakeObj):
                   FakeTrack("Vox", midi=False)]
         super(FakeSong, self).__init__(
             tempo=120.0, signature_numerator=4, signature_denominator=4, is_playing=False,
-            current_song_time=0.0, song_length=64.0, loop=False, loop_start=0.0,
+            current_song_time=0.0, start_time=0.0, song_length=64.0, loop=False, loop_start=0.0,
             loop_length=16.0, tracks=tracks,
             return_tracks=[FakeTrack("A-Reverb", sends=0), FakeTrack("B-Delay", sends=0)],
             master_track=FakeTrack("Master", sends=0),
@@ -762,15 +762,24 @@ class FakeSong(FakeObj):
         else:
             self.scenes.insert(index, scene)
 
-    def start_playing(self):
+    # Where playback starts, as Live 12.4.2 does it: start_playing at
+    # start_time, continue_playing where it last stopped (setting
+    # current_song_time while stopped does not move that).
+    def _play_from(self, position):
+        object.__setattr__(self, "_position", float(position))
         if self.running_clock:
-            object.__setattr__(self, "_clock", (time.monotonic(), self.current_song_time))
+            object.__setattr__(self, "_clock", (time.monotonic(), float(position)))
         self.is_playing = True
 
+    def start_playing(self):
+        self._play_from(getattr(self, "start_time", 0.0))
+
     def continue_playing(self):
-        self.start_playing()
+        self._play_from(vars(self).get("_stopped_at", 0.0))
 
     def stop_playing(self):
+        if self.is_playing:
+            object.__setattr__(self, "_stopped_at", self.current_song_time)
         if self.running_clock and self.is_playing:
             object.__setattr__(self, "_position", self.current_song_time)
             object.__setattr__(self, "_clock", None)

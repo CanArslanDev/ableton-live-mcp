@@ -57,7 +57,7 @@ READ_ONLY_METHODS = frozenset([
 # solo, the record, punch, overdub and automation-arm buttons, back to
 # arrangement; the other view state by the same rule)
 NO_UNDO_PROPERTIES = frozenset([
-    "is_playing", "current_song_time", "loop", "metronome", "arm", "solo", "record_mode",
+    "is_playing", "current_song_time", "start_time", "loop", "metronome", "arm", "solo", "record_mode",
     "punch_in", "punch_out", "session_automation_record", "arrangement_overdub",
     "session_record", "back_to_arranger",
     "selected_track", "selected_scene", "selected_parameter", "selected_chain",

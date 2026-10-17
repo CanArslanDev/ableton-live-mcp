@@ -3889,7 +3889,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """
         song = await asend("lom_get", {"path": "live_set", "properties": [
             "tempo", "loop", "loop_start", "metronome", "record_mode", "is_playing",
-            "current_song_time"]})
+            "current_song_time", "start_time"]})
         tracks = (await asend("lom_get", {"path": "live_set tracks", "properties": [
             "name", "can_be_armed", "arm", "playing_slot_index"]}))["items"]
         session_playing = song["is_playing"] and any(
@@ -3969,13 +3969,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 begin += [op_call(f"id {i} clip_slots {slot}", "fire", float(length_beats))
                           for i in temp.values()]
             else:
-                # Live moves the playhead only after the command that set it
-                # returns: moved in the same batch as continue_playing, the
-                # section played from wherever the playhead was. Move it first.
-                await move_playhead(start)
+                # Where playback starts (Live 12.4.2, measured): continue_playing
+                # resumes where Live last stopped, whatever current_song_time
+                # was set to while stopped; start_playing starts at start_time,
+                # which takes effect within the same batch.
                 begin += [op_set("live_set", "loop", False),
+                          op_set("live_set", "start_time", start),
                           op_set("live_set", "record_mode", True),
-                          op_call("live_set", "continue_playing")]
+                          op_call("live_set", "start_playing")]
             seconds = length_beats * 60.0 / float(song["tempo"])
             try:
                 started = await asend("batch", {"commands": begin})
@@ -4016,6 +4017,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 if not session:
                     restore += [op_set("live_set", "record_mode", song["record_mode"]),
                                 op_set("live_set", "loop", song["loop"])]
+                if not session:
+                    restore.append(op_set("live_set", "start_time",
+                                          float(song.get("start_time", 0.0))))
                 if not session or not song["is_playing"]:
                     restore.append(op_set("live_set", "current_song_time",
                                           float(song["current_song_time"])))
@@ -4034,20 +4038,6 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         else:
             section["start_beat"] = start
         return {"files": files, "section": section}
-
-    async def move_playhead(beat: float, tries: int = 20) -> None:
-        """Put the Arrangement playhead on `beat` and wait until Live has done it."""
-        await asend("lom_set", {"path": "live_set", "property": "current_song_time",
-                                "value": float(beat)})
-        for _ in range(tries):
-            now = await asend("lom_get", {"path": "live_set",
-                                          "properties": ["current_song_time"]})
-            if abs(float(now["current_song_time"]) - float(beat)) < 1e-3:
-                return
-            await asyncio.sleep(0.05)
-        raise RuntimeError(f"Live did not move the playhead to beat {beat:g} "
-                           f"(it is at {now['current_song_time']:g}); is the Arrangement "
-                           "long enough to reach it?")
 
     async def stem_sources(tracks: list[int | str] | None,
                            include_master: bool) -> list[tuple[str, str]]:
