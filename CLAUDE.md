@@ -191,6 +191,9 @@ Measured on Live 12.3.8:
   a cue at the *old* position (and would delete a cue there). Move the
   playhead in one call, toggle in the next (`place_locators`); the script's
   `create_locator` toggles on the next update via `schedule_message`.
+  `record_section` likewise moves it in a call of its own and waits for it
+  before `continue_playing`: in one batch the section played from wherever
+  the playhead was (checked in 12.4).
 - **Tunings:** `Song.tuning_system` is None until a tuning is loaded, and
   `browser.load_item` on an `.ascl` in User Library › Tunings does not load it
   (12.4) — the user double-clicks it. Live picks up new files there after a
@@ -200,6 +203,14 @@ Measured on Live 12.3.8:
   Reverb, Delay, Auto Filter, Echo, Chorus-Ensemble and Roar. Settings go
   through `resolve_parameter_names`, which maps either version's name onto the
   device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
+- **Sidechain** (12.4): Compressor has `input_routing_type` (its sidechain
+  source, e.g. `available_input_routing_types 'Kick'`); Gate has none, so its
+  sidechain cannot be set from a script.
+- **Default levels** (12.4): a new Simpler's Volume is −12 dB, Operator's −18 dB;
+  raising Simpler to 0 dB made recordings clip at 0 dBFS (`capture_stems` now
+  reports `clipped_samples`).
+- **Clip note times** count from the clip's start, also for an Arrangement clip
+  placed later in the song.
 - Ableton's updater installed Live 12.4 when Live was quit on 2026-10-10;
   script 2.0 and the timer transport work the same there.
 
