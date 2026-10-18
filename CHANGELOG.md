@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- `capture_stems` says its recordings are at the audio device's sample rate
+  (often 48 kHz). Read as 44.1 kHz, a capture drifts by 9 %.
+- CLAUDE.md: recordings' sample rate; Live keeps playing a sample it loaded
+  after the file is overwritten on disk, until it restarts (found in
+  beat-lab).
+
 ## 2.2.0 — 2026-10-17
 
 Remote Script 2.1.0: reinstall it (`ableton-mcp-install-script`) and restart

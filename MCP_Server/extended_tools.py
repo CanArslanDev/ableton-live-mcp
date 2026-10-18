@@ -4189,7 +4189,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
           unmuted non-group track with audio output, every return, the master
         - start_beat / length_beats / scene: what plays, as in render_and_analyze
         Takes as long as the section plays. The temporary tracks are deleted;
-        the recorded files stay in the project and are listed.
+        the recorded files stay in the project and are listed. They are at the
+        audio device's sample rate (often 48 kHz): resample before lining them
+        up with 44.1 kHz material.
         """
         from .audio_analysis import load_audio
         from .mix_analysis import stem_summary
