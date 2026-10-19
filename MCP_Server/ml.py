@@ -193,21 +193,23 @@ def file_stem(prompt: str, when: str) -> str:
 # Basic Pitch's decoding settings by kind of part. Measured on 63 synthetic
 # renders (plucks, arpeggios with 32nd runs, leads with glides, pads; clean,
 # with an 808, with a bleed loop, wet), onset F1 (50 ms, 50 cents) averaged
-# over 7 groups: legacy (Basic Pitch's own defaults) 0.583, melodic 0.687
-# (0.706 with lowest just above the 808), chords 0.636; chord tones sounding
-# on the pads 0.82 with chords, 0.43 with melodic. legacy keeps only notes
-# of 12 frames (139 ms) or more: on 4 clean renders of 32nd runs at 140 BPM
-# (54 ms) its F1 was 0.36, melodic's 0.90. melodic misses notes without an
-# attack: of 16 pure sines with a 10 ms fade-in it found 3, chords 15.
-# Nor do 808s and sub basses show it onsets: on 6 synthetic bass lines (MIDI
-# 28-43) melodia off found 15 of 124 808 notes and none of a sine bass's, and
-# on 6 calibration 808 stems (MIDI 22-32) 1 of 336. So melodic keeps
-# melodia below MIDI 52 (165 Hz, MELODIA_BELOW), and drops what melodia reads
-# there as a note an octave over a sounding one (drop_octave_ghosts). Onset
-# F1, melodic without them -> with them: 808 lines 0.18 -> 0.86, sine bass
-# 0.00 -> 0.45, saw bass 0.84 -> 0.82, the 808 stems 0.006 -> 0.17 (Basic
-# Pitch starts those a median 102 ms late); plucks, runs, lead and pads
-# above it 0.915 -> 0.916, plucks and pads at MIDI 40-60 0.900 -> 0.873.
+# over 7 groups: legacy (Basic Pitch's own defaults) 0.583, onset 0.6 with
+# melodia off 0.687 (0.706 with lowest just above the 808), chords 0.636;
+# chord tones sounding on the pads 0.82 with chords, 0.43 with melodia off
+# (not measured again since melodic keeps melodia below MIDI 52). legacy
+# keeps only notes of 12 frames (139 ms) or more: on 4 clean renders of 32nd
+# runs at 140 BPM (54 ms) its F1 was 0.36, melodic's 0.90. Without melodia
+# a note needs an attack the onset head sees: of 16 pure sines with a 10 ms
+# fade-in it found 3 (chords 15), of 124 notes on 3 synthetic 808 lines
+# (MIDI 28-43) 13, of 3 sine bass lines' none, and on six 808 stems (MIDI
+# 22-32, 336 notes) it returned 2 notes. So melodic keeps melodia below MIDI
+# 52 (165 Hz, MELODIA_BELOW) and drops what melodia reads there as a note
+# an octave over a sounding one (drop_octave_ghosts). Onset F1 (3 renders
+# each), melodia off everywhere -> melodic: 808 lines 0.18 -> 0.86, sine
+# bass 0.00 -> 0.45, saw bass 0.84 -> 0.82, the 808 stems 0.006 -> 0.17
+# (Basic Pitch starts those a median 109 ms late); plucks, runs, a lead and
+# pads above MIDI 52 0.915 -> 0.916, plucks and pads at MIDI 40-60
+# 0.900 -> 0.873.
 MELODIA_BELOW = 52
 TRANSCRIPTION_PRESETS = {
     "melodic": {"onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
