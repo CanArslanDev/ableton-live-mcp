@@ -1349,6 +1349,22 @@ def test_build_tracks_rebuilds_a_rack_by_name_when_live_refuses_its_chains(live_
     assert sorted(n for _t, n, _i in browser.loaded) == [36, 38]
 
 
+def test_build_tracks_rebuilds_a_rack_that_is_gone(live_server, tmp_path, monkeypatch):
+    script, call = live_server
+    song = script._song
+    (named,) = _wavs(tmp_path, "Kick 808 Long.wav")
+
+    def refuse_and_drop_the_rack(self, name, index=-1):
+        song.tracks[-1].devices = []
+        raise RuntimeError("Chain has no method 'insert_device'")
+
+    monkeypatch.setattr(fake_live.FakeDrumChain, "insert_device", refuse_and_drop_the_rack)
+    row = call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {
+        "36": {"sample_path": named}}}}], sample_wait_s=0)["tracks"][0]
+    assert row["devices"] == ["Drum Rack"] and row["loaded_by_name"]["36"].startswith("pads by path:")
+    assert song.tracks[-1].devices[0].drum_pads[36].chains[0].name == "Kick 808 Long"
+
+
 def test_build_tracks_refuses_sampler_options_that_cannot_work(live_server, tmp_path):
     script, call = live_server
     before = len(script._song.tracks)

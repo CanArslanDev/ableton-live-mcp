@@ -2740,11 +2740,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     def fresh_rack(tp: str, rack: str) -> str:
         """Delete the track's Drum Rack and put an empty one in its place, its
         id: a build by path that Live refused part-way leaves chains on no pad
-        or on all notes, and no call deletes a single rack chain."""
+        or on all notes, and no call deletes a single rack chain. A rack no
+        longer on the track gets a new one at the front."""
         devices = lom_get(f"{tp} devices", ["name"])["items"]
-        index = next(i for i, d in enumerate(devices) if f"id {d.get('$id')}" == rack)
-        send("lom_call", {"path": tp, "method": "delete_device", "args": [index]})
-        return f"id {inserted_device_ids(tp, [['Drum Rack', index]])[0]}"
+        index = next((i for i, d in enumerate(devices) if f"id {d.get('$id')}" == rack), None)
+        if index is not None:
+            send("lom_call", {"path": tp, "method": "delete_device", "args": [index]})
+        return f"id {inserted_device_ids(tp, [['Drum Rack', index or 0]])[0]}"
 
     @tool(destructive=True)
     def build_tracks(tracks: list[dict], replace: bool = False, sample_wait_s: float = 40.0,
