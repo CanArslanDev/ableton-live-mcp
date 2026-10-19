@@ -631,8 +631,12 @@ def _fake_ml(monkeypatch, tmp_path):
             return {"stems": stems, "sample_rate": 44100, "model": job["model"], "device": "cpu",
                     "seconds": 1.0}
         if task == "transcribe":
-            return {"notes": [{"start": 0.0, "end": 0.5, "pitch": 57, "amplitude": 0.8},
-                              {"start": 1.0, "end": 1.5, "pitch": 60, "amplitude": 0.4}]}
+            # bends as Basic Pitch gives them: thirds of a semitone, one bin high
+            return {"notes": [{"start": 0.0, "end": 0.5, "pitch": 57, "amplitude": 0.8,
+                               "bends": [1, 1, 2, 3]},
+                              {"start": 1.0, "end": 1.5, "pitch": 60, "amplitude": 0.4,
+                               "bends": [1, 1, 1]}],
+                    "frame_s": 256 / 22050}
         if task == "embed":
             out = {}
             if job["texts"]:
@@ -675,26 +679,99 @@ def test_separate_stems_from_a_clip_onto_new_tracks(live_server, tmp_path, monke
     assert result["tracks"][0] == {"track": "Song drums", "clip_index": 1}
 
 
-def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch):
+def _riff(path, rate=44100):
+    """The fake transcription's two notes as tones: A2 (MIDI 57) at -6 dB from
+    0 s, C3 (60) 12 dB lower from 1 s."""
     import numpy as np
     import soundfile as sf
 
+    t = np.arange(int(0.5 * rate)) / rate
+    y = np.zeros(2 * rate)
+    y[:len(t)] = 0.5 * np.sin(2 * np.pi * 220.0 * t)
+    y[rate:rate + len(t)] = 0.5 * 10 ** (-12 / 20) * np.sin(2 * np.pi * 261.63 * t)
+    sf.write(path, y, rate)
+    return path
+
+
+def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch):
     script, call = live_server
     jobs = _fake_ml(monkeypatch, tmp_path)
-    wav = tmp_path / "Riff.wav"
-    sf.write(wav, np.zeros(4410), 44100)
+    wav = _riff(tmp_path / "Riff.wav")
     listing = call("audio_to_midi", path=str(wav), lowest="A1")
     assert [n["start_time"] for n in note_dicts(listing)] == [0, 2]
     # Live's note names: A1 is MIDI 45, 110 Hz
     assert jobs[0][1]["minimum_frequency"] == pytest.approx(110.0)
+    # The melodic preset by default; velocity from each note's level: 12 dB down is 64
+    assert {k: jobs[0][1][k] for k in ("onset_threshold", "frame_threshold", "minimum_note_ms",
+                                       "melodia_trick")} == {
+        "onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0, "melodia_trick": False}
+    assert [n["velocity"] for n in note_dicts(listing)] == [127, 64]
+    assert listing["velocity"] == {"from": "level", "loudest_db": -6.0}
+    assert listing["timing"] == {"offset_beats": 0.0, "method": "tempo", "tempo": 120.0}
+    assert "bends" not in listing
     result = call("audio_to_midi", path=str(wav), to_track="Bass", to_clip_index=2,
-                  midi_path=str(tmp_path / "mid"))
+                  midi_path=str(tmp_path / "mid"), preset="legacy")
     clip = script._song.tracks[1].clip_slots[2].clip
     assert clip.name == "Riff MIDI" and clip.length == 4.0
+    # legacy: Basic Pitch's own settings and velocity 127 × its confidence
     assert sorted((n.pitch, n.start_time, n.duration, n.velocity) for n in clip._notes) == [
         (57, 0.0, 1.0, 102), (60, 2.0, 1.0, 51)]
+    assert jobs[1][1]["minimum_note_ms"] == 127.7 and jobs[1][1]["melodia_trick"] is True
     assert result["tempo_used"] == 120.0 and result["notes_found"] == 2
     assert Path(result["midi_file"]["file"]).name == "Riff MIDI.mid"
+    # Given settings win over the preset; frequencies in Hz pass through
+    call("audio_to_midi", path=str(wav), preset="chords", onset_threshold=0.4, highest="2093 Hz")
+    assert jobs[2][1]["onset_threshold"] == 0.4 and jobs[2][1]["melodia_trick"] is True
+    assert jobs[2][1]["maximum_frequency"] == 2093.0
+
+
+def test_audio_to_midi_lists_corrected_bends(live_server, tmp_path, monkeypatch):
+    _script, call = live_server
+    _fake_ml(monkeypatch, tmp_path)
+    listing = call("audio_to_midi", path=str(_riff(tmp_path / "Riff.wav")), bends=True,
+                   offset_beats=4)
+    # Basic Pitch's [1, 1, 2, 3] is in tune, then a third and two thirds of a
+    # semitone sharp; the second note never bends and is left out
+    assert listing["bends"] == {"frame_s": 0.01161, "notes": [
+        {"pitch": 57, "start_time": 4.0, "cents": [0, 0, 33, 67]}]}
+    assert [n["start_time"] for n in note_dicts(listing)] == [4, 6]
+
+
+def test_audio_to_midi_follows_the_clips_warp_and_start_marker(live_server, tmp_path, monkeypatch):
+    script, call = live_server
+    _fake_ml(monkeypatch, tmp_path)
+    wav = _riff(tmp_path / "Riff.wav")
+    vox = script._song.tracks[2]
+    clip = vox.clip_slots[0].create_audio_clip(str(wav))
+    # Warped: Live's own beat for each time (the fake warps the file at 90 BPM),
+    # less the start marker in beats
+    clip.file_tempo, clip.start_marker = 90.0, 0.5
+    warped = call("audio_to_midi", track="Vox", clip_index=0)
+    assert [n["start_time"] for n in note_dicts(warped)] == [0, 1]
+    assert warped["timing"]["method"] == "warp" and warped["timing"]["start_marker_beats"] == 0.5
+    # Unwarped: the file in real time from the start marker (seconds) at the
+    # set's tempo; the note that ends before the marker is left out
+    clip.warping, clip.start_marker = False, 0.75
+    unwarped = call("audio_to_midi", track="Vox", clip_index=0, offset_beats=1)
+    assert [n["start_time"] for n in note_dicts(unwarped)] == [1.5]
+    assert unwarped["timing"] == {"offset_beats": 1.0, "note": "The clip loops; the notes follow its file once.",
+                                  "method": "tempo", "tempo": 120.0, "start_marker_seconds": 0.75,
+                                  "notes_before_clip_start": 1}
+    # A warped clip Live cannot map falls back to the tempo, and says so; audio
+    # it cannot read for levels leaves Basic Pitch's velocities, and says so
+    clip.warping, clip.start_marker = True, 0.0
+    (tmp_path / "Riff.txt").write_text("not audio")
+    clip.file_path = str(tmp_path / "Riff.txt")
+
+    def no_warp_map(self, sample_time):
+        raise RuntimeError("no warp map")
+
+    monkeypatch.setattr(fake_live.FakeClip, "sample_to_beat_time", no_warp_map)
+    fallback = call("audio_to_midi", track="Vox", clip_index=0)
+    assert fallback["timing"]["method"] == "tempo" and "did not map" in fallback["timing"]["warning"]
+    assert [n["start_time"] for n in note_dicts(fallback)] == [0, 2]
+    assert fallback["velocity"]["from"] == "amplitude" and "Could not read" in fallback["velocity"]["warning"]
+    assert [n["velocity"] for n in note_dicts(fallback)] == [102, 51]
 
 
 def test_find_similar_sounds_indexes_once_then_searches(live_server, tmp_path, monkeypatch):

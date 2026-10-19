@@ -78,6 +78,49 @@ def test_events_to_notes_in_beats():
     assert notes[1]["start_time"] == 4.0 and notes[1]["velocity"] == 127
     assert notes[1]["duration"] == round(1 / 64, 4)
     assert ml.events_to_notes(events, 60, offset_beats=8)[0]["start_time"] == 8.5
+    assert [n["velocity"] for n in ml.events_to_notes(events, 120, velocities=[90, 20])] == [90, 20]
+
+
+def test_place_notes_leaves_out_what_the_clip_never_plays():
+    events = [{"start": 0.0, "end": 0.5, "pitch": 60, "amplitude": 0.5},
+              {"start": 0.9, "end": 1.5, "pitch": 62, "amplitude": 0.5},
+              {"start": 2.0, "end": 2.5, "pitch": 64, "amplitude": 0.5}]
+
+    def from_marker(t):  # a clip that starts one second into its file, at 120 BPM
+        return (t - 1.0) * 2
+
+    notes, kept = ml.place_notes(events, from_marker)
+    assert kept == [1, 2]
+    assert [(n["start_time"], n["duration"]) for n in notes] == [(0.0, 1.0), (2.0, 1.0)]
+    # The offset moves the notes it keeps; it brings none back
+    notes, kept = ml.place_notes(events, from_marker, offset_beats=4)
+    assert kept == [1, 2] and notes[0]["start_time"] == 4.0
+    notes, kept = ml.place_notes(events, from_marker, offset_beats=-2.5)
+    assert kept == [2] and notes[0]["start_time"] == 0.0 and notes[0]["duration"] == 0.5
+
+
+def test_transcription_presets_and_overrides():
+    assert ml.transcription_settings("melodic") == {
+        "onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
+        "melodia_trick": False, "velocity": "level"}
+    chords = ml.transcription_settings("chords", onset_threshold=0.5, frame_threshold=None)
+    assert chords["onset_threshold"] == 0.5 and chords["frame_threshold"] == 0.3
+    assert chords["melodia_trick"] is True
+    assert ml.transcription_settings("legacy")["velocity"] == "amplitude"
+    with pytest.raises(ValueError, match="Unknown preset 'drums'"):
+        ml.transcription_settings("drums")
+
+
+def test_bends_are_corrected_by_one_bin():
+    # Basic Pitch 0.4.0 reads an in-tune note as +1 (a third of a semitone)
+    assert ml.bend_cents([1, 1, 2, 0, -2]) == [0, 0, 33, -33, -100]
+    assert ml.bend_cents([]) == []
+
+
+def test_velocity_follows_the_level_below_the_loudest_note():
+    # 40·log10(velocity / 127) dB: 12 dB down is 64, 24 dB down 32
+    assert ml.level_velocities([-10.0, -22.0, -34.0, float("nan"), -200.0]) == [127, 64, 32, 64, 1]
+    assert ml.level_velocities([]) == []
 
 
 def _sounds(tmp_path, names):
@@ -135,6 +178,11 @@ def test_real_transcription(tmp_path):
     sf.write(tmp_path / "a4.wav", 0.5 * np.sin(2 * np.pi * 440 * t), rate)
     result = asyncio.run(ml.run("transcribe", {"path": str(tmp_path / "a4.wav")}))
     assert 69 in {n["pitch"] for n in result["notes"]}
+    # Bends come back, one per model frame, and an in-tune A4 corrects to 0 cents
+    assert result["frame_s"] == pytest.approx(256 / 22050)
+    a4 = max((n for n in result["notes"] if n["pitch"] == 69), key=lambda n: n["end"] - n["start"])
+    assert len(a4["bends"]) >= 20
+    assert np.median(ml.bend_cents(a4["bends"])) == 0
 
 
 def test_worker_has_no_server_imports():

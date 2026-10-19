@@ -223,6 +223,46 @@ def estimate_key(mono: np.ndarray, rate: int) -> dict | None:
     return {"key": f"{_PITCH_CLASSES[best[1]]} {best[2]}", "confidence": round(best[0], 2)}
 
 
+# A band one semitone wide: a 12-per-octave constant-Q filter spans
+# 1 / (2^(1/12) - 1) = 16.8 cycles of its frequency under a Hann window
+SEMITONE_Q = 1 / (2 ** (1 / 12) - 1)
+
+
+def note_levels(mono: np.ndarray, rate: int, notes: list[dict],
+                window_s: float = 0.06, step_s: float = 0.005) -> np.ndarray:
+    """Each note's level at its own pitch, in dB (a sine of amplitude A reads
+    20·log10(A)): a one-semitone constant-Q band at the note's fundamental,
+    the loudest of its readings every 5 ms over the note's first 60 ms.
+    notes carry "start" (seconds) and "pitch" (MIDI).
+
+    A level, unlike Basic Pitch's amplitude (a confidence): on synthetic
+    plucks it ranked the notes by their true level far better (see
+    audio_to_midi). Other notes within a semitone, or with a harmonic there,
+    add to it, so sustained chords measure poorly."""
+    levels = np.full(len(notes), np.nan)
+    if not notes or not len(mono):
+        return levels
+    mono = np.asarray(mono, dtype=np.float64)
+    offsets = np.arange(0.0, window_s + 1e-9, step_s)
+    lowest = 440.0 * 2 ** ((min(int(n["pitch"]) for n in notes) - 69) / 12)
+    margin = int(SEMITONE_Q * rate / lowest) + 2
+    padded = np.concatenate([np.zeros(margin), mono, np.zeros(margin)])
+    kernels: dict[int, np.ndarray] = {}
+    for index, note in enumerate(notes):
+        pitch = int(note["pitch"])
+        if pitch not in kernels:
+            freq = 440.0 * 2 ** ((pitch - 69) / 12)
+            window = np.hanning(int(SEMITONE_Q * rate / freq) + 1)
+            phase = np.exp(-2j * np.pi * freq * np.arange(len(window)) / rate)
+            kernels[pitch] = window * phase * (2 / window.sum())
+        kernel = kernels[pitch]
+        centres = np.clip(np.round((float(note["start"]) + offsets) * rate).astype(int), 0, len(mono))
+        firsts = centres - len(kernel) // 2 + margin
+        frames = padded[firsts[:, None] + np.arange(len(kernel))[None, :]]
+        levels[index] = 20 * np.log10(max(float(np.abs(frames @ kernel).max()), 1e-9))
+    return levels
+
+
 def analyze(path: str | Path, max_seconds: float | None = 600.0) -> dict:
     data, rate = load_audio(path, max_seconds)
     if data.size == 0:

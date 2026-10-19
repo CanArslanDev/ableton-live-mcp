@@ -2,8 +2,45 @@
 
 ## Unreleased
 
+### Added
+
+- `audio_to_midi` takes a `preset`: `melodic` (the default: onset 0.6,
+  frame 0.3, 35 ms, melodia off), `chords` (the same with melodia on) or
+  `legacy` (what it did before: 0.5, 0.3, 127.7 ms, melodia on), and
+  `melodia_trick`, which it never passed (it was always on). On 63 synthetic
+  renders (plucks, 32nd runs, leads, pads; with reverb, an 808 and a bleed
+  loop), onset F1 went from 0.583 (legacy) to 0.687 (melodic), 0.706 with
+  `lowest` just above the 808. legacy keeps only notes of 139 ms or more:
+  on 32nd-note runs at 140 BPM its F1 was 0.36, melodic's 0.90 (4 clean
+  renders through this server's worker). melodic needs an attack: it found
+  3 of 16 pure sines with a 10 ms fade-in, chords 15.
+- `audio_to_midi(bends=true)` lists the pitch bend of each bent note in
+  cents, one value per model frame (11.6 ms). Basic Pitch 0.4.0 reads
+  in-tune notes a third of a semitone sharp (+1 in 99.4–100 % of the frames
+  of sines at 110, 220, 440 and 880 Hz); the values are corrected by that
+  bin, after which in-tune and ±33-cent sines read 0 and ±33 cents. Live's
+  API has no per-note pitch bend, so bends are returned, not written.
+- `audio_to_midi` velocities follow each note's level: a one-semitone
+  constant-Q band at the note's pitch, the loudest reading over its first
+  60 ms (`audio_analysis.note_levels`); the loudest note gets 127 and the
+  others 127 × 10^(dB below it / 40). Rank correlation with the true level
+  (Spearman, Basic Pitch on 4 clean synthetic renders each), against 127 ×
+  Basic Pitch's amplitude before: plucks 0.62 → 0.98, a legato lead
+  0.71 → 0.99, triad pads 0.27 → 0.94. With reverb and detuned pad voices a
+  similar measure ranked plucks at 0.81–0.83, a lead at 0.57 and pads at
+  0.20. `legacy` keeps the old velocity.
+- `audio_to_midi` places notes where the source clip plays them: a warped
+  clip through Live's own warp (`Clip.sample_to_beat_time`, in batches), an
+  unwarped one from its start marker; notes the clip never plays are left
+  out. `offset_beats` moves every note, and `timing` in the result says
+  what applied (or that Live could not map a warped clip). Checked against
+  the fake Live, not yet in Live. `lowest` and `highest` also take Hz
+  ("82.4 Hz").
+
 ### Changed
 
+- `audio_to_midi` defaults to the `melodic` preset and to velocities from
+  each note's level; `preset="legacy"` gives what it gave before.
 - The tempo estimate of the audio analysis tools is found between frames: a
   parabola through the autocorrelation peak at one beat, then at 2 to 32
   beats. Whole-frame lags are 3.9 BPM apart at 140 BPM (44.1 kHz), and a

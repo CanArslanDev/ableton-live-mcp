@@ -2075,7 +2075,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     async def audio_source(path: str | None, track: int | str | None, clip_index: int | None,
                            arrangement_clip_index: int | None) -> dict:
-        """The audio file to work on: `path`, or the file behind an audio clip."""
+        """The audio file to work on: `path`, or the file behind an audio clip
+        (with what decides where its sound plays: warping, start marker, loop)."""
         if path:
             file = Path(path).expanduser()
             if not file.is_file():
@@ -2086,11 +2087,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              "arrangement_clip_index (an audio clip)")
         cp = clip_path(track, clip_index, arrangement_clip_index)
         info = await asend("lom_get", {"path": cp, "properties": [
-            "is_audio_clip", "file_path", "name", "warping", "warp_mode", "start_time"]})
+            "is_audio_clip", "file_path", "name", "warping", "warp_mode", "start_time",
+            "start_marker", "looping", "sample_rate"]})
         if not info.get("is_audio_clip"):
             raise ValueError("That is a MIDI clip; these tools work on audio")
         source = {"file": info["file_path"], "name": info.get("name") or Path(info["file_path"]).stem,
-                  "track": track, "warping": info.get("warping"), "warp_mode": info.get("warp_mode")}
+                  "track": track, "warping": info.get("warping"), "warp_mode": info.get("warp_mode"),
+                  "clip": f"id {info['$id']}", "start_marker": info.get("start_marker"),
+                  "looping": info.get("looping"), "sample_rate": info.get("sample_rate")}
         if arrangement_clip_index is not None:
             source["start_time"] = info.get("start_time")
         else:
@@ -2178,16 +2182,88 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             placed.append({"track": label, **where})
         return placed
 
+    async def warped_beats(source: dict, seconds: list[float]) -> dict[float, float] | None:
+        """Live's own beat for each time in a warped clip's file
+        (Clip.sample_to_beat_time takes sample frames), or None if Live
+        cannot say."""
+        rate = source.get("sample_rate")
+        if not isinstance(rate, (int, float)) or isinstance(rate, bool) or rate <= 0:
+            try:
+                import soundfile as sf
+                rate = sf.info(source["file"]).samplerate
+            except Exception:
+                return None
+        beats: dict[float, float] = {}
+        for first in range(0, len(seconds), 1000):
+            chunk = seconds[first:first + 1000]
+            try:
+                done = await asend("batch", {"commands": [
+                    op_call(source["clip"], "sample_to_beat_time", t * rate) for t in chunk]})
+            except Exception as e:
+                logger.debug("sample_to_beat_time failed: %s", e)
+                return None
+            if done.get("failed"):
+                return None
+            for t, step in zip(chunk, done["results"]):
+                beats[t] = float(step["result"]["result"])
+        return beats
+
+    async def clip_timing(source: dict, events: list[dict], tempo: float, tempo_given: bool,
+                          offset_beats: float) -> tuple[Callable[[float], float], dict]:
+        """How a time in the file becomes beats from the source clip's start,
+        and what the result says about it. A warped clip follows Live's warp
+        (unless a tempo is given); an unwarped one plays its file in real
+        time from its start marker (seconds); a file plays from second 0."""
+        per_second = tempo / 60.0
+        marker = source.get("start_marker")
+        start = float(marker) if isinstance(marker, (int, float)) and not isinstance(marker, bool) else 0.0
+        timing: dict[str, Any] = {"offset_beats": offset_beats}
+        if source.get("looping"):
+            timing["note"] = "The clip loops; the notes follow its file once."
+        if "clip" not in source:
+            timing.update(method="tempo", tempo=tempo)
+            return (lambda t: t * per_second), timing
+        if source.get("warping"):
+            if not tempo_given:
+                times = sorted({float(e["start"]) for e in events} | {float(e["end"]) for e in events})
+                mapped = await warped_beats(source, times)
+                if mapped is not None:
+                    timing.update(method="warp", start_marker_beats=start)
+                    return (lambda t: mapped[t] - start), timing
+                timing["warning"] = ("Live did not map this warped clip's times (sample_to_beat_time); "
+                                     "they assume its file plays straight at the set's tempo")
+            timing.update(method="tempo", tempo=tempo, start_marker_beats=start)
+            return (lambda t: t * per_second - start), timing
+        timing.update(method="tempo", tempo=tempo, start_marker_seconds=start)
+        return (lambda t: (t - start) * per_second), timing
+
+    def note_velocities(file: str, events: list[dict]) -> tuple[list[int] | None, dict]:
+        """Velocities from each note's level in the audio (audio_analysis.note_levels)."""
+        from . import ml
+        from .audio_analysis import load_audio, note_levels
+
+        try:
+            data, rate = load_audio(file, max_seconds=None)
+        except Exception as e:
+            return None, {"from": "amplitude", "warning": f"Could not read the audio for levels: {e}"}
+        levels = note_levels(data.mean(axis=1), rate, events).tolist()
+        measured = [v for v in levels if v == v]
+        return ml.level_velocities(levels), {
+            "from": "level", "loudest_db": round(max(measured), 1) if measured else None}
+
     @tool(destructive=True)
     async def audio_to_midi(path: str | None = None, track: int | str | None = None,
                             clip_index: int | None = None,
                             arrangement_clip_index: int | None = None,
                             to_track: int | str | None = None, to_clip_index: int | None = None,
                             arrangement_time: float | None = None, midi_path: str | None = None,
-                            tempo: float | None = None, onset_threshold: float = 0.5,
-                            frame_threshold: float = 0.3, minimum_note_ms: float = 127.7,
+                            preset: Literal["melodic", "chords", "legacy"] = "melodic",
+                            tempo: float | None = None, offset_beats: float = 0.0,
+                            onset_threshold: float | None = None,
+                            frame_threshold: float | None = None,
+                            minimum_note_ms: float | None = None, melodia_trick: bool | None = None,
                             lowest: int | str | None = None, highest: int | str | None = None,
-                            replace: bool = True, clip_name: str | None = None,
+                            bends: bool = False, replace: bool = True, clip_name: str | None = None,
                             ctx: Context | None = None) -> str:
         """Turn audio into MIDI notes with Spotify's Basic Pitch (melodies, bass lines,
         chords; not drums), from an audio file or the file behind an audio clip.
@@ -2195,40 +2271,73 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - to_track: write a MIDI clip there (Session slot to_clip_index, or
           arrangement_time; default where the source clip is); midi_path: a .mid file;
           with neither, the notes are listed
-        - tempo: the audio's own tempo, for seconds → beats (default the set's: right
-          for unwarped audio)
-        - onset_threshold, frame_threshold (0..1): higher gives fewer, surer notes;
-          minimum_note_ms; lowest/highest: pitch range ("E1", 40)
+        - preset: melodic (onset 0.6, frame 0.3, 35 ms, melodia off) | chords (the same
+          with melodia on: soft pad onsets, more ghost notes) | legacy (0.5, 0.3, 127.7 ms,
+          melodia on, velocity 127 × Basic Pitch's confidence); onset_threshold,
+          frame_threshold (0..1, higher: fewer notes), minimum_note_ms and melodia_trick
+          override it
+        - lowest/highest: Basic Pitch's minimum/maximum_frequency, a note ("E1", 40) or
+          "82.4 Hz"; for a melody over an 808, set lowest just above the 808
+        - Timing: a warped clip follows Live's warp (unless tempo is given); else
+          seconds × tempo (default the set's) from an unwarped clip's start marker or a
+          file's start; offset_beats moves every note; "timing" in the result says which
+        - Velocity follows each note's level at its pitch (loudest 127, 12 dB down 64)
+        - bends=true adds each bent note's pitch bend in cents, one value per 11.6 ms
+          (corrected: Basic Pitch reads 33 cents sharp); returned only, as Live's API
+          has no per-note pitch bend
         The first use downloads Basic Pitch (~150 MB).
         """
         from . import midi_files, ml
 
         source = await audio_source(path, track, clip_index, arrangement_clip_index)
-        job: dict[str, Any] = {"path": source["file"], "onset_threshold": onset_threshold,
-                               "frame_threshold": frame_threshold,
-                               "minimum_note_ms": minimum_note_ms}
-        for key, note in (("minimum_frequency", lowest), ("maximum_frequency", highest)):
-            if note is not None:
-                job[key] = 440.0 * 2 ** ((music.parse_note(note) - 69) / 12)
+        settings = ml.transcription_settings(
+            preset, onset_threshold=onset_threshold, frame_threshold=frame_threshold,
+            minimum_note_ms=minimum_note_ms, melodia_trick=melodia_trick)
+        velocity_from = settings.pop("velocity")
+        job: dict[str, Any] = {"path": source["file"], **settings}
+        for key, value in (("minimum_frequency", lowest), ("maximum_frequency", highest)):
+            if value is not None:
+                job[key] = music.frequency(value)
         result = await ml.run("transcribe", job, ml_progress(ctx))
-        context = await asyncio.to_thread(song_context, True)
-        if tempo is None:
-            try:
-                tempo = float((await asend("lom_get", {"path": "live_set",
-                                                       "properties": ["tempo"]}))["tempo"])
-            except Exception:
-                tempo = 120.0
-        notes = ml.events_to_notes(result["notes"], tempo)
-        if not notes:
+        events = result["notes"]
+        if not events:
             raise ValueError("No notes found; try a lower onset_threshold or frame_threshold")
+        context = await asyncio.to_thread(song_context, True)
+        tempo_used = tempo
+        if tempo_used is None:
+            try:
+                tempo_used = float((await asend("lom_get", {"path": "live_set",
+                                                            "properties": ["tempo"]}))["tempo"])
+            except Exception:
+                tempo_used = 120.0
+        beat_of, timing = await clip_timing(source, events, float(tempo_used), tempo is not None,
+                                            offset_beats)
+        velocities, velocity = None, {"from": "amplitude"}
+        if velocity_from == "level":
+            velocities, velocity = await asyncio.to_thread(note_velocities, source["file"], events)
+        notes, kept = ml.place_notes(events, beat_of, velocities, offset_beats)
+        if not notes:
+            raise ValueError("No notes start after the clip's start marker")
+        if len(kept) < len(events):
+            timing["notes_before_clip_start"] = len(events) - len(kept)
         bar = context["beats_per_bar"]
         end = max(n["start_time"] + n["duration"] for n in notes)
         length = max(1, -(-end // bar)) * bar
         pitches = sorted({n["pitch"] for n in notes})
         payload: dict[str, Any] = {
-            "source": source["file"], "notes_found": len(notes), "tempo_used": tempo,
+            "source": source["file"], "notes_found": len(notes), "preset": preset,
+            "settings": {k: v for k, v in job.items() if k != "path"}, "timing": timing,
+            "velocity": velocity, "tempo_used": tempo_used,
             "pitch_range": [music.note_name(pitches[0]), music.note_name(pitches[-1])],
             "length_beats": length}
+        if bends:
+            bent = []
+            for note, index in zip(notes, kept):
+                cents = ml.bend_cents(events[index].get("bends") or [])
+                if any(cents):
+                    bent.append({"pitch": note["pitch"], "start_time": note["start_time"], "cents": cents})
+            payload["bends"] = {"frame_s": round(float(result.get("frame_s") or ml.BEND_FRAME_S), 6),
+                                "notes": bent}
         name = clip_name or f"{source['name']} MIDI"
         if midi_path:
             target = Path(midi_path).expanduser()
@@ -2236,7 +2345,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 target = midi_files.free_path(target, name)
             elif target.exists():
                 raise ValueError(f"{target} exists; choose another midi_path")
-            payload["midi_file"] = midi_files.write_midi(target, notes, tempo, name=name)
+            payload["midi_file"] = midi_files.write_midi(target, notes, tempo_used, name=name)
         if to_track is not None:
             if arrangement_time is None and to_clip_index is None:
                 if source.get("start_time") is not None:

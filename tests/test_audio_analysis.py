@@ -84,6 +84,45 @@ def test_peak_lag_finds_the_vertex_between_lags():
     assert audio_analysis.peak_lag(ac, 0) == 0.0
 
 
+def test_note_levels_read_each_notes_level_at_its_pitch():
+    rate = 44100
+    t = np.arange(rate // 2) / rate
+    y = np.zeros(4 * rate)
+    notes, truth = [], []
+    for k, (pitch, db) in enumerate([(45, -6.0), (57, -20.0), (69, -12.0), (81, -30.0)]):
+        freq = 440 * 2 ** ((pitch - 69) / 12)
+        y[k * rate:k * rate + len(t)] += 10 ** (db / 20) * np.sin(2 * np.pi * freq * t)
+        notes.append({"start": float(k), "pitch": pitch})
+        truth.append(db)
+    # A1's 150 ms window starts before its note: -6.07 dB
+    assert audio_analysis.note_levels(y, rate, notes) == pytest.approx(truth, abs=0.1)
+    # A note three semitones above, 20 dB louder and at the same time, adds
+    # under a decibel
+    loud = np.sin(2 * np.pi * 440 * 2 ** (3 / 12) * t)
+    y[2 * rate:2 * rate + len(t)] += loud
+    assert audio_analysis.note_levels(y, rate, notes[2:3])[0] == pytest.approx(-12.0, abs=1.0)
+    assert np.isnan(audio_analysis.note_levels(np.zeros(0), rate, notes)).all()
+
+
+def test_note_levels_rank_plucks_by_their_level():
+    from scipy.stats import spearmanr
+
+    rate = 44100
+    rng = np.random.default_rng(3)
+    step = int(0.107 * rate)  # 16ths at 140 BPM
+    n = np.arange(step * 2)
+    y = np.zeros(step * 66)
+    notes, truth = [], []
+    for k in range(64):
+        pitch, db = int(rng.integers(52, 84)), float(rng.uniform(-30, 0))
+        freq = 440 * 2 ** ((pitch - 69) / 12)
+        tone = sum(np.sin(2 * np.pi * h * freq * n / rate) / h for h in range(1, 6))
+        y[k * step:k * step + len(n)] += 10 ** (db / 20) * np.exp(-n / (0.08 * rate)) * tone
+        notes.append({"start": k * step / rate, "pitch": pitch})
+        truth.append(db)
+    assert spearmanr(audio_analysis.note_levels(y, rate, notes), truth)[0] > 0.95
+
+
 def test_reads_aiff_and_integer_pcm(tmp_path):
     tone = sine(440, 1, 0.5)
     path = tmp_path / "tone.aiff"

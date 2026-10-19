@@ -211,6 +211,14 @@ class FakeClip(FakeObj):
         self.length = self.length * 2
         self.loop_end = self.length
 
+    def sample_to_beat_time(self, sample_time):
+        """A warped audio clip's beat at a sample frame of its file: here a
+        straight warp at the file's own tempo (file_tempo), beat 0 at frame 0.
+        Live raises the same way for an unwarped clip."""
+        if self.is_midi_clip or not getattr(self, "warping", False):
+            raise RuntimeError("Sample is not warped")
+        return sample_time / self.sample_rate * getattr(self, "file_tempo", 120.0) / 60.0
+
 
 def _copy_clip(clip):
     copy = FakeClip(name=clip.name, length=clip.length, midi=clip.is_midi_clip)
@@ -261,6 +269,7 @@ class FakeClipSlot(FakeObj):
         clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
         object.__setattr__(clip, "file_path", path)
         object.__setattr__(clip, "warping", True)
+        object.__setattr__(clip, "sample_rate", 44100.0)
         self.clip = clip
         self.has_clip = True
         return clip
@@ -475,7 +484,7 @@ class FakeTrack(FakeObj):
     def create_audio_clip(self, path, position):
         clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
         for key, value in (("file_path", path), ("warping", True), ("start_time", float(position)),
-                           ("end_time", float(position) + 8.0)):
+                           ("end_time", float(position) + 8.0), ("sample_rate", 44100.0)):
             object.__setattr__(clip, key, value)
         self.arrangement_clips.append(clip)
         return clip

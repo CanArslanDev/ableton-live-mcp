@@ -140,7 +140,12 @@ def frequency_floor(hz: float | None) -> float | None:
 
 
 def transcribe(job: dict) -> dict:
+    """Basic Pitch's notes with their pitch bends as the model gives them:
+    thirds of a semitone, one per model frame (FFT_HOP / AUDIO_SAMPLE_RATE s)
+    from the note's start; ml.bend_cents corrects them. predict() always
+    estimates bends; multiple_pitch_bends only shapes its MIDI object."""
     from basic_pitch import ICASSP_2022_MODEL_PATH
+    from basic_pitch.constants import AUDIO_SAMPLE_RATE, FFT_HOP
     from basic_pitch.inference import Model, predict
 
     progress(0.05, "loading the model")
@@ -156,10 +161,11 @@ def transcribe(job: dict) -> dict:
         multiple_pitch_bends=False,
         melodia_trick=bool(job.get("melodia_trick", True)))
     notes = [{"start": round(float(start), 4), "end": round(float(end), 4), "pitch": int(pitch),
-              "amplitude": round(float(amplitude), 4)}
-             for start, end, pitch, amplitude, _bends in events]
+              "amplitude": round(float(amplitude), 4),
+              "bends": [int(b) for b in bends] if bends is not None else []}
+             for start, end, pitch, amplitude, bends in events]
     notes.sort(key=lambda n: (n["start"], n["pitch"]))
-    return {"notes": notes}
+    return {"notes": notes, "frame_s": FFT_HOP / AUDIO_SAMPLE_RATE}
 
 
 # ── Sound embeddings (CLAP) ──────────────────────────────────────────────────
