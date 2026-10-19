@@ -317,14 +317,26 @@ def _insert_device(devices, name, index=-1):
 
 
 class FakeDrumPad(FakeObj):
+    """A pad of a FakeDrumRack: its chains are the rack's chains that receive
+    its note (in_note), as in Live."""
+
     def __init__(self, note, rack):
-        super(FakeDrumPad, self).__init__(note=note, name="", mute=False, solo=False, chains=[])
+        super(FakeDrumPad, self).__init__(note=note, name="", mute=False, solo=False)
         object.__setattr__(self, "_rack", rack)
 
+    @property
+    def chains(self):
+        return [c for c in self._rack.chains if getattr(c, "in_note", None) == self.note]
+
+    @chains.setter
+    def chains(self, chains):
+        """What a sample dropped on the pad does: its chains replace the pad's."""
+        for chain in chains:
+            object.__setattr__(chain, "in_note", self.note)
+        self._rack.chains = [c for c in self._rack.chains
+                             if getattr(c, "in_note", None) != self.note] + list(chains)
+
     def delete_all_chains(self):
-        for chain in self.chains:
-            if chain in self._rack.chains:
-                self._rack.chains.remove(chain)
         self.chains = []
 
 
@@ -332,20 +344,9 @@ class FakeDrumChain(FakeObj):
     """A chain from RackDevice.insert_chain (Live 12.3+): it receives every
     note (in_note -1) until in_note puts it on a pad."""
 
-    def __init__(self, rack):
+    def __init__(self):
         super(FakeDrumChain, self).__init__(name="", in_note=-1, out_note=60, choke_group=0,
                                             devices=[], mute=False, solo=False)
-        object.__setattr__(self, "_rack", rack)
-
-    def __setattr__(self, name, value):
-        if name == "in_note":
-            for pad in self._rack.drum_pads:
-                if self in pad.chains:
-                    pad.chains = [c for c in pad.chains if c is not self]
-            if 0 <= int(value) < len(self._rack.drum_pads):
-                pad = self._rack.drum_pads[int(value)]
-                pad.chains = pad.chains + [self]
-        FakeObj.__setattr__(self, name, value)
 
     def insert_device(self, name, index=-1):
         return _insert_device(self.devices, name, index)
@@ -360,11 +361,9 @@ class FakeDrumRack(FakeDevice):
 
     def insert_chain(self, index=None):
         """Returns nothing, the way the fake assumes Live does."""
-        chain = FakeDrumChain(self)
-        if index is None:
-            self.chains.append(chain)
-        else:
-            self.chains.insert(int(index), chain)
+        chains = list(self.chains)
+        chains.insert(len(chains) if index is None else int(index), FakeDrumChain())
+        self.chains = chains
 
 
 def _drum_rack():
@@ -937,11 +936,8 @@ class FakeBrowser(FakeObj):
         stem = item.name.rsplit(".", 1)[0]
         if pad is not None:
             # as in Live: the pad's chain holds a Simpler with the sample
-            chain = FakeObj(name=stem, devices=[FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5))],
-                            choke_group=0)
-            pad.chains = [chain]
-            if isinstance(getattr(rack, "chains", None), list):
-                rack.chains.append(chain)
+            pad.chains = [FakeObj(name=stem, choke_group=0, out_note=pad.note, devices=[
+                FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5))])]
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:
