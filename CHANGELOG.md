@@ -36,6 +36,20 @@
   what applied (or that Live could not map a warped clip). Checked against
   the fake Live, not yet in Live. `lowest` and `highest` also take Hz
   ("82.4 Hz").
+- `build_tracks` loads a Simpler's or a drum pad's sample from a file
+  (`sample_path`, absolute) with `SimplerDevice.replace_sample` (Live
+  12.4+), builds those pads without the browser (`insert_chain`, `in_note`,
+  a Simpler per chain) and reads each file back from its Simpler. By name,
+  the browser's first hit could be another file with the same name. On
+  older Live, or when Live refuses a file, the file's name goes to the
+  browser (`loaded_by_name` says why), and the call fails if neither
+  works. Simplers and pads take `playback_mode` (classic, one_shot,
+  slicing) and `start_marker` (sample frames), pads `choke_group` (0–16),
+  and `signature` sets the time signature first. Settings such as
+  `"Detune": "-12 ct"` resolve by name as before. Everything goes through
+  the Remote Script's generic LOM bridge: script 2.1.0 works unchanged.
+  Checked against the fake Live only (see CLAUDE.md for what Live must
+  confirm).
 
 ### Changed
 

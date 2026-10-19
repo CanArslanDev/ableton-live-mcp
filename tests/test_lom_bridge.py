@@ -62,7 +62,7 @@ def script():
     surface._lom_init()
     surface.schedule_message = lambda delay, fn: fn()
     browser = fake_live.FakeBrowser(surface._song)
-    app = fake_live.FakeObj(view=fake_live.FakeAppView(), browser=browser)
+    app = fake_live.FakeApplication(browser)
     surface.application = lambda: app
     surface.module = module
     return surface
@@ -1176,6 +1176,107 @@ def test_build_tracks_drum_rack_and_audio_tracks(live_server, tmp_path):
     track = next(t for t in song.tracks if t.name == "REF drums")
     assert track.mute and ref["audio_clips"][0]["warping"] is False
     assert ref["audio_clips"][0]["start_marker"] == 0.0
+
+
+def _wavs(folder, *names):
+    import numpy as np
+    import soundfile as sf
+    paths = []
+    for name in names:
+        sf.write(folder / name, np.zeros(4410), 44100)
+        paths.append(str(folder / name))
+    return paths
+
+
+def test_build_tracks_loads_samples_by_path_with_simpler_options(live_server, tmp_path):
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    bass, kick, closed, opened = _wavs(tmp_path, "808 C1.wav", "kick.wav", "hat c.wav", "hat o.wav")
+    spec = [{"name": "808", "instrument": {"sample_path": bass, "warping": False, "playback_mode": "classic",
+                                           "start_marker": 32},
+             "settings": {"Volume": "0.0 dB", "Transpose": -3, "Detune": "-12 ct"}},
+            {"name": "Beat", "instrument": {"drum_rack": {
+                "36": {"sample_path": kick, "playback_mode": "one_shot", "start_marker": 64,
+                       "settings": {"Detune": "25 ct"}},
+                "42": {"sample_path": closed, "choke_group": 1},
+                "46": {"sample_path": opened, "choke_group": 1},
+                "38": {"sample": "Snare Tight.wav"}}}}]
+    result = call("build_tracks", tracks=spec, signature=[7, 8], sample_wait_s=0)
+    rows = {r["track"]: r for r in result["tracks"]}
+    assert all(not r["problems"] and "loaded_by_name" not in r for r in rows.values()), result
+    assert (song.signature_numerator, song.signature_denominator) == (7, 8)
+    # The Simpler holds the file itself (replace_sample), its settings by display name
+    simpler = next(t for t in song.tracks if t.name == "808").devices[0]
+    assert rows["808"]["instrument"] == bass and simpler.sample.file_path == bass
+    assert simpler.playback_mode == 0 and simpler.sample.start_marker == 32
+    shown = {p.name: p.str_for_value(p.value) for p in simpler.parameters}
+    assert (shown["Transpose"], shown["Detune"]) == ("-3 st", "-12 ct")
+    assert {p.name: p.value for p in simpler.parameters}["Volume"] == pytest.approx(0.0, abs=0.05)
+    # Pads by path: a chain per note with a Simpler, choke groups on the chains
+    rack = next(t for t in song.tracks if t.name == "Beat").devices[0]
+    pad = rack.drum_pads[36].chains[0].devices[0]
+    assert pad.sample.file_path == kick and pad.playback_mode == 1 and pad.sample.start_marker == 64
+    assert {p.name: p.str_for_value(p.value) for p in pad.parameters}["Detune"] == "25 ct"
+    assert [rack.drum_pads[n].chains[0].choke_group for n in (42, 46)] == [1, 1]
+    assert rack.drum_pads[46].chains[0].devices[0].sample.file_path == opened
+    # Only the pad given by name went through the browser
+    assert [(n, item) for _t, n, item in browser.loaded] == [(38, "Snare Tight.wav")]
+    assert rows["Beat"]["instrument"] == {"36": kick, "42": closed, "46": opened,
+                                          "38": "Drums/Drum Hits/Snare/Snare Tight.wav"}
+    assert len(rack.chains) == 4
+
+
+def test_build_tracks_loads_by_name_where_paths_cannot(live_server, tmp_path, monkeypatch):
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    named, unknown = _wavs(tmp_path, "Kick 808 Long.wav", "Nowhere 1.wav")
+    # Before Live 12.4 there is no replace_sample: the browser finds the file's name
+    object.__setattr__(script.application(), "_version", (12, 3, 5))
+    result = call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {
+        "36": {"sample_path": named, "choke_group": 2}}}}], sample_wait_s=0)
+    row = result["tracks"][0]
+    assert row["loaded_by_name"] == {"36": "replace_sample needs Live 12.4; this is 12.3.5"}
+    assert row["instrument"]["36"].endswith("Kick 808 Long.wav") and not row["problems"]
+    assert next(t for t in song.tracks if t.name == "Kit").devices[0].drum_pads[36].chains[0].choke_group == 2
+    # Neither way: the call fails, saying why for both
+    with pytest.raises(Exception, match="needs Live 12.4.*browser: Live's browser does not list 'Nowhere 1.wav'"):
+        call("build_tracks", tracks=[{"name": "Kit 2", "instrument": {"drum_rack": {
+            "36": {"sample_path": unknown}}}}], sample_wait_s=0)
+
+    # On Live 12.4 a file replace_sample refuses goes to the browser too, and
+    # the Simpler or chain that did not take it is removed
+    object.__setattr__(script.application(), "_version", (12, 4, 6))
+
+    def refuse(self, file_path):
+        raise RuntimeError("Unsupported file")
+
+    monkeypatch.setattr(fake_live.FakeSimpler, "replace_sample", refuse)
+    result = call("build_tracks", tracks=[
+        {"name": "One", "instrument": {"sample_path": named}},
+        {"name": "Kit 3", "instrument": {"drum_rack": {"36": {"sample_path": named}}}}], sample_wait_s=0)
+    one, kit = result["tracks"]
+    assert one["loaded_by_name"] == "replace_sample: Unsupported file"
+    assert one["devices"] == ["Kick 808 Long"]  # the browser's Simpler only
+    assert kit["loaded_by_name"]["36"].startswith("replace_sample:")
+    rack = next(t for t in song.tracks if t.name == "Kit 3").devices[0]
+    assert len(rack.chains) == 1 and rack.drum_pads[36].chains[0].name == "Kick 808 Long"
+    assert len([1 for _t, n, _i in browser.loaded if n == 36]) == 2
+
+
+def test_build_tracks_refuses_sampler_options_that_cannot_work(live_server, tmp_path):
+    script, call = live_server
+    before = len(script._song.tracks)
+    (kick,) = _wavs(tmp_path, "kick.wav")
+    for pad, message in (({"sample_path": "kick.wav"}, "must be absolute"),
+                         ({"sample_path": str(tmp_path / "gone.wav")}, "no such file"),
+                         ({"sample_path": kick, "playback_mode": "loop"}, "use classic, one_shot or slicing"),
+                         ({"sample_path": kick, "choke_group": 17}, "choke_group is 0"),
+                         ({"choke_group": 1}, "give sample_path")):
+        with pytest.raises(Exception, match=message):
+            call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {"36": pad}}}])
+    with pytest.raises(Exception, match="1-99 over 1, 2, 4, 8 or 16"):
+        call("build_tracks", tracks=[], signature="7/9")
+    assert len(script._song.tracks) == before
 
 
 def test_build_drum_kit_fills_general_midi_pads(live_server):

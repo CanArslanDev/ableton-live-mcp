@@ -10,6 +10,7 @@ setting values by display.
 """
 
 import math
+import os
 import sys
 import time
 import types
@@ -303,12 +304,71 @@ def _compressor():
     ], available_input_routing_types=routing, input_routing_type=routing[-1])
 
 
+def _insert_device(devices, name, index=-1):
+    """Track/Chain.insert_device (Live 12.3+): a native device by browser name."""
+    if name not in INSERTABLE:
+        raise RuntimeError("Unknown device name: %s" % name)
+    device = INSERTABLE[name]()
+    if index == -1:
+        devices.append(device)
+    else:
+        devices.insert(index, device)
+    return device
+
+
+class FakeDrumPad(FakeObj):
+    def __init__(self, note, rack):
+        super(FakeDrumPad, self).__init__(note=note, name="", mute=False, solo=False, chains=[])
+        object.__setattr__(self, "_rack", rack)
+
+    def delete_all_chains(self):
+        for chain in self.chains:
+            if chain in self._rack.chains:
+                self._rack.chains.remove(chain)
+        self.chains = []
+
+
+class FakeDrumChain(FakeObj):
+    """A chain from RackDevice.insert_chain (Live 12.3+): it receives every
+    note (in_note -1) until in_note puts it on a pad."""
+
+    def __init__(self, rack):
+        super(FakeDrumChain, self).__init__(name="", in_note=-1, out_note=60, choke_group=0,
+                                            devices=[], mute=False, solo=False)
+        object.__setattr__(self, "_rack", rack)
+
+    def __setattr__(self, name, value):
+        if name == "in_note":
+            for pad in self._rack.drum_pads:
+                if self in pad.chains:
+                    pad.chains = [c for c in pad.chains if c is not self]
+            if 0 <= int(value) < len(self._rack.drum_pads):
+                pad = self._rack.drum_pads[int(value)]
+                pad.chains = pad.chains + [self]
+        FakeObj.__setattr__(self, name, value)
+
+    def insert_device(self, name, index=-1):
+        return _insert_device(self.devices, name, index)
+
+
+class FakeDrumRack(FakeDevice):
+    def __init__(self):
+        super(FakeDrumRack, self).__init__("Drum Rack", "DrumGroupDevice", chains=[],
+                                           view=FakeObj(selected_drum_pad=None))
+        object.__setattr__(self, "drum_pads", [FakeDrumPad(n, self) for n in range(128)])
+        object.__setattr__(self, "can_have_chains", True)
+
+    def insert_chain(self, index=None):
+        """Returns nothing, the way the fake assumes Live does."""
+        chain = FakeDrumChain(self)
+        if index is None:
+            self.chains.append(chain)
+        else:
+            self.chains.insert(int(index), chain)
+
+
 def _drum_rack():
-    pads = [FakeObj(note=n, name="", mute=False, solo=False, chains=[]) for n in range(128)]
-    rack = FakeDevice("Drum Rack", "DrumGroupDevice", drum_pads=pads, chains=[],
-                      view=FakeObj(selected_drum_pad=None))
-    object.__setattr__(rack, "can_have_chains", True)
-    return rack
+    return FakeDrumRack()
 
 
 def _log_display(low, high, unit_low, unit_high=None, split=1000.0, digits=2):
@@ -372,13 +432,21 @@ def _instrument(name, class_name):
 class FakeSimpler(FakeDevice):
     def __init__(self, name, sample=None):
         super(FakeSimpler, self).__init__(name, "OriginalSimpler", [
-            _percent("S Start", 0.0), FakeParam("Transpose", 0.0, -48.0, 48.0),
+            _percent("S Start", 0.0),
+            FakeParam("Transpose", 0.0, -48.0, 48.0, display=lambda v: "%d st" % round(v)),
+            FakeParam("Detune", 0.0, -50.0, 50.0, display=lambda v: "%d ct" % round(v)),
             _db("Volume", -12.0, -36.0, 36.0),
             _choice("Trigger Mode", ["Trigger", "Gate"], 1)],
             sample=sample, playback_mode=0, reversed=False)
 
     def reverse(self):
         self.reversed = not self.reversed
+
+    def replace_sample(self, file_path):
+        """Live 12.4: the audio file at an absolute path replaces the sample."""
+        if not os.path.isabs(file_path) or not os.path.isfile(file_path):
+            raise RuntimeError("Could not load %s" % file_path)
+        self.sample = FakeSample(file_path)
 
 
 # What Track.insert_device builds (Live 12.3+), by browser name
@@ -490,14 +558,7 @@ class FakeTrack(FakeObj):
         return clip
 
     def insert_device(self, name, index=-1):
-        if name not in INSERTABLE:
-            raise RuntimeError("Unknown device name: %s" % name)
-        device = INSERTABLE[name]()
-        if index == -1:
-            self.devices.append(device)
-        else:
-            self.devices.insert(index, device)
-        return device
+        return _insert_device(self.devices, name, index)
 
 
 # ── Undo history, by the rules measured on Live 12.4 (see journal.py) ───────
@@ -820,6 +881,24 @@ class FakeAppView(FakeObj):
         return name in self.shown
 
 
+class FakeApplication(FakeObj):
+    """Live's Application: its view, the browser and the version (12.4.6
+    unless given)."""
+
+    def __init__(self, browser, version=(12, 4, 6)):
+        super(FakeApplication, self).__init__(view=FakeAppView(), browser=browser)
+        object.__setattr__(self, "_version", tuple(version))
+
+    def get_major_version(self):
+        return self._version[0]
+
+    def get_minor_version(self):
+        return self._version[1]
+
+    def get_bugfix_version(self):
+        return self._version[2]
+
+
 class FakeBrowserItem(FakeObj):
     def __init__(self, name, children=(), source="Core Library"):
         folder = bool(children) or "." not in name
@@ -858,7 +937,11 @@ class FakeBrowser(FakeObj):
         stem = item.name.rsplit(".", 1)[0]
         if pad is not None:
             # as in Live: the pad's chain holds a Simpler with the sample
-            pad.chains = [FakeObj(name=stem, devices=[FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5))])]
+            chain = FakeObj(name=stem, devices=[FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5))],
+                            choke_group=0)
+            pad.chains = [chain]
+            if isinstance(getattr(rack, "chains", None), list):
+                rack.chains.append(chain)
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:

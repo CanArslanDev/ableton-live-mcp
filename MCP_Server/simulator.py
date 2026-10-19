@@ -82,7 +82,7 @@ def build_surface(module: types.ModuleType, song: Any | None = None) -> Any:
     surface._lom_init()
     surface.schedule_message = lambda _delay, callback: callback()
     browser = fake_live.FakeBrowser(song)
-    application = fake_live.FakeObj(view=fake_live.FakeAppView(), browser=browser)
+    application = fake_live.FakeApplication(browser)
     surface.application = lambda: application
     surface._transport_init()
     return surface
