@@ -20,15 +20,22 @@
   of sines at 110, 220, 440 and 880 Hz); the values are corrected by that
   bin, after which in-tune and ±33-cent sines read 0 and ±33 cents. Live's
   API has no per-note pitch bend, so bends are returned, not written.
-- `audio_to_midi` velocities follow each note's level: a one-semitone
-  constant-Q band at the note's pitch, the loudest reading over its first
-  60 ms (`audio_analysis.note_levels`); the loudest note gets 127 and the
-  others 127 × 10^(dB below it / 40). Rank correlation with the true level
-  (Spearman, Basic Pitch on 4 clean synthetic renders each), against 127 ×
-  Basic Pitch's amplitude before: plucks 0.62 → 0.98, a legato lead
-  0.71 → 0.99, triad pads 0.27 → 0.94. With reverb and detuned pad voices a
-  similar measure ranked plucks at 0.81–0.83, a lead at 0.57 and pads at
-  0.20. `legacy` keeps the old velocity.
+- `audio_to_midi` velocities follow each note's level
+  (`audio_analysis.note_levels`): a band at the note's pitch, one semitone
+  wide but at most 100 ms long, the loudest of its readings from 20 ms
+  before the note's start to 60 ms after it, none past its end; the
+  loudest note gets 127 and the others 127 × 10^(dB below it / 40). Rank
+  correlation with the true level (Spearman, Basic Pitch on 4 clean
+  synthetic renders each), against 127 × Basic Pitch's amplitude before:
+  plucks 0.62 → 0.98, a legato lead 0.71 → 0.99, triad pads 0.27 → 0.95.
+  On 3 driven 808 lines (MIDI 28-43, -24 to 0 dB, 82 notes) it is 0.98,
+  and equal-level 808 lines get velocities 125–127. A one-semitone window
+  centred on the start (0.51 s at MIDI 24) read the silence or the note
+  before it: 0.95 and 102–127, and on equal-level 808 lines in 16ths a
+  10 dB spread. Below MIDI 53 the band is wider than a semitone, so a kick
+  on an 808 note adds 0.9 dB on average. With reverb and detuned pad
+  voices a similar measure ranked plucks at 0.81–0.83, a lead at 0.57 and
+  pads at 0.20. `legacy` keeps the old velocity.
 - `audio_to_midi` places notes where the source clip plays them: a warped
   clip through Live's own warp (`Clip.sample_to_beat_time`, in batches), an
   unwarped one from its start marker; notes the clip never plays are left

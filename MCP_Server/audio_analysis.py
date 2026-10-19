@@ -226,38 +226,64 @@ def estimate_key(mono: np.ndarray, rate: int) -> dict | None:
 # A band one semitone wide: a 12-per-octave constant-Q filter spans
 # 1 / (2^(1/12) - 1) = 16.8 cycles of its frequency under a Hann window
 SEMITONE_Q = 1 / (2 ** (1 / 12) - 1)
+# Below MIDI 53 (168 Hz) those 16.8 cycles last longer than 100 ms: 0.51 s at
+# MIDI 24. A window that long, centred on the note's start, read the silence
+# or the note before it: on equal-level 808 lines (decaying sines, MIDI 24-45,
+# cut by the next note) the levels spread 3.6 dB in quarters at 140 BPM, 4.1
+# in 8ths and 10.0 in 16ths, and a sine after silence read 2.8 dB low at MIDI
+# 24. Capped at 100 ms and kept inside the note: 0.08, 0.12 and 0.18 dB.
+LEVEL_WINDOW_S = 0.1
+# Basic Pitch's onsets are off by a frame or two (11.6 ms each)
+LEVEL_EARLY_S = 0.02
 
 
 def note_levels(mono: np.ndarray, rate: int, notes: list[dict],
-                window_s: float = 0.06, step_s: float = 0.005) -> np.ndarray:
+                span_s: float = 0.06, step_s: float = 0.005) -> np.ndarray:
     """Each note's level at its own pitch, in dB (a sine of amplitude A reads
-    20·log10(A)): a one-semitone constant-Q band at the note's fundamental,
-    the loudest of its readings every 5 ms over the note's first 60 ms.
-    notes carry "start" (seconds) and "pitch" (MIDI).
+    20·log10(A)): a Hann-windowed band at the note's fundamental, one
+    semitone wide but at most 100 ms long, the loudest of its readings every
+    5 ms from a window starting 20 ms before the note's start to one starting
+    60 ms after it. With an "end", no window runs past it unless the note is
+    shorter than the window. notes carry "start" (seconds) and "pitch" (MIDI).
 
     A level, unlike Basic Pitch's amplitude (a confidence): on synthetic
     plucks it ranked the notes by their true level far better (see
     audio_to_midi). Other notes within a semitone, or with a harmonic there,
-    add to it, so sustained chords measure poorly."""
+    add to it, so sustained chords measure poorly. Below MIDI 53 the band
+    is wider than a semitone: an equal-level note starting with it 2
+    semitones away reads 1.4 dB under it at MIDI 28 (13.5 dB with the
+    16.8-cycle window), 5 semitones away 10.8 dB; at MIDI 57, 2 semitones
+    away, 21.9 dB. So a kick on an 808 note at the same level adds 0.9 dB
+    on average, 3.6 dB at most, and an 808 left ringing under the next
+    note leaks into it. Decaying notes are read over their first 100 ms
+    at most, high notes over less: equal-level plucks decaying with an
+    80 ms time constant read 3.2 dB lower at MIDI 36-51 than at MIDI 96
+    (6.9 dB before the cap), 0.6 dB with 0.5 s. Onsets 50 ms late on
+    16th-note 808s at 140 BPM spread the levels by 1.5 dB."""
     levels = np.full(len(notes), np.nan)
     if not notes or not len(mono):
         return levels
     mono = np.asarray(mono, dtype=np.float64)
-    offsets = np.arange(0.0, window_s + 1e-9, step_s)
-    lowest = 440.0 * 2 ** ((min(int(n["pitch"]) for n in notes) - 69) / 12)
-    margin = int(SEMITONE_Q * rate / lowest) + 2
+    longest = int(LEVEL_WINDOW_S * rate) + 1
+    early, span = int(round(LEVEL_EARLY_S * rate)), int(round(span_s * rate))
+    step = max(1, int(round(step_s * rate)))
+    margin = early + span + longest
     padded = np.concatenate([np.zeros(margin), mono, np.zeros(margin)])
     kernels: dict[int, np.ndarray] = {}
     for index, note in enumerate(notes):
         pitch = int(note["pitch"])
         if pitch not in kernels:
             freq = 440.0 * 2 ** ((pitch - 69) / 12)
-            window = np.hanning(int(SEMITONE_Q * rate / freq) + 1)
+            window = np.hanning(min(int(SEMITONE_Q * rate / freq) + 1, longest))
             phase = np.exp(-2j * np.pi * freq * np.arange(len(window)) / rate)
             kernels[pitch] = window * phase * (2 / window.sum())
         kernel = kernels[pitch]
-        centres = np.clip(np.round((float(note["start"]) + offsets) * rate).astype(int), 0, len(mono))
-        firsts = centres - len(kernel) // 2 + margin
+        start = int(round(float(note["start"]) * rate))
+        last = start + span
+        if note.get("end") is not None:
+            last = min(last, int(round(float(note["end"]) * rate)) - len(kernel))
+        firsts = np.arange(start - early, max(start, last) + 1, step) + margin
+        firsts = np.clip(firsts, 0, len(padded) - len(kernel))
         frames = padded[firsts[:, None] + np.arange(len(kernel))[None, :]]
         levels[index] = 20 * np.log10(max(float(np.abs(frames @ kernel).max()), 1e-9))
     return levels

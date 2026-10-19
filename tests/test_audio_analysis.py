@@ -94,14 +94,55 @@ def test_note_levels_read_each_notes_level_at_its_pitch():
         y[k * rate:k * rate + len(t)] += 10 ** (db / 20) * np.sin(2 * np.pi * freq * t)
         notes.append({"start": float(k), "pitch": pitch})
         truth.append(db)
-    # A1's 150 ms window starts before its note: -6.07 dB
-    assert audio_analysis.note_levels(y, rate, notes) == pytest.approx(truth, abs=0.1)
+    assert audio_analysis.note_levels(y, rate, notes) == pytest.approx(truth, abs=0.05)
     # A note three semitones above, 20 dB louder and at the same time, adds
     # under a decibel
     loud = np.sin(2 * np.pi * 440 * 2 ** (3 / 12) * t)
     y[2 * rate:2 * rate + len(t)] += loud
     assert audio_analysis.note_levels(y, rate, notes[2:3])[0] == pytest.approx(-12.0, abs=1.0)
     assert np.isnan(audio_analysis.note_levels(np.zeros(0), rate, notes)).all()
+
+
+def line_808(rate, pitches, dbs, step_s, tau=0.5):
+    """A mono line of decaying sines (3 ms attack), each cut by the next note."""
+    y = np.zeros(int((0.5 + len(pitches) * step_s + 1.0) * rate))
+    n = int(step_s * rate)
+    t = np.arange(n) / rate
+    notes = []
+    for k, (pitch, db) in enumerate(zip(pitches, dbs, strict=True)):
+        freq = 440 * 2 ** ((pitch - 69) / 12)
+        start = int((0.5 + k * step_s) * rate)
+        y[start:start + n] += 10 ** (db / 20) * np.exp(-t / tau) * np.minimum(1, t / 0.003) * np.sin(
+            2 * np.pi * freq * t)
+        notes.append({"start": start / rate, "end": (start + n) / rate, "pitch": pitch})
+    return y, notes
+
+
+@pytest.mark.parametrize("step_s", [30 / 140, 15 / 140])  # 8ths and 16ths at 140 BPM
+def test_note_levels_read_low_notes_alike(step_s):
+    rate = 48000
+    pitches = list(np.random.default_rng(5).permutation(np.arange(24, 44)))
+    y, notes = line_808(rate, pitches, [-6.0] * len(pitches), step_s)
+    levels = audio_analysis.note_levels(y, rate, notes)
+    # A 16.8-cycle window centred on the start read MIDI 24 2.8 dB under MIDI
+    # 43 (8ths: 3.7 dB spread, 16ths 7.8 dB); 100 ms from the start, alike
+    assert levels.max() - levels.min() < 0.3
+    assert levels.mean() == pytest.approx(-6.9, abs=0.2)  # the first 100 ms of a 0.5 s decay
+    # A sine after silence reads its level at the lowest pitches too
+    y = np.zeros(2 * rate)
+    y[rate:] = 0.5 * np.sin(2 * np.pi * 32.703 * np.arange(rate) / rate)
+    assert audio_analysis.note_levels(y, rate, [{"start": 1.0, "pitch": 24}])[0] == pytest.approx(-6.02, abs=0.05)
+
+
+def test_note_levels_stop_at_the_notes_end():
+    # An 808 restating its note in 16ths, 24 dB louder each other time. The
+    # centred window read -14.7 and -11.7 dB; now the quiet notes read their
+    # own level, plus 0.7 dB from the loud one's last 20 ms
+    rate = 48000
+    y, notes = line_808(rate, [31] * 8, [-30.0, -6.0] * 4, 15 / 140)
+    levels = audio_analysis.note_levels(y, rate, notes)
+    assert levels[0::2] == pytest.approx([-30.4] * 4, abs=0.4)
+    assert levels[1::2] == pytest.approx([-6.75] * 4, abs=0.1)
 
 
 def test_note_levels_rank_plucks_by_their_level():
