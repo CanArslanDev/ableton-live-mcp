@@ -194,11 +194,11 @@ def file_stem(prompt: str, when: str) -> str:
 # renders (plucks, arpeggios with 32nd runs, leads with glides, pads; clean,
 # with an 808, with a bleed loop, wet), onset F1 (50 ms, 50 cents) averaged
 # over 7 groups: legacy (Basic Pitch's own defaults) 0.583, melodic 0.687
-# (0.706 with lowest just above the 808), chords 0.636. legacy keeps only
-# notes of 12 frames (139 ms) or more: on 32nd runs at 140 BPM (54 ms) its
-# F1 was 0.36 against melodic's 0.90. Without melodia, onsets without an
-# attack are missed: chord tones sounding on reverberant pads 0.82 (chords)
-# against 0.43 (melodic); pure sines with a 10 ms fade-in 15 of 16 against 3.
+# (0.706 with lowest just above the 808), chords 0.636; chord tones sounding
+# on the pads 0.82 with chords, 0.43 with melodic. legacy keeps only notes
+# of 12 frames (139 ms) or more: on 4 clean renders of 32nd runs at 140 BPM
+# (54 ms) its F1 was 0.36, melodic's 0.90. melodic misses notes without an
+# attack: of 16 pure sines with a 10 ms fade-in it found 3, chords 15.
 TRANSCRIPTION_PRESETS = {
     "melodic": {"onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
                 "melodia_trick": False, "velocity": "level"},
