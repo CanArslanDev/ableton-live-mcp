@@ -244,8 +244,8 @@ def transcription_settings(preset: str = "melodic", **given: Any) -> dict:
 def drop_octave_ghosts(events: list[dict], below: int | None) -> list[dict]:
     """Basic Pitch's notes without those under `below` (MIDI) that sound for
     more than half their length over a note an octave lower: melodia reads a
-    bass's second harmonic as a note of its own. On saw bass lines (MIDI
-    28-43) they were 59 of 82 extra notes, and onset F1 went from 0.63 to
+    bass's second harmonic as a note of its own. On 3 saw bass lines (MIDI
+    28-43) they were 83 of 106 extra notes, and onset F1 went from 0.63 to
     0.82 without them."""
     if below is None:
         return events
