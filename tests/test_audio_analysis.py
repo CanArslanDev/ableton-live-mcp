@@ -56,6 +56,34 @@ def test_tempo_and_key_estimates(tmp_path):
     assert result["stereo"] is None
 
 
+def click_track(bpm, rate, seconds=30.0):
+    """A 1 kHz click (4 ms decay) on every beat."""
+    y = np.zeros(int(rate * seconds))
+    n = np.arange(int(0.03 * rate))
+    click = 0.5 * np.exp(-n / (0.004 * rate)) * np.sin(2 * np.pi * 1000 * n / rate)
+    for beat in range(int(seconds * bpm / 60) + 1):
+        start = int(round(beat * 60 / bpm * rate))
+        part = click[: max(0, len(y) - start)]
+        y[start:start + len(part)] += part
+    return y
+
+
+@pytest.mark.parametrize("rate", [44100, 48000])
+def test_tempo_is_found_between_frames(rate):
+    # 137 BPM falls between two whole-frame lags (136.0 and 139.7 at 44.1 kHz)
+    assert audio_analysis.estimate_tempo(click_track(137.0, rate), rate) == pytest.approx(137.0, abs=0.05)
+    for bpm in (90.0, 128.0, 140.0):
+        assert audio_analysis.estimate_tempo(click_track(bpm, rate), rate) == pytest.approx(bpm, abs=0.05)
+
+
+def test_peak_lag_finds_the_vertex_between_lags():
+    lags = np.arange(40.0)
+    ac = -((lags - 21.3) ** 2)
+    assert audio_analysis.peak_lag(ac, 21) == pytest.approx(21.3)
+    assert audio_analysis.peak_lag(ac, 19) == pytest.approx(21.3)  # walks uphill first
+    assert audio_analysis.peak_lag(ac, 0) == 0.0
+
+
 def test_reads_aiff_and_integer_pcm(tmp_path):
     tone = sine(440, 1, 0.5)
     path = tmp_path / "tone.aiff"

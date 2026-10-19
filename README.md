@@ -86,7 +86,8 @@ workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 (ITU-R BS.1770 LUFS, verified against the reference tone), true peak, loudness
 range, crest factor, clipping, DC offset, energy per band (sub → air), spectral
 centroid, stereo correlation and width (including below 150 Hz), and tempo and
-key estimates — plus plain-language observations such as *"Heavy low-mids
+key estimates (the tempo to within 0.01 BPM on click tracks, when it picks the
+right octave) — plus plain-language observations such as *"Heavy low-mids
 (250–500 Hz); a source of muddiness"*.
 
 ### Tool profiles and safety

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- The tempo estimate of the audio analysis tools is found between frames: a
+  parabola through the autocorrelation peak at one beat, then at 2 to 32
+  beats. Whole-frame lags are 3.9 BPM apart at 140 BPM (44.1 kHz), and a
+  137 BPM click track read 136.0; it reads 137.0 now. Click tracks from 70
+  to 175 BPM at 44.1 and 48 kHz came within 0.01 BPM wherever the tempo
+  octave was right; the octave choice is unchanged (150 BPM still reads 75).
+
 ### Documentation
 
 - `capture_stems` says its recordings are at the audio device's sample rate
