@@ -338,7 +338,9 @@ Written from Ableton's documentation and checked only against `fake_live`
   its return value is not used), `DrumChain.in_note` (12.3), then
   `Chain.insert_device("Simpler")`. New chains are found by comparing the
   rack's chain ids before and after; a failed pad is cleared with
-  `DrumPad.delete_all_chains()`.
+  `DrumPad.delete_all_chains()`. If one of these calls fails, the rack is
+  deleted (`Track.delete_device`) and a new one gets every pad from the
+  browser: no call deletes a single rack chain.
 - `Sample.start_marker` is an int, taken as sample frames; `choke_group`
   0 = none and 1–16 as in the UI; `playback_mode` set as 0/1/2 (the bridge
   turns ints into Live's enum).

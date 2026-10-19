@@ -2702,22 +2702,28 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             raise
         return simpler
 
+    def first_error(result: dict) -> str:
+        return next((str(step.get("message")) for step in result.get("results", [])
+                     if step.get("status") == "error"), "no error reported")
+
     def pads_from_paths(rack: str, files: dict[int, str]) -> tuple[dict[int, tuple[str, str]], dict[int, str]]:
         """Drum Rack pads without the browser (Live 12.4+): per note a new
         chain (insert_chain, in_note), a Simpler on it and the note's file in
         that (replace_sample), read back. {note: (chain, simpler)} for the
-        pads that loaded, {note: why} for the rest, whose chains are deleted."""
+        pads that loaded, {note: why} for the rest, whose chains are deleted.
+        Raises when Live refuses a chain or its Simpler (the rack is then
+        replaced: see fresh_rack)."""
         before = {c["$id"] for c in lom_get(f"{rack} chains", ["name"])["items"]}
         made = batch([op_call(rack, "insert_chain") for _ in files])
         fresh = [c["$id"] for c in lom_get(f"{rack} chains", ["name"])["items"] if c["$id"] not in before]
         notes = list(files)
         if made.get("failed") or len(fresh) != len(notes):
-            raise RuntimeError(f"insert_chain gave {len(fresh)} new chains for {len(notes)} pads: "
-                               f"{batch_summary(made)['steps']}")
+            raise RuntimeError(f"insert_chain gave {len(fresh)} new chains for {len(notes)} pads"
+                               + (f" ({first_error(made)})" if made.get("failed") else ""))
         steps = batch([step for note, chain in zip(notes, fresh) for step in (
             op_set(f"id {chain}", "in_note", note), op_call(f"id {chain}", "insert_device", "Simpler"))])
         if steps.get("failed"):
-            raise RuntimeError(f"Drum Rack chains by path: {batch_summary(steps)['steps']}")
+            raise RuntimeError(f"a chain's in_note or Simpler: {first_error(steps)}")
         simplers = [step["result"]["result"]["$id"] for step in steps["results"][1::2]]
         batch([op_call(f"id {simpler}", "replace_sample", files[note])
                for note, simpler in zip(notes, simplers)], stop_on_error=False)
@@ -2730,6 +2736,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 failed[note] = f"replace_sample: {e}"
                 send("lom_call", {"path": f"{rack} drum_pads {note}", "method": "delete_all_chains"})
         return placed, failed
+
+    def fresh_rack(tp: str, rack: str) -> str:
+        """Delete the track's Drum Rack and put an empty one in its place, its
+        id: a build by path that Live refused part-way leaves chains on no pad
+        or on all notes, and no call deletes a single rack chain."""
+        devices = lom_get(f"{tp} devices", ["name"])["items"]
+        index = next(i for i, d in enumerate(devices) if f"id {d.get('$id')}" == rack)
+        send("lom_call", {"path": tp, "method": "delete_device", "args": [index]})
+        return f"id {inserted_device_ids(tp, [['Drum Rack', index]])[0]}"
 
     @tool(destructive=True)
     def build_tracks(tracks: list[dict], replace: bool = False, sample_wait_s: float = 40.0,
@@ -2756,12 +2771,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         Simplers and pads also take playback_mode (classic | one_shot | slicing)
         and start_marker (sample frames); pads take choke_group (0 none, 1-16).
         sample_path loads the file itself (Live 12.4+, read back); on older Live,
-        or when that fails, its file name goes to the browser ("loaded_by_name"
-        says why), and the call fails if neither works. A name with a file
-        extension is looked up exactly, waiting up to sample_wait_s for Live to
-        list a new file. Settings take display text ("-12 dB", "-12 ct") or raw
-        numbers. Sidechains are routed once every track exists. signature:
-        [7, 8] or "7/8", set first. replace=True first deletes tracks with these names.
+        or when that fails, the browser loads "sample" if given, else the file's
+        name ("loaded_by_name" says why), and the call fails if neither works.
+        A name with a file extension is looked up exactly, waiting up to
+        sample_wait_s for Live to list a new file. Settings take display text
+        ("-12 dB", "-12 ct") or raw numbers. Sidechains are routed once every
+        track exists. signature: [7, 8] or "7/8", set first. replace=True first
+        deletes tracks with these names.
         """
         names = [str(t["name"]) for t in tracks]
         if len(set(names)) != len(names):
@@ -2832,7 +2848,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 if files:
                     off = path_loading_off()
                     if off is None:
-                        placed, why = pads_from_paths(rack, files)
+                        try:
+                            placed, why = pads_from_paths(rack, files)
+                        except Exception as e:  # every pad by name, on a new rack
+                            rack = fresh_rack(tp, rack)
+                            why = {n: f"pads by path: {e}" for n in files}
                     else:
                         why = {n: off for n in files}
                 labels = {n: files[n] for n in placed}

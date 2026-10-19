@@ -1288,6 +1288,67 @@ def test_build_tracks_loads_by_name_where_paths_cannot(live_server, tmp_path, mo
     assert len([1 for _t, n, _i in browser.loaded if n == 36]) == 2
 
 
+def test_build_tracks_takes_sample_next_to_sample_path(live_server, tmp_path):
+    """A spec for ableton-live-mcp 2.2.0, which knows only "sample", works
+    here too: the file loads by path, and the name is what the browser looks
+    up when the path cannot be used."""
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    (render,) = _wavs(tmp_path, "render 7.wav")  # a name the browser does not list
+    spec = [{"name": "808", "instrument": {"sample": "Kick 808 Long.wav", "sample_path": render}},
+            {"name": "Kit", "instrument": {"drum_rack": {
+                "36": {"sample": "Kick 808 Long.wav", "sample_path": render}}}}]
+    rows = call("build_tracks", tracks=spec, sample_wait_s=0)["tracks"]
+    assert [r["instrument"] for r in rows] == [render, {"36": render}] and browser.loaded == []
+    object.__setattr__(script.application(), "_version", (12, 3, 5))
+    rows = call("build_tracks", tracks=spec, replace=True, sample_wait_s=0)["tracks"]
+    assert rows[0]["instrument"].endswith("Kick 808 Long.wav") and rows[0]["loaded_by_name"]
+    assert rows[1]["instrument"]["36"].endswith("Kick 808 Long.wav")
+    assert [item for _t, _n, item in browser.loaded] == ["Kick 808 Long.wav"] * 2
+    assert next(t for t in song.tracks if t.name == "808").devices[0].sample.file_path.endswith("Kick 808 Long.wav")
+
+
+@pytest.mark.parametrize("refusal", ["insert_chain", "in_note", "insert_device"])
+def test_build_tracks_rebuilds_a_rack_by_name_when_live_refuses_its_chains(live_server, tmp_path, monkeypatch,
+                                                                          refusal):
+    """None of the calls that build pads by path has run in Live yet. If Live
+    lacks one, the rack goes and every pad comes from the browser on a new one."""
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    (named,) = _wavs(tmp_path, "Kick 808 Long.wav")
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError(f"Chain has no method '{refusal}'")
+
+    if refusal == "insert_chain":
+        monkeypatch.setattr(fake_live.FakeDrumRack, "insert_chain", refuse)
+    elif refusal == "insert_device":
+        monkeypatch.setattr(fake_live.FakeDrumChain, "insert_device", refuse)
+    else:
+        setter = fake_live.FakeDrumChain.__setattr__
+
+        def no_in_note(self, name, value):
+            if name == "in_note" and value != -1:
+                refuse()
+            setter(self, name, value)
+
+        monkeypatch.setattr(fake_live.FakeDrumChain, "__setattr__", no_in_note)
+    result = call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {
+        "36": {"sample_path": named, "choke_group": 1}, "38": {"sample": "Snare Tight.wav"}}}}],
+        sample_wait_s=0)
+    row = result["tracks"][0]
+    assert not row["problems"] and set(row["loaded_by_name"]) == {"36"}
+    assert row["loaded_by_name"]["36"].startswith("pads by path:") and refusal in row["loaded_by_name"]["36"]
+    assert row["instrument"]["36"].endswith("Kick 808 Long.wav")
+    # One rack, named track, one chain per pad: nothing left over from the attempt
+    track = song.tracks[-1]
+    assert track.name == "Kit" and row["devices"] == ["Drum Rack"]
+    rack = track.devices[0]
+    assert sorted(c.in_note for c in rack.chains) == [36, 38]
+    assert rack.drum_pads[36].chains[0].choke_group == 1
+    assert sorted(n for _t, n, _i in browser.loaded) == [36, 38]
+
+
 def test_build_tracks_refuses_sampler_options_that_cannot_work(live_server, tmp_path):
     script, call = live_server
     before = len(script._song.tracks)

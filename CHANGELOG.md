@@ -66,10 +66,16 @@
   works. Simplers and pads take `playback_mode` (classic, one_shot,
   slicing) and `start_marker` (sample frames), pads `choke_group` (0–16),
   and `signature` sets the time signature first. Settings such as
-  `"Detune": "-12 ct"` resolve by name as before. Everything goes through
-  the Remote Script's generic LOM bridge: script 2.1.0 works unchanged.
-  Checked against the fake Live only (see CLAUDE.md for what Live must
-  confirm).
+  `"Detune": "-12 ct"` resolve by name as before. If Live refuses a call
+  that builds pads by path (`insert_chain`, `in_note`,
+  `Chain.insert_device`), the rack is deleted and every pad comes from the
+  browser on a new one, as `loaded_by_name` says (the call used to fail,
+  leaving an unnamed track with a chain on no pad). `sample` may come with
+  `sample_path`: it is the name the browser looks up when the path cannot
+  be used, and what 2.2.0, which ignores `sample_path` and the new options
+  without an error, loads. Everything goes through the Remote Script's
+  generic LOM bridge: script 2.1.0 works unchanged. Checked against the
+  fake Live only (see CLAUDE.md for what Live must confirm).
 
 ### Changed
 
