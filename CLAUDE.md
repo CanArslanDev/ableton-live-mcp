@@ -309,8 +309,37 @@ Measured on Live 12.3.8:
   from a `LogitsProcessor`, called once per step. Weights CC-BY-NC 4.0.
   Stable Audio Open (gated, needs a Hugging Face token) is not included.
 - `lowest`/`highest` use Live's note names: A1 = MIDI 45 = 110 Hz.
+- Basic Pitch 0.4.0 (2026-10-19): `predict()`'s note events always carry
+  bends (thirds of a semitone per 11.6 ms frame); `multiple_pitch_bends`
+  only shapes its MIDI object. They read one bin sharp: in-tune sines at
+  110–880 Hz gave +1 in 99.4–100 % of frames, so `ml.bend_cents` subtracts
+  one. The melodic preset (onset 0.6, melodia off) needs an attack: it
+  found 3 of 16 pure sines with a 10 ms fade-in, chords and legacy 15 and 14.
 - Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
   `ABLETON_MCP_ML_TESTS=1` adds a run with the real Basic Pitch model.
+
+## Replica mode: Live API uses not yet checked in Live
+
+Written from Ableton's documentation and checked only against `fake_live`
+(2026-10-19). Check each in a scratch set before claiming it works:
+
+- `SimplerDevice.replace_sample(path)` (Live 12.4 release notes) on a
+  Simpler just inserted with `insert_device`, which holds no sample yet.
+  `build_tracks` reads `sample file_path` back for up to 2 s and falls back
+  to the browser by file name.
+- Drum Rack pads without the browser: `RackDevice.insert_chain()` (12.3;
+  its return value is not used), `DrumChain.in_note` (12.3), then
+  `Chain.insert_device("Simpler")`. New chains are found by comparing the
+  rack's chain ids before and after; a failed pad is cleared with
+  `DrumPad.delete_all_chains()`.
+- `Sample.start_marker` is an int, taken as sample frames; `choke_group`
+  0 = none and 1–16 as in the UI; `playback_mode` set as 0/1/2 (the bridge
+  turns ints into Live's enum).
+- `audio_to_midi` on a warped clip: `Clip.sample_to_beat_time(frames)`
+  minus `start_marker` (beats) as the note's beat in the new clip; on an
+  unwarped clip `start_marker` in seconds; `Clip.sample_rate`, else the
+  file's rate.
+- Live's version from `Application.get_major/minor/bugfix_version()`.
 
 ## Live Set files (.als), as read from Live 12.4's own sets
 
