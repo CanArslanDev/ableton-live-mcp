@@ -319,9 +319,10 @@ Measured on Live 12.3.8:
   the model's output twice (`ml_worker.melodia_ranges`): melodia off from
   MIDI 52 up, on below, then `ml.drop_octave_ghosts`. `constrain_frequency`
   zeroes the arrays in place, so each decoding gets a copy. Notes at
-  29–52 Hz start a median 109 ms late (IQR 48–187 ms): the model's onset
-  head rises from 0.2 to 0.3–0.4 over ~150 ms there, and onset thresholds
-  from 0.2 to 0.6 all gave F1 ≤ 0.17 on those stems.
+  29–52 Hz start a median 109 ms late (IQR 48–187 ms). At those notes'
+  pitch the onset head read a median 0.29 at the true onset and peaked at
+  0.37, 81 ms later; 0.3 % of the 336 notes reached 0.6 and 7 % 0.5, and
+  onset thresholds from 0.2 to 0.6 all gave F1 ≤ 0.17 on those stems.
 - Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
   `ABLETON_MCP_ML_TESTS=1` adds a run with the real Basic Pitch model.
 
