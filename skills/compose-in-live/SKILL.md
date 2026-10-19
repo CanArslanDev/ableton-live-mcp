@@ -73,7 +73,9 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
 - `audio_to_midi(track=..., clip_index=..., to_track=...)` turns a melody,
   bass line or chords in an audio clip (or a file) into a MIDI clip, where the
   clip plays them (through its warp); `preset="chords"` for soft or
-  reverberant pads, whose onsets the default misses; for a file warped from
+  reverberant pads and sine-like leads, whose onsets the default misses
+  above MIDI 52. 808s and sub basses below it come out, but Basic Pitch
+  starts the lowest (under ~50 Hz) about 0.1 s late. For a file warped from
   another tempo, pass the audio's own `tempo`.
 - `separate_stems(track=..., clip_index=..., to_tracks=true)` splits a mix
   into drums, bass, vocals and other on new tracks, e.g. to sample a part or

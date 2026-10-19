@@ -199,9 +199,19 @@ def file_stem(prompt: str, when: str) -> str:
 # of 12 frames (139 ms) or more: on 4 clean renders of 32nd runs at 140 BPM
 # (54 ms) its F1 was 0.36, melodic's 0.90. melodic misses notes without an
 # attack: of 16 pure sines with a 10 ms fade-in it found 3, chords 15.
+# Nor do 808s and sub basses show it onsets: on 6 synthetic bass lines (MIDI
+# 28-43) melodia off found 15 of 124 808 notes and none of a sine bass's, and
+# on 6 calibration 808 stems (MIDI 22-32) 1 of 336. So melodic keeps
+# melodia below MIDI 52 (165 Hz, MELODIA_BELOW), and drops what melodia reads
+# there as a note an octave over a sounding one (drop_octave_ghosts). Onset
+# F1, melodic without them -> with them: 808 lines 0.18 -> 0.86, sine bass
+# 0.00 -> 0.45, saw bass 0.84 -> 0.82, the 808 stems 0.006 -> 0.17 (Basic
+# Pitch starts those a median 102 ms late); plucks, runs, lead and pads
+# above it 0.915 -> 0.916, plucks and pads at MIDI 40-60 0.900 -> 0.873.
+MELODIA_BELOW = 52
 TRANSCRIPTION_PRESETS = {
     "melodic": {"onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
-                "melodia_trick": False, "velocity": "level"},
+                "melodia_trick": False, "melodia_below": MELODIA_BELOW, "velocity": "level"},
     "chords": {"onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
                "melodia_trick": True, "velocity": "level"},
     "legacy": {"onset_threshold": 0.5, "frame_threshold": 0.3, "minimum_note_ms": 127.7,
@@ -218,12 +228,37 @@ BEND_FRAME_S = 256 / 22050
 
 
 def transcription_settings(preset: str = "melodic", **given: Any) -> dict:
-    """The preset's settings with the given ones (not None) on top."""
+    """The preset's settings with the given ones (not None) on top. A given
+    melodia_trick holds at every pitch."""
     if preset not in TRANSCRIPTION_PRESETS:
         raise ValueError(f"Unknown preset {preset!r}; known: {', '.join(TRANSCRIPTION_PRESETS)}")
     settings = dict(TRANSCRIPTION_PRESETS[preset])
     settings.update({k: v for k, v in given.items() if v is not None})
+    if given.get("melodia_trick") is not None:
+        settings.pop("melodia_below", None)
     return settings
+
+
+def drop_octave_ghosts(events: list[dict], below: int | None) -> list[dict]:
+    """Basic Pitch's notes without those under `below` (MIDI) that sound for
+    more than half their length over a note an octave lower: melodia reads a
+    bass's second harmonic as a note of its own. On saw bass lines (MIDI
+    28-43) they were 59 of 82 extra notes, and onset F1 went from 0.63 to
+    0.82 without them."""
+    if below is None:
+        return events
+    by_pitch: dict[int, list[tuple[float, float]]] = {}
+    for event in events:
+        by_pitch.setdefault(int(event["pitch"]), []).append((float(event["start"]), float(event["end"])))
+    kept = []
+    for event in events:
+        pitch, start, end = int(event["pitch"]), float(event["start"]), float(event["end"])
+        if pitch < below:
+            covered = sum(max(0.0, min(end, b) - max(start, a)) for a, b in by_pitch.get(pitch - 12, ()))
+            if covered > 0.5 * (end - start):
+                continue
+        kept.append(event)
+    return kept
 
 
 def bend_cents(bends: list[int]) -> list[int]:

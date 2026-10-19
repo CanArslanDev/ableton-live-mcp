@@ -5,15 +5,28 @@
 ### Added
 
 - `audio_to_midi` takes a `preset`: `melodic` (the default: onset 0.6,
-  frame 0.3, 35 ms, melodia off), `chords` (the same with melodia on) or
-  `legacy` (what it did before: 0.5, 0.3, 127.7 ms, melodia on), and
-  `melodia_trick`, which it never passed (it was always on). On 63 synthetic
-  renders (plucks, 32nd runs, leads, pads; with reverb, an 808 and a bleed
-  loop), onset F1 went from 0.583 (legacy) to 0.687 (melodic), 0.706 with
-  `lowest` just above the 808. legacy keeps only notes of 139 ms or more:
-  on 32nd-note runs at 140 BPM its F1 was 0.36, melodic's 0.90 (4 clean
-  renders through this server's worker). melodic needs an attack: it found
-  3 of 16 pure sines with a 10 ms fade-in, chords 15.
+  frame 0.3, 35 ms, melodia only below MIDI 52), `chords` (melodia at every
+  pitch) or `legacy` (what it did before: 0.5, 0.3, 127.7 ms, melodia on),
+  and `melodia_trick`, which it never passed (it was always on); given, it
+  holds at every pitch. On 63 synthetic renders (plucks, 32nd runs, leads,
+  pads; with reverb, an 808 and a bleed loop), onset F1 went from 0.583
+  (legacy) to 0.687 with melodia off at every pitch, 0.706 with `lowest`
+  just above the 808 (measured by an earlier spike, not again with melodia
+  below MIDI 52). legacy keeps only notes of 139 ms or more: on 32nd-note
+  runs at 140 BPM its F1 was 0.36, melodic's 0.90 (4 clean renders through
+  this server's worker). Without melodia a note needs an attack Basic Pitch
+  sees: it found 3 of 16 pure sines with a 10 ms fade-in (chords 15), 13 of
+  124 notes on synthetic 808 lines and 2 notes for the 336 of six 808 stems
+  (MIDI 22-32; "No notes found" on five of them). So melodic decodes the
+  model's output twice, melodia off from MIDI 52 (165 Hz) up and on below,
+  and drops the low notes melodia reads an octave over a sounding one (a
+  bass's second harmonic). Onset F1, melodia off everywhere → melodic (3
+  renders each): 808 lines 0.18 → 0.86, with repeated notes 0.18 → 0.49,
+  sine bass 0.00 → 0.45, saw bass 0.84 → 0.82, sine bass at MIDI 40-55
+  0.34 → 0.82; plucks, runs, a lead and pads above MIDI 52 0.915 → 0.916,
+  plucks and pads at MIDI 40-60 0.900 → 0.873. On the 808 stems F1 went
+  from 0.006 to 0.17: the notes have their pitch, but Basic Pitch starts
+  them a median 109 ms late (IQR 48–187 ms) at 29–52 Hz.
 - `audio_to_midi(bends=true)` lists the pitch bend of each bent note in
   cents, one value per model frame (11.6 ms). Basic Pitch 0.4.0 reads
   in-tune notes a third of a semitone sharp (+1 in 99.4–100 % of the frames

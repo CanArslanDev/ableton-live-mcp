@@ -701,10 +701,12 @@ def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch)
     assert [n["start_time"] for n in note_dicts(listing)] == [0, 2]
     # Live's note names: A1 is MIDI 45, 110 Hz
     assert jobs[0][1]["minimum_frequency"] == pytest.approx(110.0)
-    # The melodic preset by default; velocity from each note's level: 12 dB down is 64
+    # The melodic preset by default (melodia only below MIDI 52); velocity
+    # from each note's level: 12 dB down is 64
     assert {k: jobs[0][1][k] for k in ("onset_threshold", "frame_threshold", "minimum_note_ms",
-                                       "melodia_trick")} == {
-        "onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0, "melodia_trick": False}
+                                       "melodia_trick", "melodia_below")} == {
+        "onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0, "melodia_trick": False,
+        "melodia_below": 52}
     assert [n["velocity"] for n in note_dicts(listing)] == [127, 64]
     assert listing["velocity"] == {"from": "level", "loudest_db": -6.0}
     assert listing["timing"] == {"offset_beats": 0.0, "method": "tempo", "tempo": 120.0}
@@ -722,7 +724,30 @@ def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch)
     # Given settings win over the preset; frequencies in Hz pass through
     call("audio_to_midi", path=str(wav), preset="chords", onset_threshold=0.4, highest="2093 Hz")
     assert jobs[2][1]["onset_threshold"] == 0.4 and jobs[2][1]["melodia_trick"] is True
-    assert jobs[2][1]["maximum_frequency"] == 2093.0
+    assert jobs[2][1]["maximum_frequency"] == 2093.0 and "melodia_below" not in jobs[2][1]
+
+
+def test_audio_to_midi_drops_a_bass_notes_octave_ghost(live_server, tmp_path, monkeypatch):
+    from MCP_Server import ml
+
+    _script, call = live_server
+    found = [{"start": 0.0, "end": 1.0, "pitch": 33, "amplitude": 0.5, "bends": []},
+             {"start": 0.02, "end": 0.9, "pitch": 45, "amplitude": 0.3, "bends": []},
+             {"start": 1.0, "end": 1.4, "pitch": 45, "amplitude": 0.4, "bends": []}]
+
+    async def run(task, job, report=None, timeout=3600.0):
+        return {"notes": list(found), "frame_s": 256 / 22050}
+
+    monkeypatch.setattr(ml, "run", run)
+    wav = _riff(tmp_path / "Bass.wav")
+    listing = call("audio_to_midi", path=str(wav))
+    # The A2 under the A1 is its second harmonic; the A2 after it is a note
+    assert [(n["pitch"], n["start_time"]) for n in note_dicts(listing)] == [(33, 0), (45, 2)]
+    # chords decodes with melodia everywhere and keeps every note it finds
+    assert len(note_dicts(call("audio_to_midi", path=str(wav), preset="chords"))) == 3
+    found.clear()
+    with pytest.raises(Exception, match='No notes found; try preset="chords"'):
+        call("audio_to_midi", path=str(wav))
 
 
 def test_audio_to_midi_lists_corrected_bends(live_server, tmp_path, monkeypatch):

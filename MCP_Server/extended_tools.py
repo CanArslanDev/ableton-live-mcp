@@ -2366,11 +2366,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - to_track: write a MIDI clip there (Session slot to_clip_index, or
           arrangement_time; default where the source clip is); midi_path: a .mid file;
           with neither, the notes are listed
-        - preset: melodic (onset 0.6, frame 0.3, 35 ms, melodia off) | chords (the same
-          with melodia on: soft pad onsets, more ghost notes) | legacy (0.5, 0.3, 127.7 ms,
-          melodia on, velocity 127 × Basic Pitch's confidence); onset_threshold,
+        - preset: melodic (onset 0.6, frame 0.3, 35 ms; melodia only below MIDI 52,
+          165 Hz, where 808s and sub basses show no onsets) | chords (melodia at every
+          pitch: soft pad onsets and sine leads, more ghost notes) | legacy (0.5, 0.3,
+          127.7 ms, melodia on, velocity 127 × Basic Pitch's confidence); onset_threshold,
           frame_threshold (0..1, higher: fewer notes), minimum_note_ms and melodia_trick
-          override it
+          (then at every pitch) override it
         - lowest/highest: Basic Pitch's minimum/maximum_frequency, a note ("E1", 40) or
           "82.4 Hz"; for a melody over an 808, set lowest just above the 808
         - Timing: a warped clip follows Live's warp (unless tempo is given); else
@@ -2394,9 +2395,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             if value is not None:
                 job[key] = music.frequency(value)
         result = await ml.run("transcribe", job, ml_progress(ctx))
-        events = result["notes"]
+        events = ml.drop_octave_ghosts(result["notes"], job.get("melodia_below"))
         if not events:
-            raise ValueError("No notes found; try a lower onset_threshold or frame_threshold")
+            raise ValueError("No notes found; try preset=\"chords\" (melodia at every pitch, for "
+                             "notes without an attack) or a lower frame_threshold")
         context = await asyncio.to_thread(song_context, True)
         tempo_used = tempo
         if tempo_used is None:

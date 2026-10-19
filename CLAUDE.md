@@ -313,8 +313,15 @@ Measured on Live 12.3.8:
   bends (thirds of a semitone per 11.6 ms frame); `multiple_pitch_bends`
   only shapes its MIDI object. They read one bin sharp: in-tune sines at
   110–880 Hz gave +1 in 99.4–100 % of frames, so `ml.bend_cents` subtracts
-  one. The melodic preset (onset 0.6, melodia off) needs an attack: it
-  found 3 of 16 pure sines with a 10 ms fade-in, chords and legacy 15 and 14.
+  one. Without melodia a note needs an attack: onset 0.6 found 3 of 16
+  pure sines with a 10 ms fade-in (chords and legacy 15 and 14) and 2 notes
+  on six 808 stems of 56 notes each. The melodic preset therefore decodes
+  the model's output twice (`ml_worker.melodia_ranges`): melodia off from
+  MIDI 52 up, on below, then `ml.drop_octave_ghosts`. `constrain_frequency`
+  zeroes the arrays in place, so each decoding gets a copy. Notes at
+  29–52 Hz start a median 109 ms late (IQR 48–187 ms): the model's onset
+  head rises from 0.2 to 0.3–0.4 over ~150 ms there, and onset thresholds
+  from 0.2 to 0.6 all gave F1 ≤ 0.17 on those stems.
 - Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
   `ABLETON_MCP_ML_TESTS=1` adds a run with the real Basic Pitch model.
 

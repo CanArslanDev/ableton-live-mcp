@@ -100,15 +100,90 @@ def test_place_notes_leaves_out_what_the_clip_never_plays():
 
 
 def test_transcription_presets_and_overrides():
+    # melodic keeps melodia below MIDI 52, where 808s and sub basses show no onsets
     assert ml.transcription_settings("melodic") == {
         "onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
-        "melodia_trick": False, "velocity": "level"}
+        "melodia_trick": False, "melodia_below": 52, "velocity": "level"}
     chords = ml.transcription_settings("chords", onset_threshold=0.5, frame_threshold=None)
     assert chords["onset_threshold"] == 0.5 and chords["frame_threshold"] == 0.3
-    assert chords["melodia_trick"] is True
+    assert chords["melodia_trick"] is True and "melodia_below" not in chords
     assert ml.transcription_settings("legacy")["velocity"] == "amplitude"
+    # A given melodia_trick holds at every pitch
+    for given in (True, False):
+        settings = ml.transcription_settings("melodic", melodia_trick=given)
+        assert settings["melodia_trick"] is given and "melodia_below" not in settings
     with pytest.raises(ValueError, match="Unknown preset 'drums'"):
         ml.transcription_settings("drums")
+
+
+def test_melodia_only_below_its_pitch():
+    from MCP_Server import ml_worker
+    split = 440 * 2 ** ((52 - 69) / 12)  # 164.8 Hz
+    assert ml_worker.melodia_ranges({}) == [(None, None, True)]
+    assert ml_worker.melodia_ranges({"melodia_trick": False}) == [(None, None, False)]
+    above, below = ml_worker.melodia_ranges({"melodia_trick": False, "melodia_below": 52,
+                                             "minimum_frequency": 25.0})
+    assert above == (pytest.approx(split), None, False) and below == (27.5, pytest.approx(split), True)
+    # A range wholly on one side decodes once
+    assert ml_worker.melodia_ranges({"melodia_trick": False, "melodia_below": 52,
+                                     "maximum_frequency": 98.0}) == [(None, 98.0, True)]
+    assert ml_worker.melodia_ranges({"melodia_trick": False, "melodia_below": 52,
+                                     "minimum_frequency": 220.0}) == [(220.0, None, False)]
+    assert ml_worker.melodia_ranges({"melodia_trick": True, "melodia_below": 52}) == [(None, None, True)]
+
+
+def test_transcribe_runs_the_model_once_and_decodes_each_range(monkeypatch, capsys):
+    """The worker against a stand-in for basic_pitch: one inference, one
+    decoding per range, each on its own copy of the model's output."""
+    import sys
+    import types
+
+    from MCP_Server import ml_worker
+
+    calls = []
+
+    def model_output_to_notes(output, onset_thresh, frame_thresh, min_note_len, min_freq, max_freq,
+                              multiple_pitch_bends, melodia_trick):
+        calls.append((float(output["note"].sum()), onset_thresh, frame_thresh, min_note_len, min_freq,
+                      max_freq, melodia_trick))
+        output["note"][:] = 0  # Basic Pitch zeroes outside the range in place
+        pitch = 40 if melodia_trick else 64
+        return None, [(0.5, 1.0, pitch, 0.7, [1, 1]), (0.1, 0.4, pitch, 0.6, None)]
+
+    package = types.ModuleType("basic_pitch")
+    package.ICASSP_2022_MODEL_PATH = "model"
+    package.note_creation = types.SimpleNamespace(model_output_to_notes=model_output_to_notes)
+    inference = types.ModuleType("basic_pitch.inference")
+    inference.Model = lambda path: path
+    inference.run_inference = lambda path, model: calls.append(("inference", path)) or {
+        "note": np.ones((4, 88)), "onset": np.ones((4, 88)), "contour": np.ones((4, 264))}
+    constants = types.ModuleType("basic_pitch.constants")
+    constants.AUDIO_SAMPLE_RATE, constants.FFT_HOP = 22050, 256
+    for name, module in (("basic_pitch", package), ("basic_pitch.inference", inference),
+                         ("basic_pitch.constants", constants)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    result = ml_worker.transcribe({"path": "bass.wav", "onset_threshold": 0.6, "frame_threshold": 0.3,
+                                   "minimum_note_ms": 35.0, "melodia_trick": False, "melodia_below": 52})
+    assert calls[0] == ("inference", "bass.wav") and len(calls) == 3
+    split = pytest.approx(440 * 2 ** ((52 - 69) / 12))
+    # 35 ms is 3 model frames; both decodings saw the whole output
+    assert calls[1] == (352.0, 0.6, 0.3, 3, split, None, False)
+    assert calls[2] == (352.0, 0.6, 0.3, 3, None, split, True)
+    assert [(n["start"], n["pitch"]) for n in result["notes"]] == [(0.1, 40), (0.1, 64), (0.5, 40), (0.5, 64)]
+    assert result["notes"][0]["bends"] == [] and result["notes"][2]["bends"] == [1, 1]
+    assert '"progress"' in capsys.readouterr().out
+
+
+def test_octave_ghosts_of_low_notes_are_dropped():
+    bass = {"start": 0.0, "end": 1.0, "pitch": 33}
+    ghost = {"start": 0.05, "end": 0.9, "pitch": 45}      # its second harmonic, read as a note
+    jump = {"start": 1.0, "end": 1.5, "pitch": 45}        # an octave up after it: a note
+    lead = {"start": 0.0, "end": 1.0, "pitch": 57}        # over the split: kept
+    lead_ghost = {"start": 0.0, "end": 1.0, "pitch": 69}
+    events = [bass, ghost, jump, lead, lead_ghost]
+    assert ml.drop_octave_ghosts(events, 52) == [bass, jump, lead, lead_ghost]
+    assert ml.drop_octave_ghosts(events, None) == events
 
 
 def test_bends_are_corrected_by_one_bin():
@@ -183,6 +258,41 @@ def test_real_transcription(tmp_path):
     a4 = max((n for n in result["notes"] if n["pitch"] == 69), key=lambda n: n["end"] - n["start"])
     assert len(a4["bends"]) >= 20
     assert np.median(ml.bend_cents(a4["bends"])) == 0
+
+
+def _808_line(path, rate=22050):
+    """Eight 808 notes in quarters at 140 BPM, MIDI 28-40: a 2 ms attack, a
+    1.5-semitone drop over 40 ms, a 0.6 s decay, tanh drive, each cut by the
+    next."""
+    import soundfile as sf
+    pitches = [28, 31, 33, 28, 36, 35, 40, 31]
+    step = 60 / 140
+    y = np.zeros(int((0.5 + len(pitches) * step + 1) * rate))
+    for k, pitch in enumerate(pitches):
+        t = np.arange(int(step * rate)) / rate
+        f = 440 * 2 ** ((pitch - 69 + 1.5 * np.exp(-t / 0.04)) / 12)
+        start = int((0.5 + k * step) * rate)
+        tone = np.tanh(2 * np.exp(-t / 0.6) * np.sin(2 * np.pi * np.cumsum(f) / rate)) / np.tanh(2)
+        y[start:start + len(t)] += 0.7 * np.minimum(1, t / 0.002) * tone
+    sf.write(path, y, rate)
+    return [(0.5 + k * step, p) for k, p in enumerate(pitches)]
+
+
+@pytest.mark.skipif(os.environ.get("ABLETON_MCP_ML_TESTS") != "1",
+                    reason="downloads models; set ABLETON_MCP_ML_TESTS=1")
+def test_real_transcription_finds_a_low_808_line_by_default(tmp_path):
+    truth = _808_line(tmp_path / "808.wav")
+
+    def found(settings):
+        job = {"path": str(tmp_path / "808.wav"), **{k: v for k, v in settings.items() if k != "velocity"}}
+        events = ml.drop_octave_ghosts(asyncio.run(ml.run("transcribe", job))["notes"], job.get("melodia_below"))
+        return sum(any(e["pitch"] == p and abs(e["start"] - t) <= 0.05 for e in events) for t, p in truth)
+
+    # Melodia off at every pitch found none of them; the default 6 of 8 within
+    # 50 ms. Undriven (pure sines) it found 7, but only 3 within 50 ms: Basic
+    # Pitch starts its lowest notes late (up to 170 ms here)
+    assert found(ml.transcription_settings("melodic", melodia_trick=False)) <= 1
+    assert found(ml.transcription_settings("melodic")) >= 6
 
 
 def test_worker_has_no_server_imports():
