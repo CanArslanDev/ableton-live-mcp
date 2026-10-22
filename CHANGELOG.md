@@ -69,13 +69,21 @@
   `"Detune": "-12 ct"` resolve by name as before. If Live refuses a call
   that builds pads by path (`insert_chain`, `in_note`,
   `Chain.insert_device`), the rack is deleted and every pad comes from the
-  browser on a new one, as `loaded_by_name` says (the call used to fail,
-  leaving an unnamed track with a chain on no pad). `sample` may come with
+  browser on a new one, as `loaded_by_name` says. `sample` may come with
   `sample_path`: it is the name the browser looks up when the path cannot
   be used, and what 2.2.0, which ignores `sample_path` and the new options
   without an error, loads. Everything goes through the Remote Script's
-  generic LOM bridge: script 2.1.0 works unchanged. Checked against the
-  fake Live only (see CLAUDE.md for what Live must confirm).
+  generic LOM bridge: script 2.1.0 works unchanged. Measured in Live 12.4.6
+  on 2026-10-19 with script 2.1.0, every option passed: files by path on a
+  Simpler and on Drum Rack pads (each read back as the exact path),
+  `playback_mode` classic and one_shot, `start_marker` (frames),
+  `choke_group`, `warping: false`, `"Detune": "-12 ct"`, `signature` "7/8",
+  the browser fallback for a file Live refuses (on a Simpler and on one pad
+  of a rack) and the refusals before anything is built; a 5-track build (an
+  808 Simpler and drum pads, by path) took 7.7 s. Not verified in Live: the
+  rack rebuilt by name (Live 12.4.6 refused none of those calls; the fake
+  Live was made to refuse each), loading on Live before 12.4, and the
+  slicing mode.
 
 ### Changed
 
@@ -95,6 +103,18 @@
 - CLAUDE.md: recordings' sample rate; Live keeps playing a sample it loaded
   after the file is overwritten on disk, until it restarts (found in
   beat-lab).
+- CLAUDE.md: what Live 12.4.6 does with the Simplers and pads
+  `build_tracks` makes, measured on 2026-10-19. `replace_sample` reads an
+  overwritten file again, where a browser load keeps the old content.
+  Transpose keeps whole semitones and Detune whole cents from −50 to +50,
+  truncating numbers (display text such as "11.5 ct" rounds). A Simpler's
+  level follows dB = 0.4 × A × (velocity − 70) − 0.096 over its Volume, A
+  being "Vol < Vel" as a fraction (35 % on a Simpler made with
+  `insert_device`, 45 % on a pad loaded through the browser). A choke
+  group cuts with a 1 ms fade; "Snap", on by default, ends a sample
+  10–30 ms early; Glide slides linearly in semitones over the Glide Time
+  (one voice, overlapping notes); notes start within 0.04 ms of their
+  time, and recordings add no offset.
 
 ## 2.2.0 — 2026-10-17
 
