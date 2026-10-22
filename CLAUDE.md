@@ -33,7 +33,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/m4l_device.py` | Builds the AbletonMCP Analyzer (.amxd) as bytes: the Max patch as JSON. |
 | `MCP_Server/midi_tools.py`, `MCP_Server/midi_tools/*.js` | Max for Live MIDI Tools (Usul, Makam Melody, Makam Snap) for Live 12's Generate/Transform tabs: v8 code in a `v8.codebox`, tables written from `turkish.py`/`music.py`; `install_midi_tools`. |
 | `MCP_Server/analyzer.py` | UDP/OSC listener for the analyzer's messages; levels, bands, correlation, approximate LUFS. |
-| `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP, MusicGen) in uv-built environments; seconds→beats; the CLAP sound index; generation prompts and folders. |
+| `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP, MusicGen) in uv-built environments; Basic Pitch's presets, octave-ghost removal, bends in cents, velocities from levels, notes placed in beats; the CLAP sound index; generation prompts and folders. |
 | `MCP_Server/ml_worker.py` | The job side: runs in those environments, imports nothing from `MCP_Server`, talks JSON lines. |
 | `MCP_Server/als.py` | Reads Live Set files (.als) without Live: settings, tracks, devices, clips and notes, samples, comparing and finding sets. Never writes them. |
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
@@ -41,11 +41,11 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/snapshots.py` | Capture / compare / restore mixer and device parameters (A/B), stored in `~/.ableton-mcp/snapshots`. |
 | `MCP_Server/music.py` | Pure music theory + generators + note transforms over note dicts. No Live access. |
 | `MCP_Server/turkish.py` | Makams (AEU commas, 12-tone approximation, `.ascl` tunings) and usuls (düm/tek cycles). Pure. |
-| `MCP_Server/audio_analysis.py` | numpy/scipy/soundfile analysis (BS.1770 LUFS, spectrum, stereo, tempo, key). |
+| `MCP_Server/audio_analysis.py` | numpy/scipy/soundfile analysis (BS.1770 LUFS, spectrum, stereo, tempo, key, each note's level at its pitch). |
 | `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
-| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices). Tests and the simulator use it. |
+| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, `replace_sample`, Live's version: 12.4.6). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
 | `evals/` | `claude plugin eval` suite: 32 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
@@ -308,7 +308,8 @@ Measured on Live 12.3.8:
   transformers 5.x no longer feeds MusicGen's `streamer`; progress comes
   from a `LogitsProcessor`, called once per step. Weights CC-BY-NC 4.0.
   Stable Audio Open (gated, needs a Hugging Face token) is not included.
-- `lowest`/`highest` use Live's note names: A1 = MIDI 45 = 110 Hz.
+- `lowest`/`highest` use Live's note names (A1 = MIDI 45 = 110 Hz) or Hz
+  ("82.4 Hz", `music.frequency`).
 - Basic Pitch 0.4.0 (2026-10-19): `predict()`'s note events always carry
   bends (thirds of a semitone per 11.6 ms frame); `multiple_pitch_bends`
   only shapes its MIDI object. They read one bin sharp: in-tune sines at
@@ -324,7 +325,8 @@ Measured on Live 12.3.8:
   0.37, 81 ms later; 0.3 % of the 336 notes reached 0.6 and 7 % 0.5, and
   onset thresholds from 0.2 to 0.6 all gave F1 ≤ 0.17 on those stems.
 - Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
-  `ABLETON_MCP_ML_TESTS=1` adds a run with the real Basic Pitch model.
+  `ABLETON_MCP_ML_TESTS=1` adds two runs with the real Basic Pitch model (an
+  A4 and its bends; a driven 808 line the default preset must find).
 
 ## Replica mode: Live API uses not yet checked in Live
 
