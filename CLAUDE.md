@@ -328,30 +328,91 @@ Measured on Live 12.3.8:
   `ABLETON_MCP_ML_TESTS=1` adds two runs with the real Basic Pitch model (an
   A4 and its bends; a driven 808 line the default preset must find).
 
-## Replica mode: Live API uses not yet checked in Live
+## Replica mode: Simpler and Drum Rack pads, measured in Live 12.4.6
 
-Written from Ableton's documentation and checked only against `fake_live`
-(2026-10-19). Check each in a scratch set before claiming it works:
+Measured in Live 12.4.6 (Trial) on 2026-10-19 with Remote Script 2.1.0 and
+this branch's `build_tracks`: values read back, and `capture_stems`
+recordings at the audio device's 48 kHz.
 
-- `SimplerDevice.replace_sample(path)` (Live 12.4 release notes) on a
-  Simpler just inserted with `insert_device`, which holds no sample yet.
-  `build_tracks` reads `sample file_path` back for up to 2 s and falls back
-  to the browser by file name.
-- Drum Rack pads without the browser: `RackDevice.insert_chain()` (12.3;
-  its return value is not used), `DrumChain.in_note` (12.3), then
-  `Chain.insert_device("Simpler")`. New chains are found by comparing the
-  rack's chain ids before and after; a failed pad is cleared with
-  `DrumPad.delete_all_chains()`. If one of these calls fails, the rack is
-  deleted (`Track.delete_device`) and a new one gets every pad from the
-  browser: no call deletes a single rack chain.
-- `Sample.start_marker` is an int, taken as sample frames; `choke_group`
-  0 = none and 1–16 as in the UI; `playback_mode` set as 0/1/2 (the bridge
-  turns ints into Live's enum).
+- `SimplerDevice.replace_sample(path)` loads a file into a Simpler just
+  inserted with `insert_device` (no sample yet): it returns None within
+  ~13 ms and `sample file_path` reads back the exact path (`build_tracks`
+  waits up to 2 s for it, then falls back to the browser). Unlike the
+  browser, it reads the file again: after the file is overwritten on disk,
+  `replace_sample` with the same path, or a new Simpler on it, plays the
+  new content, while a pad loaded through the browser by the same name
+  still plays the old one (see "Loaded samples stay loaded" above).
+- Drum Rack pads without the browser: `RackDevice.insert_chain()` returns
+  the new DrumChain (`build_tracks` finds new chains by comparing the
+  rack's chain ids instead), which starts on `in_note` 36 with `out_note`
+  60, not on −1 (All Notes) as in `fake_live`; `build_tracks` sets
+  `in_note` either way. `Chain.insert_device("Simpler")` and
+  `replace_sample` then load the pad, and the chain takes the file's name;
+  `DrumPad.delete_all_chains()` ran on a pad whose file Live refused
+  before the browser loaded it. Two chains on one note both sound (the pad
+  reads "Multi").
+- Defaults differ by route: a Simpler made with `insert_device` (a
+  track's, or a pad's built by path) is Classic, with its filter on and
+  "Vol < Vel" 35 %; a pad loaded through the browser is One-Shot, with the
+  filter off and 45 %. Both start at Volume −12 dB. `playback_mode` set as
+  0 or 1 (classic, one_shot) reads back.
+- `Sample.start_marker` counts sample frames of the file: 441 and 4410
+  moved a 44.1 kHz file's onset by 10.000 and 100.000 ms ("S Start" still
+  showed 0.00 %).
+- Transpose (±48) keeps whole semitones: a fraction is truncated toward
+  zero (11.99 → 11, −11.99 → −11), so 11.99 plays 1100 cents up. Detune
+  keeps whole cents from −50 to +50: a number is truncated (11.5 → 11,
+  49.9 → 49; 60 is refused), while display text goes to the nearest value
+  (`"11.5 ct"` → +12). Played pitches follow the stored values within
+  0.002 cents.
+- Velocity sets a Simpler's level: dB = 0.4 × A × (velocity − 70) − 0.096
+  over its Volume, A being "Vol < Vel" as a fraction (within 0.002 dB over
+  6 amounts × 18 velocities; fractional velocities follow it too). So
+  velocity 70 plays at the Volume (less 0.096 dB) whatever the amount, and
+  velocity 127 adds 7.9 dB at 35 %, 10.2 dB at 45 %. Volume set by the
+  display "0.0 dB" lands on −0.005 dB.
+- A choke group cuts the sounding pad with a linear 1 ms fade from the new
+  hit's onset. Groups 0 (none) to 16 are accepted; 17, 99 and −1 are
+  refused ("Invalid choke group.").
+- Simpler's "Snap" (on by default) stops a sample 10–30 ms before its end
+  with a short fade, the same on every hit (a kick 28.8 of its 163.5 ms, a
+  hat 9.9 of 71.4); with Snap off it plays to the last frame.
+- Glide, with one voice and overlapping notes, slides linearly in
+  semitones over exactly the Glide Time (29.95, 59.95, 119.5 and 249.5 ms
+  for 30, 60, 120 and 250 ms) for intervals of 2, 5, 7 and 12 semitones
+  alike, without restarting the sample; notes 25 ms apart jump (in
+  Portamento too).
+- Timing: a note starts on the first device sample at or after its time
+  and sounds 0.469 samples later (the default filter's group delay), the
+  same in three passes; a recording adds no offset of its own (an
+  Arrangement click lands 0.016 samples from its beat). The drum hits of a
+  5-track build landed within 0.04 ms of their times (mean +0.017 ms).
+- Every new `build_tracks` option passed and read back: `sample_path` on a
+  Simpler and on pads, `playback_mode`, `start_marker`, `choke_group`,
+  `warping: false`, `"Detune": "-12 ct"` in `settings`, `signature`
+  ("7/8"), the browser fallback for a file Live refuses (a Simpler's
+  `loaded_by_name` carries Live's message, a pad's says "the Simpler holds
+  no sample"), and the refusals before anything is built (a relative or
+  missing path, choke group 17, playback mode "loop", a negative start
+  marker, 7/9; no track was created). The 5-track build (an 808 Simpler
+  and Drum Rack pads, by path) took 7.7 s with no fallback. The version
+  check (`Application.get_major/minor/bugfix_version()`) let path loading
+  run.
+
+Not verified in Live (check each in a scratch set before claiming it):
+
+- The rack rebuilt by name when `insert_chain`, `in_note` or
+  `Chain.insert_device` fails (the rack is deleted with
+  `Track.delete_device` and a new one gets every pad from the browser: no
+  call deletes a single rack chain). Live 12.4.6 refused none of them, so
+  only `fake_live` has seen it.
+- Samples on Live before 12.4 (the browser, by file name).
+- `playback_mode` slicing (2), and one_shot on overlapping hits of one pad.
 - `audio_to_midi` on a warped clip: `Clip.sample_to_beat_time(frames)`
   minus `start_marker` (beats) as the note's beat in the new clip; on an
   unwarped clip `start_marker` in seconds; `Clip.sample_rate`, else the
   file's rate.
-- Live's version from `Application.get_major/minor/bugfix_version()`.
+- A 44.1 kHz audio device: every recording ran at 48 kHz.
 
 ## Live Set files (.als), as read from Live 12.4's own sets
 
