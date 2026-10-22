@@ -127,13 +127,22 @@ def test_request_round_trip_and_failures(home):
         companion.request("song")
 
 
-def _tools():
+def _no_live():
+    raise ConnectionError("no Live in this test")
+
+
+def _tools(monkeypatch):
+    """The tools with no Live behind them. The server's own connection dials
+    localhost:9877, where a Live running on the machine answers: this test
+    made 3 attempts there (2.5 s) with Live open."""
     from mcp.server.mcpserver import MCPServer
 
     from MCP_Server import extended_tools
 
+    # register() sets a module global; monkeypatch puts the old one back
+    monkeypatch.setattr(extended_tools, "_get_connection", _no_live)
     server = MCPServer("t")
-    extended_tools.register(server, extended_tools._get_connection)
+    extended_tools.register(server, _no_live)
     return server
 
 
@@ -141,7 +150,7 @@ def _call(server, tool, **arguments):
     return json.loads(asyncio.run(server.call_tool(tool, arguments)).content[0].text)
 
 
-def test_selection_confirm_and_render_tools(home, tmp_path):
+def test_selection_confirm_and_render_tools(home, tmp_path, monkeypatch):
     wav = tmp_path / "render.wav"
     sf.write(wav, 0.25 * np.sin(2 * np.pi * 220 * np.arange(22050) / 22050), 22050)
     shared = {"value": None}
@@ -153,7 +162,7 @@ def test_selection_confirm_and_render_tools(home, tmp_path):
     })
     try:
         write_session(home / ".ableton-mcp", fake.port)
-        server = _tools()
+        server = _tools(monkeypatch)
         from mcp.server.mcpserver.exceptions import ToolError
         with pytest.raises(ToolError, match="Nothing shared yet"):
             asyncio.run(server.call_tool("get_live_selection", {}))

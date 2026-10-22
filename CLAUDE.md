@@ -525,5 +525,10 @@ Not verified in Live (check each in a scratch set before claiming it):
   through the real server's tools against the simulator; a new case needs one
   in `SOLUTIONS`. The server takes Live's port from the session file
   (`connection.live_port`), which is how eval runs find their simulator.
+- Give tools in a test a fake connection (`extended_tools.register(mcp,
+  lambda: conn)`) or one that raises. The server's own connection reads
+  `~/.ableton-mcp/live-session.json`, else port 9877, and so reaches a Live
+  open on the machine; `test_evals.py` and `test_arrangement_tools.py` use it
+  only after pointing `ABLETON_MCP_SESSION_FILE` at their simulator.
 - Anything that depends on real Live behaviour (undo, routing objects, recording)
   must also be checked against a running Live before claiming it works.

@@ -130,6 +130,10 @@
   does), `SimplerDevice.replace_sample`, Simpler's Detune and
   `Clip.sample_to_beat_time`. 28 new tests, 370 in all; 2 of them run the
   real Basic Pitch model, only with `ABLETON_MCP_ML_TESTS=1`.
+- The companion tools' test gives them a connection that raises. It used the
+  server's own, which tried localhost:9877, where a running Live listens,
+  3 times per run (2.5 s; 0.45 s now). No test tries that port now (checked
+  over the whole suite with Live open).
 
 ## 2.2.0 — 2026-10-17
 
