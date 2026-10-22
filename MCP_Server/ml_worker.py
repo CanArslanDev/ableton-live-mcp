@@ -139,27 +139,55 @@ def frequency_floor(hz: float | None) -> float | None:
     return None if hz is None else max(float(hz), LOWEST_HZ)
 
 
+def melodia_ranges(job: dict) -> list[tuple[float | None, float | None, bool]]:
+    """(lowest Hz, highest Hz, melodia) for each decoding of the model's
+    output: one, or, with melodia off and melodia_below (a MIDI pitch), the
+    range from that pitch up without melodia and the range under it with."""
+    low, high = frequency_floor(job.get("minimum_frequency")), job.get("maximum_frequency")
+    melodia, below = bool(job.get("melodia_trick", True)), job.get("melodia_below")
+    if melodia or below is None:
+        return [(low, high, melodia)]
+    split = 440.0 * 2 ** ((float(below) - 69) / 12)
+    if high is not None and float(high) <= split:
+        return [(low, high, True)]
+    if low is not None and low >= split:
+        return [(low, high, False)]
+    return [(split, high, False), (low, split, True)]
+
+
 def transcribe(job: dict) -> dict:
-    from basic_pitch import ICASSP_2022_MODEL_PATH
-    from basic_pitch.inference import Model, predict
+    """Basic Pitch's notes with their pitch bends as the model gives them:
+    thirds of a semitone, one per model frame (FFT_HOP / AUDIO_SAMPLE_RATE s)
+    from the note's start; ml.bend_cents corrects them. The model runs once;
+    its output is decoded once per range of melodia_ranges, as predict()
+    would decode it. Bends are always estimated; multiple_pitch_bends only
+    shapes the MIDI object, unused here."""
+    import numpy as np
+    from basic_pitch import ICASSP_2022_MODEL_PATH, note_creation
+    from basic_pitch.constants import AUDIO_SAMPLE_RATE, FFT_HOP
+    from basic_pitch.inference import Model, run_inference
 
     progress(0.05, "loading the model")
     model = Model(ICASSP_2022_MODEL_PATH)
     progress(0.2, "listening")
-    _output, _midi, events = predict(
-        job["path"], model,
-        onset_threshold=float(job.get("onset_threshold", 0.5)),
-        frame_threshold=float(job.get("frame_threshold", 0.3)),
-        minimum_note_length=float(job.get("minimum_note_ms", 127.7)),
-        minimum_frequency=frequency_floor(job.get("minimum_frequency")),
-        maximum_frequency=job.get("maximum_frequency"),
-        multiple_pitch_bends=False,
-        melodia_trick=bool(job.get("melodia_trick", True)))
+    output = run_inference(job["path"], model)
+    frames = int(np.round(float(job.get("minimum_note_ms", 127.7)) / 1000 * (AUDIO_SAMPLE_RATE / FFT_HOP)))
+    events = []
+    for low, high, melodia in melodia_ranges(job):
+        # A copy each: the decoding zeroes what lies outside its range in place
+        _midi, found = note_creation.model_output_to_notes(
+            {name: np.copy(value) for name, value in output.items()},
+            onset_thresh=float(job.get("onset_threshold", 0.5)),
+            frame_thresh=float(job.get("frame_threshold", 0.3)),
+            min_note_len=frames, min_freq=low, max_freq=high,
+            multiple_pitch_bends=False, melodia_trick=melodia)
+        events += found
     notes = [{"start": round(float(start), 4), "end": round(float(end), 4), "pitch": int(pitch),
-              "amplitude": round(float(amplitude), 4)}
-             for start, end, pitch, amplitude, _bends in events]
+              "amplitude": round(float(amplitude), 4),
+              "bends": [int(b) for b in bends] if bends is not None else []}
+             for start, end, pitch, amplitude, bends in events]
     notes.sort(key=lambda n: (n["start"], n["pitch"]))
-    return {"notes": notes}
+    return {"notes": notes, "frame_s": FFT_HOP / AUDIO_SAMPLE_RATE}
 
 
 # ── Sound embeddings (CLAP) ──────────────────────────────────────────────────

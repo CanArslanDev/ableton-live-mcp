@@ -633,6 +633,101 @@ def inserted_device_ids(track: str, inserts: list[list[Any]]) -> list[int]:
     return ids
 
 
+# SimplerDevice.replace_sample(path) loads a file by absolute path since
+# Live 12.4 (its release notes); before it, samples came through the browser
+REPLACE_SAMPLE_SINCE = (12, 4)
+PLAYBACK_MODES = {"classic": 0, "one_shot": 1, "slicing": 2}
+
+
+def live_version() -> tuple[int, ...] | None:
+    """(major, minor, bugfix) from Application.get_*_version, or None."""
+    try:
+        steps = batch([op_call("live_app", f"get_{part}_version")
+                       for part in ("major", "minor", "bugfix")])["results"]
+        return tuple(int(step["result"]["result"]) for step in steps)
+    except Exception as e:  # a step failed (no "result"), or no connection
+        logger.debug("Live's version unknown: %s", e)
+        return None
+
+
+def playback_mode(value: str | int) -> int:
+    """SimplerDevice.playback_mode: classic 0, one_shot 1, slicing 2."""
+    if isinstance(value, int) and not isinstance(value, bool) and value in PLAYBACK_MODES.values():
+        return value
+    key = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if key not in PLAYBACK_MODES:
+        raise ValueError(f"playback_mode {value!r}: use classic, one_shot or slicing")
+    return PLAYBACK_MODES[key]
+
+
+def parse_signature(value: str | list[int] | tuple[int, int]) -> tuple[int, int]:
+    """(numerator, denominator) from "7/8" or [7, 8]: 1-99 over 1, 2, 4, 8 or 16."""
+    parts = str(value).split("/") if isinstance(value, str) else list(value)
+    if len(parts) != 2:
+        raise ValueError(f"signature {value!r}: give [numerator, denominator] or \"7/8\"")
+    numerator, denominator = int(parts[0]), int(parts[1])
+    if not 1 <= numerator <= 99 or denominator not in (1, 2, 4, 8, 16):
+        raise ValueError(f"signature {value!r}: 1-99 over 1, 2, 4, 8 or 16")
+    return numerator, denominator
+
+
+def sample_file(where: str, options: dict) -> str | None:
+    """A sampler's sample_path, checked: absolute (after ~) and an existing file."""
+    path = options.get("sample_path")
+    if path is None:
+        return None
+    file = Path(str(path)).expanduser()
+    if not file.is_absolute():
+        raise ValueError(f"{where}: sample_path must be absolute, not {path!r}")
+    if not file.is_file():
+        raise FileNotFoundError(f"{where}: no such file {file}")
+    return str(file)
+
+
+def check_samplers(tracks: list[dict]) -> None:
+    """Refuse, before anything is built, Simpler and pad options that cannot
+    work: a missing or relative sample_path, an unknown playback_mode, a
+    choke group outside 0-16 or a negative start marker."""
+    for spec in tracks:
+        instrument = spec.get("instrument")
+        if not isinstance(instrument, dict):
+            continue
+        if instrument.get("drum_rack"):
+            samplers = [(f"{spec['name']} pad {note}", pad) for note, pad in instrument["drum_rack"].items()]
+        else:
+            samplers = [(str(spec["name"]), instrument)]
+        for where, options in samplers:
+            if sample_file(where, options) is None and not options.get("sample"):
+                raise ValueError(f"{where}: give sample_path (a file) or sample (a browser name)")
+            if options.get("playback_mode") is not None:
+                playback_mode(options["playback_mode"])
+            group = options.get("choke_group")
+            if group is not None and not 0 <= int(group) <= 16:
+                raise ValueError(f"{where}: choke_group is 0 (none) to 16, not {group}")
+            if options.get("start_marker") is not None and int(options["start_marker"]) < 0:
+                raise ValueError(f"{where}: start_marker counts sample frames from 0")
+
+
+def sampler_ops(device: str, options: dict, chain: str | None = None) -> list[dict]:
+    """Batch steps for a Simpler's playback mode and sample start marker, and
+    for a drum chain's choke group."""
+    ops = []
+    if options.get("playback_mode") is not None:
+        ops.append(op_set(device, "playback_mode", playback_mode(options["playback_mode"])))
+    if options.get("start_marker") is not None:
+        ops.append(op_set(f"{device} sample", "start_marker", int(options["start_marker"])))
+    if chain is not None and options.get("choke_group") is not None:
+        ops.append(op_set(chain, "choke_group", int(options["choke_group"])))
+    return ops
+
+
+def same_file(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 DRUM_KEYWORDS = [
     ("open_hat", ("open", "ohh", "oh ")),
     ("closed_hat", ("closed", "chh", "hihat", "hi-hat", "hi hat", "hat", "hh")),
@@ -2075,7 +2170,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     async def audio_source(path: str | None, track: int | str | None, clip_index: int | None,
                            arrangement_clip_index: int | None) -> dict:
-        """The audio file to work on: `path`, or the file behind an audio clip."""
+        """The audio file to work on: `path`, or the file behind an audio clip
+        (with what decides where its sound plays: warping, start marker, loop)."""
         if path:
             file = Path(path).expanduser()
             if not file.is_file():
@@ -2086,11 +2182,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              "arrangement_clip_index (an audio clip)")
         cp = clip_path(track, clip_index, arrangement_clip_index)
         info = await asend("lom_get", {"path": cp, "properties": [
-            "is_audio_clip", "file_path", "name", "warping", "warp_mode", "start_time"]})
+            "is_audio_clip", "file_path", "name", "warping", "warp_mode", "start_time",
+            "start_marker", "looping", "sample_rate"]})
         if not info.get("is_audio_clip"):
             raise ValueError("That is a MIDI clip; these tools work on audio")
         source = {"file": info["file_path"], "name": info.get("name") or Path(info["file_path"]).stem,
-                  "track": track, "warping": info.get("warping"), "warp_mode": info.get("warp_mode")}
+                  "track": track, "warping": info.get("warping"), "warp_mode": info.get("warp_mode"),
+                  "clip": f"id {info['$id']}", "start_marker": info.get("start_marker"),
+                  "looping": info.get("looping"), "sample_rate": info.get("sample_rate")}
         if arrangement_clip_index is not None:
             source["start_time"] = info.get("start_time")
         else:
@@ -2178,16 +2277,88 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             placed.append({"track": label, **where})
         return placed
 
+    async def warped_beats(source: dict, seconds: list[float]) -> dict[float, float] | None:
+        """Live's own beat for each time in a warped clip's file
+        (Clip.sample_to_beat_time takes sample frames), or None if Live
+        cannot say."""
+        rate = source.get("sample_rate")
+        if not isinstance(rate, (int, float)) or isinstance(rate, bool) or rate <= 0:
+            try:
+                import soundfile as sf
+                rate = sf.info(source["file"]).samplerate
+            except Exception:
+                return None
+        beats: dict[float, float] = {}
+        for first in range(0, len(seconds), 1000):
+            chunk = seconds[first:first + 1000]
+            try:
+                done = await asend("batch", {"commands": [
+                    op_call(source["clip"], "sample_to_beat_time", t * rate) for t in chunk]})
+            except Exception as e:
+                logger.debug("sample_to_beat_time failed: %s", e)
+                return None
+            if done.get("failed"):
+                return None
+            for t, step in zip(chunk, done["results"]):
+                beats[t] = float(step["result"]["result"])
+        return beats
+
+    async def clip_timing(source: dict, events: list[dict], tempo: float, tempo_given: bool,
+                          offset_beats: float) -> tuple[Callable[[float], float], dict]:
+        """How a time in the file becomes beats from the source clip's start,
+        and what the result says about it. A warped clip follows Live's warp
+        (unless a tempo is given); an unwarped one plays its file in real
+        time from its start marker (seconds); a file plays from second 0."""
+        per_second = tempo / 60.0
+        marker = source.get("start_marker")
+        start = float(marker) if isinstance(marker, (int, float)) and not isinstance(marker, bool) else 0.0
+        timing: dict[str, Any] = {"offset_beats": offset_beats}
+        if source.get("looping"):
+            timing["note"] = "The clip loops; the notes follow its file once."
+        if "clip" not in source:
+            timing.update(method="tempo", tempo=tempo)
+            return (lambda t: t * per_second), timing
+        if source.get("warping"):
+            if not tempo_given:
+                times = sorted({float(e["start"]) for e in events} | {float(e["end"]) for e in events})
+                mapped = await warped_beats(source, times)
+                if mapped is not None:
+                    timing.update(method="warp", start_marker_beats=start)
+                    return (lambda t: mapped[t] - start), timing
+                timing["warning"] = ("Live did not map this warped clip's times (sample_to_beat_time); "
+                                     "they assume its file plays straight at the set's tempo")
+            timing.update(method="tempo", tempo=tempo, start_marker_beats=start)
+            return (lambda t: t * per_second - start), timing
+        timing.update(method="tempo", tempo=tempo, start_marker_seconds=start)
+        return (lambda t: (t - start) * per_second), timing
+
+    def note_velocities(file: str, events: list[dict]) -> tuple[list[int] | None, dict]:
+        """Velocities from each note's level in the audio (audio_analysis.note_levels)."""
+        from . import ml
+        from .audio_analysis import load_audio, note_levels
+
+        try:
+            data, rate = load_audio(file, max_seconds=None)
+        except Exception as e:
+            return None, {"from": "amplitude", "warning": f"Could not read the audio for levels: {e}"}
+        levels = note_levels(data.mean(axis=1), rate, events).tolist()
+        measured = [v for v in levels if v == v]
+        return ml.level_velocities(levels), {
+            "from": "level", "loudest_db": round(max(measured), 1) if measured else None}
+
     @tool(destructive=True)
     async def audio_to_midi(path: str | None = None, track: int | str | None = None,
                             clip_index: int | None = None,
                             arrangement_clip_index: int | None = None,
                             to_track: int | str | None = None, to_clip_index: int | None = None,
                             arrangement_time: float | None = None, midi_path: str | None = None,
-                            tempo: float | None = None, onset_threshold: float = 0.5,
-                            frame_threshold: float = 0.3, minimum_note_ms: float = 127.7,
+                            preset: Literal["melodic", "chords", "legacy"] = "melodic",
+                            tempo: float | None = None, offset_beats: float = 0.0,
+                            onset_threshold: float | None = None,
+                            frame_threshold: float | None = None,
+                            minimum_note_ms: float | None = None, melodia_trick: bool | None = None,
                             lowest: int | str | None = None, highest: int | str | None = None,
-                            replace: bool = True, clip_name: str | None = None,
+                            bends: bool = False, replace: bool = True, clip_name: str | None = None,
                             ctx: Context | None = None) -> str:
         """Turn audio into MIDI notes with Spotify's Basic Pitch (melodies, bass lines,
         chords; not drums), from an audio file or the file behind an audio clip.
@@ -2195,40 +2366,75 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - to_track: write a MIDI clip there (Session slot to_clip_index, or
           arrangement_time; default where the source clip is); midi_path: a .mid file;
           with neither, the notes are listed
-        - tempo: the audio's own tempo, for seconds → beats (default the set's: right
-          for unwarped audio)
-        - onset_threshold, frame_threshold (0..1): higher gives fewer, surer notes;
-          minimum_note_ms; lowest/highest: pitch range ("E1", 40)
+        - preset: melodic (onset 0.6, frame 0.3, 35 ms; melodia only below MIDI 52,
+          165 Hz, where 808s and sub basses show no onsets) | chords (melodia at every
+          pitch: soft pad onsets and sine leads, more ghost notes) | legacy (0.5, 0.3,
+          127.7 ms, melodia on, velocity 127 × Basic Pitch's confidence); onset_threshold,
+          frame_threshold (0..1, higher: fewer notes), minimum_note_ms and melodia_trick
+          (then at every pitch) override it
+        - lowest/highest: Basic Pitch's minimum/maximum_frequency, a note ("E1", 40) or
+          "82.4 Hz"; for a melody over an 808, set lowest just above the 808
+        - Timing: a warped clip follows Live's warp (unless tempo is given); else
+          seconds × tempo (default the set's) from an unwarped clip's start marker or a
+          file's start; offset_beats moves every note; "timing" in the result says which
+        - Velocity follows each note's level at its pitch (loudest 127, 12 dB down 64)
+        - bends=true adds each bent note's pitch bend in cents, one value per 11.6 ms
+          (corrected: Basic Pitch reads 33 cents sharp); returned only, as Live's API
+          has no per-note pitch bend
         The first use downloads Basic Pitch (~150 MB).
         """
         from . import midi_files, ml
 
         source = await audio_source(path, track, clip_index, arrangement_clip_index)
-        job: dict[str, Any] = {"path": source["file"], "onset_threshold": onset_threshold,
-                               "frame_threshold": frame_threshold,
-                               "minimum_note_ms": minimum_note_ms}
-        for key, note in (("minimum_frequency", lowest), ("maximum_frequency", highest)):
-            if note is not None:
-                job[key] = 440.0 * 2 ** ((music.parse_note(note) - 69) / 12)
+        settings = ml.transcription_settings(
+            preset, onset_threshold=onset_threshold, frame_threshold=frame_threshold,
+            minimum_note_ms=minimum_note_ms, melodia_trick=melodia_trick)
+        velocity_from = settings.pop("velocity")
+        job: dict[str, Any] = {"path": source["file"], **settings}
+        for key, value in (("minimum_frequency", lowest), ("maximum_frequency", highest)):
+            if value is not None:
+                job[key] = music.frequency(value)
         result = await ml.run("transcribe", job, ml_progress(ctx))
+        events = ml.drop_octave_ghosts(result["notes"], job.get("melodia_below"))
+        if not events:
+            raise ValueError("No notes found; try preset=\"chords\" (melodia at every pitch, for "
+                             "notes without an attack) or a lower frame_threshold")
         context = await asyncio.to_thread(song_context, True)
-        if tempo is None:
+        tempo_used = tempo
+        if tempo_used is None:
             try:
-                tempo = float((await asend("lom_get", {"path": "live_set",
-                                                       "properties": ["tempo"]}))["tempo"])
+                tempo_used = float((await asend("lom_get", {"path": "live_set",
+                                                            "properties": ["tempo"]}))["tempo"])
             except Exception:
-                tempo = 120.0
-        notes = ml.events_to_notes(result["notes"], tempo)
+                tempo_used = 120.0
+        beat_of, timing = await clip_timing(source, events, float(tempo_used), tempo is not None,
+                                            offset_beats)
+        velocities, velocity = None, {"from": "amplitude"}
+        if velocity_from == "level":
+            velocities, velocity = await asyncio.to_thread(note_velocities, source["file"], events)
+        notes, kept = ml.place_notes(events, beat_of, velocities, offset_beats)
         if not notes:
-            raise ValueError("No notes found; try a lower onset_threshold or frame_threshold")
+            raise ValueError("No notes start after the clip's start marker")
+        if len(kept) < len(events):
+            timing["notes_before_clip_start"] = len(events) - len(kept)
         bar = context["beats_per_bar"]
         end = max(n["start_time"] + n["duration"] for n in notes)
         length = max(1, -(-end // bar)) * bar
         pitches = sorted({n["pitch"] for n in notes})
         payload: dict[str, Any] = {
-            "source": source["file"], "notes_found": len(notes), "tempo_used": tempo,
+            "source": source["file"], "notes_found": len(notes), "preset": preset,
+            "settings": {k: v for k, v in job.items() if k != "path"}, "timing": timing,
+            "velocity": velocity, "tempo_used": tempo_used,
             "pitch_range": [music.note_name(pitches[0]), music.note_name(pitches[-1])],
             "length_beats": length}
+        if bends:
+            bent = []
+            for note, index in zip(notes, kept):
+                cents = ml.bend_cents(events[index].get("bends") or [])
+                if any(cents):
+                    bent.append({"pitch": note["pitch"], "start_time": note["start_time"], "cents": cents})
+            payload["bends"] = {"frame_s": round(float(result.get("frame_s") or ml.BEND_FRAME_S), 6),
+                                "notes": bent}
         name = clip_name or f"{source['name']} MIDI"
         if midi_path:
             target = Path(midi_path).expanduser()
@@ -2236,7 +2442,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 target = midi_files.free_path(target, name)
             elif target.exists():
                 raise ValueError(f"{target} exists; choose another midi_path")
-            payload["midi_file"] = midi_files.write_midi(target, notes, tempo, name=name)
+            payload["midi_file"] = midi_files.write_midi(target, notes, tempo_used, name=name)
         if to_track is not None:
             if arrangement_time is None and to_clip_index is None:
                 if source.get("start_time") is not None:
@@ -2468,15 +2674,92 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 raise ValueError(f"Live's browser does not list {query!r}")
             time.sleep(1.0)
 
+    def confirm_sample(device: str, path: str, wait_s: float = 2.0) -> None:
+        """Wait until the Simpler holds the file at `path` (Sample.file_path);
+        raise with what it holds instead."""
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                held = lom_get(f"{device} sample", ["file_path"]).get("file_path")
+            except AbletonCommandError:
+                held = None
+            if isinstance(held, str) and same_file(held, path):
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"the Simpler holds {held if isinstance(held, str) else 'no sample'}")
+            time.sleep(0.1)
+
+    def simpler_from_path(tp: str, path: str) -> int:
+        """A Simpler at the front of the track holding the file at `path`
+        (replace_sample, Live 12.4+), read back; its id. A Simpler that did
+        not take the file is deleted again."""
+        simpler = inserted_device_ids(tp, [["Simpler", 0]])[0]
+        try:
+            send("lom_call", {"path": f"id {simpler}", "method": "replace_sample", "args": [path]})
+            confirm_sample(f"id {simpler}", path)
+        except Exception:
+            send("lom_call", {"path": tp, "method": "delete_device", "args": [0]})
+            raise
+        return simpler
+
+    def first_error(result: dict) -> str:
+        return next((str(step.get("message")) for step in result.get("results", [])
+                     if step.get("status") == "error"), "no error reported")
+
+    def pads_from_paths(rack: str, files: dict[int, str]) -> tuple[dict[int, tuple[str, str]], dict[int, str]]:
+        """Drum Rack pads without the browser (Live 12.4+): per note a new
+        chain (insert_chain, in_note), a Simpler on it and the note's file in
+        that (replace_sample), read back. {note: (chain, simpler)} for the
+        pads that loaded, {note: why} for the rest, whose chains are deleted.
+        Raises when Live refuses a chain or its Simpler (the rack is then
+        replaced: see fresh_rack)."""
+        before = {c["$id"] for c in lom_get(f"{rack} chains", ["name"])["items"]}
+        made = batch([op_call(rack, "insert_chain") for _ in files])
+        fresh = [c["$id"] for c in lom_get(f"{rack} chains", ["name"])["items"] if c["$id"] not in before]
+        notes = list(files)
+        if made.get("failed") or len(fresh) != len(notes):
+            raise RuntimeError(f"insert_chain gave {len(fresh)} new chains for {len(notes)} pads"
+                               + (f" ({first_error(made)})" if made.get("failed") else ""))
+        steps = batch([step for note, chain in zip(notes, fresh) for step in (
+            op_set(f"id {chain}", "in_note", note), op_call(f"id {chain}", "insert_device", "Simpler"))])
+        if steps.get("failed"):
+            raise RuntimeError(f"a chain's in_note or Simpler: {first_error(steps)}")
+        simplers = [step["result"]["result"]["$id"] for step in steps["results"][1::2]]
+        batch([op_call(f"id {simpler}", "replace_sample", files[note])
+               for note, simpler in zip(notes, simplers)], stop_on_error=False)
+        placed, failed = {}, {}
+        for note, chain, simpler in zip(notes, fresh, simplers):
+            try:
+                confirm_sample(f"id {simpler}", files[note])
+                placed[note] = (f"id {chain}", f"id {simpler}")
+            except RuntimeError as e:
+                failed[note] = f"replace_sample: {e}"
+                send("lom_call", {"path": f"{rack} drum_pads {note}", "method": "delete_all_chains"})
+        return placed, failed
+
+    def fresh_rack(tp: str, rack: str) -> str:
+        """Delete the track's Drum Rack and put an empty one in its place, its
+        id: a build by path that Live refused part-way leaves chains on no pad
+        or on all notes, and no call deletes a single rack chain. A rack no
+        longer on the track gets a new one at the front."""
+        devices = lom_get(f"{tp} devices", ["name"])["items"]
+        index = next((i for i, d in enumerate(devices) if f"id {d.get('$id')}" == rack), None)
+        if index is not None:
+            send("lom_call", {"path": tp, "method": "delete_device", "args": [index]})
+        return f"id {inserted_device_ids(tp, [['Drum Rack', index or 0]])[0]}"
+
     @tool(destructive=True)
-    def build_tracks(tracks: list[dict], replace: bool = False, sample_wait_s: float = 40.0) -> str:
+    def build_tracks(tracks: list[dict], replace: bool = False, sample_wait_s: float = 40.0,
+                     signature: str | list[int] | None = None) -> str:
         """Build tracks from a spec in one call, e.g. to rebuild a set the Trial
         cannot save from a JSON file. A MIDI track (default):
           {"name": "Kick",
            "instrument": "Operator"                     # a device by name, or
-                       | {"sample": "kick 808", "warping": false}   # a Simpler
-                       | {"drum_rack": {"36": {"sample": "Kick.wav", "settings": {...}}}},
-           "settings": {"Volume": "0.0 dB", ...},       # on the instrument
+                       | {"sample_path": "/abs/808.wav", "warping": false}   # a Simpler
+                       | {"sample": "kick 808"}         # a Simpler, from the browser
+                       | {"drum_rack": {"36": {"sample_path": "/abs/kick.wav",
+                                               "choke_group": 1, "settings": {...}}}},
+           "settings": {"Volume": "0.0 dB", "Detune": "-12 ct"},  # on the instrument
            "effects": [{"device": "Compressor", "settings": {...},
                         "sidechain_from": "Kick"}],     # Compressor only
            "volume_db": -6.0, "pan": 0.0, "mute": false,
@@ -2487,19 +2770,56 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
           "audio_clips": [{"file": "/abs/drums.wav", "start": 0, "warping": false}]}
           (the clip starts at the file's start: Live's warp analysis otherwise
           moves it to the first transient).
-        A sample with a file extension is looked up by exact name, waiting up
-        to sample_wait_s for Live to list a new file. Settings take display
-        text ("-12 dB", "200 ms") or raw numbers. Sidechains are routed once
-        every track exists. replace=True first deletes tracks with these names.
+        Simplers and pads also take playback_mode (classic | one_shot | slicing)
+        and start_marker (sample frames); pads take choke_group (0 none, 1-16).
+        sample_path loads the file itself (Live 12.4+, read back); on older Live,
+        or when that fails, the browser loads "sample" if given, else the file's
+        name ("loaded_by_name" says why), and the call fails if neither works.
+        A name with a file extension is looked up exactly, waiting up to
+        sample_wait_s for Live to list a new file. Settings take display text
+        ("-12 dB", "-12 ct") or raw numbers. Sidechains are routed once every
+        track exists. signature: [7, 8] or "7/8", set first. replace=True first
+        deletes tracks with these names.
         """
         names = [str(t["name"]) for t in tracks]
         if len(set(names)) != len(names):
             raise ValueError("Track names must be unique")
+        check_samplers(tracks)
+        if signature is not None:
+            numerator, denominator = parse_signature(signature)
+            batch([op_set("live_set", "signature_numerator", numerator),
+                   op_set("live_set", "signature_denominator", denominator)])
         if replace:
             existing = lom_get("live_set tracks", ["name"])["items"]
             for index in sorted((i for i, t in enumerate(existing) if t.get("name") in names), reverse=True):
                 send("lom_call", {"path": "live_set", "method": "delete_track", "args": [index]})
         report, sidechains = [], []
+        no_path_loading: list[str | None] = []  # why replace_sample cannot be used, once asked
+
+        def path_loading_off() -> str | None:
+            """Why files cannot be loaded by path in this Live, or None."""
+            if not no_path_loading:
+                version = live_version()
+                if version is None:
+                    no_path_loading.append("Live did not report its version")
+                elif version[:2] < REPLACE_SAMPLE_SINCE:
+                    no_path_loading.append("replace_sample needs Live 12.4; this is "
+                                           + ".".join(map(str, version)))
+                else:
+                    no_path_loading.append(None)
+            return no_path_loading[0]
+
+        def by_name(where: str, options: dict, why: str | None) -> tuple[int, str]:
+            """The browser item for a sampler without its file loaded: its
+            sample name, else its file's name. Raises when neither works."""
+            query = options.get("sample") or Path(sample_file(where, options)).name
+            try:
+                return find_sample(query, sample_wait_s)
+            except ValueError as e:
+                if why is None:
+                    raise
+                raise RuntimeError(f"Could not load {options['sample_path']} ({where}): {why}; "
+                                   f"browser: {e}") from e
 
         def index_of(track_id: int) -> int:
             items = lom_get("live_set tracks", ["name"])["items"]
@@ -2522,32 +2842,65 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             chain: list[tuple[str, dict]] = []
             instrument = spec.get("instrument")
             if isinstance(instrument, dict) and instrument.get("drum_rack"):
-                rack_id = inserted_device_ids(tp, [["Drum Rack", 0]])[0]
+                rack = f"id {inserted_device_ids(tp, [['Drum Rack', 0]])[0]}"
                 pads = {int(n): p for n, p in instrument["drum_rack"].items()}
-                loads, labels = [], {}
+                files = {n: sample_file(f"pad {n}", p) for n, p in pads.items() if p.get("sample_path")}
+                placed: dict[int, tuple[str, str]] = {}
+                why: dict[int, str] = {}
+                if files:
+                    off = path_loading_off()
+                    if off is None:
+                        try:
+                            placed, why = pads_from_paths(rack, files)
+                        except Exception as e:  # every pad by name, on a new rack
+                            rack = fresh_rack(tp, rack)
+                            why = {n: f"pads by path: {e}" for n in files}
+                    else:
+                        why = {n: off for n in files}
+                labels = {n: files[n] for n in placed}
+                loads = []
                 for note, pad in pads.items():
-                    item_id, labels[note] = find_sample(pad["sample"], sample_wait_s)
-                    loads.append((note, item_id))
-                loaded = load_items(index_of(track_id), loads)
-                if not loaded["ok"]:
-                    row["problems"].append(f"drum pads: {loaded['steps']}")
+                    if note not in placed:
+                        item_id, labels[note] = by_name(f"pad {note}", pad, why.get(note))
+                        loads.append((note, item_id))
+                if loads:
+                    loaded = load_items(index_of(track_id), loads)
+                    if not loaded["ok"]:
+                        row["problems"].append(f"drum pads: {loaded['steps']}")
+                if why:
+                    row["loaded_by_name"] = {str(n): reason for n, reason in why.items()}
                 for note, pad in pads.items():
-                    device = f"id {rack_id} drum_pads {note} chains 0 devices 0"
+                    pad_chain, device = placed.get(note) or (f"{rack} drum_pads {note} chains 0",
+                                                             f"{rack} drum_pads {note} chains 0 devices 0")
                     chain.append((device, pad.get("settings") or {}))
+                    ops += sampler_ops(device, pad, pad_chain)
                     if pad.get("warping") is False:
                         no_warp(f"{device} sample")
                 row["instrument"] = {str(n): labels[n] for n in pads}
-            elif isinstance(instrument, dict) and instrument.get("sample"):
-                item_id, label = find_sample(instrument["sample"], sample_wait_s)
-                loaded = load_items(index_of(track_id), [(None, item_id)])
-                if not loaded["ok"]:
-                    row["problems"].append(f"could not load {label}")
-                row["instrument"] = label
-                first = lom_get(f"{tp} devices", ["name"])["items"][:1]
-                if first:
-                    chain.append((f"id {first[0]['$id']}", spec.get("settings") or {}))
+            elif isinstance(instrument, dict):
+                device, why_not = None, None
+                file = sample_file(spec["name"], instrument)
+                if file:
+                    why_not = path_loading_off()
+                    if why_not is None:
+                        try:
+                            device, row["instrument"] = f"id {simpler_from_path(tp, file)}", file
+                        except Exception as e:
+                            why_not = f"replace_sample: {e}"
+                if device is None:
+                    item_id, row["instrument"] = by_name(spec["name"], instrument, why_not)
+                    loaded = load_items(index_of(track_id), [(None, item_id)])
+                    if not loaded["ok"]:
+                        row["problems"].append(f"could not load {row['instrument']}")
+                    if why_not:
+                        row["loaded_by_name"] = why_not
+                    first = lom_get(f"{tp} devices", ["name"])["items"][:1]
+                    device = f"id {first[0]['$id']}" if first else None
+                if device:
+                    chain.append((device, spec.get("settings") or {}))
+                    ops += sampler_ops(device, instrument)
                     if instrument.get("warping") is False:
-                        no_warp(f"id {first[0]['$id']} sample")
+                        no_warp(f"{device} sample")
             elif instrument:
                 device_id = inserted_device_ids(tp, [[str(instrument), 0]])[0]
                 chain.append((f"id {device_id}", spec.get("settings") or {}))

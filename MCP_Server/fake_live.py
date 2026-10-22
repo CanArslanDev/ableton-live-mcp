@@ -10,6 +10,7 @@ setting values by display.
 """
 
 import math
+import os
 import sys
 import time
 import types
@@ -211,6 +212,14 @@ class FakeClip(FakeObj):
         self.length = self.length * 2
         self.loop_end = self.length
 
+    def sample_to_beat_time(self, sample_time):
+        """A warped audio clip's beat at a sample frame of its file: here a
+        straight warp at the file's own tempo (file_tempo), beat 0 at frame 0.
+        Live raises the same way for an unwarped clip."""
+        if self.is_midi_clip or not getattr(self, "warping", False):
+            raise RuntimeError("Sample is not warped")
+        return sample_time / self.sample_rate * getattr(self, "file_tempo", 120.0) / 60.0
+
 
 def _copy_clip(clip):
     copy = FakeClip(name=clip.name, length=clip.length, midi=clip.is_midi_clip)
@@ -261,6 +270,7 @@ class FakeClipSlot(FakeObj):
         clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
         object.__setattr__(clip, "file_path", path)
         object.__setattr__(clip, "warping", True)
+        object.__setattr__(clip, "sample_rate", 44100.0)
         self.clip = clip
         self.has_clip = True
         return clip
@@ -294,12 +304,70 @@ def _compressor():
     ], available_input_routing_types=routing, input_routing_type=routing[-1])
 
 
+def _insert_device(devices, name, index=-1):
+    """Track/Chain.insert_device (Live 12.3+): a native device by browser name."""
+    if name not in INSERTABLE:
+        raise RuntimeError("Unknown device name: %s" % name)
+    device = INSERTABLE[name]()
+    if index == -1:
+        devices.append(device)
+    else:
+        devices.insert(index, device)
+    return device
+
+
+class FakeDrumPad(FakeObj):
+    """A pad of a FakeDrumRack: its chains are the rack's chains that receive
+    its note (in_note), as in Live."""
+
+    def __init__(self, note, rack):
+        super(FakeDrumPad, self).__init__(note=note, name="", mute=False, solo=False)
+        object.__setattr__(self, "_rack", rack)
+
+    @property
+    def chains(self):
+        return [c for c in self._rack.chains if getattr(c, "in_note", None) == self.note]
+
+    @chains.setter
+    def chains(self, chains):
+        """What a sample dropped on the pad does: its chains replace the pad's."""
+        for chain in chains:
+            object.__setattr__(chain, "in_note", self.note)
+        self._rack.chains = [c for c in self._rack.chains
+                             if getattr(c, "in_note", None) != self.note] + list(chains)
+
+    def delete_all_chains(self):
+        self.chains = []
+
+
+class FakeDrumChain(FakeObj):
+    """A chain from RackDevice.insert_chain (Live 12.3+): it receives every
+    note (in_note -1) until in_note puts it on a pad."""
+
+    def __init__(self):
+        super(FakeDrumChain, self).__init__(name="", in_note=-1, out_note=60, choke_group=0,
+                                            devices=[], mute=False, solo=False)
+
+    def insert_device(self, name, index=-1):
+        return _insert_device(self.devices, name, index)
+
+
+class FakeDrumRack(FakeDevice):
+    def __init__(self):
+        super(FakeDrumRack, self).__init__("Drum Rack", "DrumGroupDevice", chains=[],
+                                           view=FakeObj(selected_drum_pad=None))
+        object.__setattr__(self, "drum_pads", [FakeDrumPad(n, self) for n in range(128)])
+        object.__setattr__(self, "can_have_chains", True)
+
+    def insert_chain(self, index=None):
+        """Returns nothing, the way the fake assumes Live does."""
+        chains = list(self.chains)
+        chains.insert(len(chains) if index is None else int(index), FakeDrumChain())
+        self.chains = chains
+
+
 def _drum_rack():
-    pads = [FakeObj(note=n, name="", mute=False, solo=False, chains=[]) for n in range(128)]
-    rack = FakeDevice("Drum Rack", "DrumGroupDevice", drum_pads=pads, chains=[],
-                      view=FakeObj(selected_drum_pad=None))
-    object.__setattr__(rack, "can_have_chains", True)
-    return rack
+    return FakeDrumRack()
 
 
 def _log_display(low, high, unit_low, unit_high=None, split=1000.0, digits=2):
@@ -363,13 +431,21 @@ def _instrument(name, class_name):
 class FakeSimpler(FakeDevice):
     def __init__(self, name, sample=None):
         super(FakeSimpler, self).__init__(name, "OriginalSimpler", [
-            _percent("S Start", 0.0), FakeParam("Transpose", 0.0, -48.0, 48.0),
+            _percent("S Start", 0.0),
+            FakeParam("Transpose", 0.0, -48.0, 48.0, display=lambda v: "%d st" % round(v)),
+            FakeParam("Detune", 0.0, -50.0, 50.0, display=lambda v: "%d ct" % round(v)),
             _db("Volume", -12.0, -36.0, 36.0),
             _choice("Trigger Mode", ["Trigger", "Gate"], 1)],
             sample=sample, playback_mode=0, reversed=False)
 
     def reverse(self):
         self.reversed = not self.reversed
+
+    def replace_sample(self, file_path):
+        """Live 12.4: the audio file at an absolute path replaces the sample."""
+        if not os.path.isabs(file_path) or not os.path.isfile(file_path):
+            raise RuntimeError("Could not load %s" % file_path)
+        self.sample = FakeSample(file_path)
 
 
 # What Track.insert_device builds (Live 12.3+), by browser name
@@ -475,20 +551,13 @@ class FakeTrack(FakeObj):
     def create_audio_clip(self, path, position):
         clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
         for key, value in (("file_path", path), ("warping", True), ("start_time", float(position)),
-                           ("end_time", float(position) + 8.0)):
+                           ("end_time", float(position) + 8.0), ("sample_rate", 44100.0)):
             object.__setattr__(clip, key, value)
         self.arrangement_clips.append(clip)
         return clip
 
     def insert_device(self, name, index=-1):
-        if name not in INSERTABLE:
-            raise RuntimeError("Unknown device name: %s" % name)
-        device = INSERTABLE[name]()
-        if index == -1:
-            self.devices.append(device)
-        else:
-            self.devices.insert(index, device)
-        return device
+        return _insert_device(self.devices, name, index)
 
 
 # ── Undo history, by the rules measured on Live 12.4 (see journal.py) ───────
@@ -811,6 +880,24 @@ class FakeAppView(FakeObj):
         return name in self.shown
 
 
+class FakeApplication(FakeObj):
+    """Live's Application: its view, the browser and the version (12.4.6
+    unless given)."""
+
+    def __init__(self, browser, version=(12, 4, 6)):
+        super(FakeApplication, self).__init__(view=FakeAppView(), browser=browser)
+        object.__setattr__(self, "_version", tuple(version))
+
+    def get_major_version(self):
+        return self._version[0]
+
+    def get_minor_version(self):
+        return self._version[1]
+
+    def get_bugfix_version(self):
+        return self._version[2]
+
+
 class FakeBrowserItem(FakeObj):
     def __init__(self, name, children=(), source="Core Library"):
         folder = bool(children) or "." not in name
@@ -849,7 +936,8 @@ class FakeBrowser(FakeObj):
         stem = item.name.rsplit(".", 1)[0]
         if pad is not None:
             # as in Live: the pad's chain holds a Simpler with the sample
-            pad.chains = [FakeObj(name=stem, devices=[FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5))])]
+            pad.chains = [FakeObj(name=stem, choke_group=0, out_note=pad.note, devices=[
+                FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5))])]
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:
