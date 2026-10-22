@@ -20,13 +20,15 @@
   (MIDI 22-32; "No notes found" on five of them). So melodic decodes the
   model's output twice, melodia off from MIDI 52 (165 Hz) up and on below,
   and drops the low notes melodia reads an octave over a sounding one (a
-  bass's second harmonic). Onset F1, melodia off everywhere → melodic (3
-  renders each, 4 above MIDI 52): 808 lines 0.18 → 0.86, with repeated
-  notes 0.18 → 0.49, sine bass 0.00 → 0.45, saw bass 0.84 → 0.82, sine
-  bass at MIDI 40-55 0.34 → 0.82; plucks, runs, a lead and pads above MIDI
-  52 0.915 → 0.916, plucks and pads at MIDI 40-60 0.900 → 0.873. On the
-  808 stems F1 went from 0.006 to 0.17: the notes have their pitch, but
-  Basic Pitch starts them a median 109 ms late (IQR 48–187 ms) at 29–52 Hz.
+  bass's second harmonic: 83 of the 106 extra notes on 3 saw bass lines).
+  Onset F1, melodia off everywhere → melodic (3 renders each, 4 above MIDI
+  52): 808 lines 0.18 → 0.86, with repeated notes 0.18 → 0.49, sine bass
+  0.00 → 0.45, saw bass 0.84 → 0.82, sine bass at MIDI 40-55 0.34 → 0.82;
+  plucks, runs, a lead and pads above MIDI 52 0.915 → 0.916, plucks and
+  pads at MIDI 40-60 0.900 → 0.873. On the 808 stems F1 went from 0.006 to
+  0.17: the notes have their pitch, but Basic Pitch starts them a median
+  109 ms late (IQR 48–187 ms) at 29–52 Hz. When it finds no notes, the
+  error suggests `preset="chords"`.
 - `audio_to_midi(bends=true)` lists the pitch bend of each bent note in
   cents, one value per model frame (11.6 ms). Basic Pitch 0.4.0 reads
   in-tune notes a third of a semitone sharp (+1 in 99.4–100 % of the frames
@@ -42,13 +44,15 @@
   synthetic renders each), against 127 × Basic Pitch's amplitude before:
   plucks 0.62 → 0.98, a legato lead 0.71 → 0.99, triad pads 0.27 → 0.95.
   On 3 driven 808 lines (MIDI 28-43, -24 to 0 dB, 82 notes) it is 0.98,
-  and equal-level 808 lines get velocities 125–127. A one-semitone window
-  centred on the start (0.51 s at MIDI 24) read the silence or the note
-  before it: 0.95 and 102–127, and on equal-level 808 lines in 16ths a
-  10 dB spread. Below MIDI 53 the band is wider than a semitone, so a kick
-  on an 808 note adds 0.9 dB on average. With reverb and detuned pad
-  voices a similar measure ranked plucks at 0.81–0.83, a lead at 0.57 and
-  pads at 0.20. `legacy` keeps the old velocity.
+  and equal-level 808 lines get velocities 125–127. Centred on the note's
+  start, a one-semitone window (0.51 s at MIDI 24) read the silence or the
+  note before it: 0.95 and velocities 102–127, and equal-level 808 lines
+  (MIDI 24-45) spread 3.6, 4.1 and 10.0 dB in quarters, 8ths and 16ths at
+  140 BPM, against 0.08, 0.12 and 0.18 dB now. Below MIDI 53 the band is
+  wider than a semitone, so a kick on an 808 note adds 0.9 dB on average.
+  With reverb and detuned pad voices a similar measure ranked plucks at
+  0.81–0.83, a lead at 0.57 and pads at 0.20. `legacy` keeps the old
+  velocity.
 - `audio_to_midi` places notes where the source clip plays them: a warped
   clip through Live's own warp (`Clip.sample_to_beat_time`, in batches), an
   unwarped one from its start marker; notes the clip never plays are left
@@ -91,10 +95,11 @@
   each note's level; `preset="legacy"` gives what it gave before.
 - The tempo estimate of the audio analysis tools is found between frames: a
   parabola through the autocorrelation peak at one beat, then at 2 to 32
-  beats. Whole-frame lags are 3.9 BPM apart at 140 BPM (44.1 kHz), and a
-  137 BPM click track read 136.0; it reads 137.0 now. Click tracks from 70
-  to 175 BPM at 44.1 and 48 kHz came within 0.01 BPM wherever the tempo
-  octave was right; the octave choice is unchanged (150 BPM still reads 75).
+  beats, and it is reported to 0.01 BPM (0.1 before). Whole-frame lags are
+  3.9 BPM apart at 140 BPM (44.1 kHz), and a 137 BPM click track read
+  136.0; it reads 137.0 now. Click tracks from 70 to 175 BPM at 44.1 and
+  48 kHz came within 0.01 BPM wherever the tempo octave was right; the
+  octave choice is unchanged (150 BPM still reads 75).
 
 ### Documentation
 
@@ -115,6 +120,16 @@
   10–30 ms early; Glide slides linearly in semitones over the Glide Time
   (one voice, overlapping notes); notes start within 0.04 ms of their
   time, and recordings add no offset.
+- The compose-in-live skill says when `preset="chords"` fits and that Basic
+  Pitch starts the lowest notes (under ~50 Hz) about 0.1 s late.
+
+### Tests
+
+- The fake Live, and so the simulator, reports Live 12.4.6 and has Drum
+  Rack chains that a pad lists by their `in_note` (as `DrumPad.chains`
+  does), `SimplerDevice.replace_sample`, Simpler's Detune and
+  `Clip.sample_to_beat_time`. 28 new tests, 370 in all; 2 of them run the
+  real Basic Pitch model, only with `ABLETON_MCP_ML_TESTS=1`.
 
 ## 2.2.0 — 2026-10-17
 
