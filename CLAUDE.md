@@ -211,12 +211,12 @@ Measured on Live 12.3.8:
   sidechain cannot be set from a script.
 - **Recordings** (`record_section`, `capture_stems`) are written at the audio
   device's sample rate (48 kHz on the test machine). Read as 44.1 kHz, a
-  16-beat capture drifted by 9 % (beat-lab, 2026-10-18).
+  16-beat capture drifted by 9 % (2026-10-18).
 - **Loaded samples stay loaded** (12.4): Live keeps playing what it loaded
   under a file name after the file is overwritten on disk, until it restarts.
   Overwritten library samples kept their old sound in a set for a day
-  (beat-lab's emotional-beat-1: a capture still held the old sample's second
-  hit). Give changed content a new file name.
+  (a capture still held the old sample's second hit). Give changed
+  content a new file name.
 - **Default levels** (12.4): a new Simpler's Volume is −12 dB, Operator's −18 dB;
   raising Simpler to 0 dB made recordings clip at 0 dBFS (`capture_stems` now
   reports `clipped_samples`).

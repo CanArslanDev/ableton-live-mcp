@@ -106,8 +106,7 @@
 - `capture_stems` says its recordings are at the audio device's sample rate
   (often 48 kHz). Read as 44.1 kHz, a capture drifts by 9 %.
 - CLAUDE.md: recordings' sample rate; Live keeps playing a sample it loaded
-  after the file is overwritten on disk, until it restarts (found in
-  beat-lab).
+  after the file is overwritten on disk, until it restarts.
 - CLAUDE.md: what Live 12.4.6 does with the Simplers and pads
   `build_tracks` makes, measured on 2026-10-19. `replace_sample` reads an
   overwritten file again, where a browser load keeps the old content.
