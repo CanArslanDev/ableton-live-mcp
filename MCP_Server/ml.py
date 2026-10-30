@@ -8,8 +8,8 @@ ENVIRONMENTS the first time (a download of a few hundred MB, cached after
 that) and gone from memory when the job ends. Progress comes back as JSON
 lines and is passed on as MCP progress notifications.
 
-The pure parts (seconds to beats, the sound index) are here and tested
-without any model.
+The pure parts (Basic Pitch's presets, seconds to beats, velocities and
+pitch bends, the sound index) are here and tested without any model.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import sys
@@ -187,19 +188,129 @@ def file_stem(prompt: str, when: str) -> str:
     return ("-".join(words[:6]) or "sound") + "-" + when
 
 
-# ── Audio to MIDI: seconds to beats ──────────────────────────────────────────
+# ── Audio to MIDI: settings, seconds to beats, velocity, bends ───────────────
 
-def events_to_notes(events: list[dict], tempo: float, offset_beats: float = 0.0) -> list[dict]:
-    """Basic Pitch's note events (seconds, amplitude 0..1) as clip notes in beats."""
-    beats_per_second = tempo / 60.0
-    notes = []
+# Basic Pitch's decoding settings by kind of part. Measured on 63 synthetic
+# renders (plucks, arpeggios with 32nd runs, leads with glides, pads; clean,
+# with an 808, with a bleed loop, wet), onset F1 (50 ms, 50 cents) averaged
+# over 7 groups: legacy (Basic Pitch's own defaults) 0.583, onset 0.6 with
+# melodia off 0.687 (0.706 with lowest just above the 808), chords 0.636;
+# chord tones sounding on the pads 0.82 with chords, 0.43 with melodia off
+# (not measured again since melodic keeps melodia below MIDI 52). legacy
+# keeps only notes of 12 frames (139 ms) or more: on 4 clean renders of 32nd
+# runs at 140 BPM (54 ms) its F1 was 0.36, melodic's 0.90. Without melodia
+# a note needs an attack the onset head sees: of 16 pure sines with a 10 ms
+# fade-in it found 3 (chords 15), of 124 notes on 3 synthetic 808 lines
+# (MIDI 28-43) 13, of 3 sine bass lines' none, and on six 808 stems (MIDI
+# 22-32, 336 notes) it returned 2 notes. So melodic keeps melodia below MIDI
+# 52 (165 Hz, MELODIA_BELOW) and drops what melodia reads there as a note
+# an octave over a sounding one (drop_octave_ghosts). Onset F1 (3 renders
+# each), melodia off everywhere -> melodic: 808 lines 0.18 -> 0.86, sine
+# bass 0.00 -> 0.45, saw bass 0.84 -> 0.82, the 808 stems 0.006 -> 0.17
+# (Basic Pitch starts those a median 109 ms late); plucks, runs, a lead and
+# pads above MIDI 52 0.915 -> 0.916, plucks and pads at MIDI 40-60
+# 0.900 -> 0.873.
+MELODIA_BELOW = 52
+TRANSCRIPTION_PRESETS = {
+    "melodic": {"onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
+                "melodia_trick": False, "melodia_below": MELODIA_BELOW, "velocity": "level"},
+    "chords": {"onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0,
+               "melodia_trick": True, "velocity": "level"},
+    "legacy": {"onset_threshold": 0.5, "frame_threshold": 0.3, "minimum_note_ms": 127.7,
+               "melodia_trick": True, "velocity": "amplitude"},
+}
+
+# Basic Pitch 0.4.0's per-note bends count thirds of a semitone from one bin
+# too low (get_pitch_bends centres a note on bin 3 * (pitch - 21), the
+# semitone's centre is the bin above): in-tune sines at 110-880 Hz read +1
+# in 99.4-100 % of their frames. One value per model frame, 256 / 22050 s.
+BEND_OFFSET_BINS = 1
+CENTS_PER_BEND_BIN = 100.0 / 3
+BEND_FRAME_S = 256 / 22050
+
+
+def transcription_settings(preset: str = "melodic", **given: Any) -> dict:
+    """The preset's settings with the given ones (not None) on top. A given
+    melodia_trick holds at every pitch."""
+    if preset not in TRANSCRIPTION_PRESETS:
+        raise ValueError(f"Unknown preset {preset!r}; known: {', '.join(TRANSCRIPTION_PRESETS)}")
+    settings = dict(TRANSCRIPTION_PRESETS[preset])
+    settings.update({k: v for k, v in given.items() if v is not None})
+    if given.get("melodia_trick") is not None:
+        settings.pop("melodia_below", None)
+    return settings
+
+
+def drop_octave_ghosts(events: list[dict], below: int | None) -> list[dict]:
+    """Basic Pitch's notes without those under `below` (MIDI) that sound for
+    more than half their length over a note an octave lower: melodia reads a
+    bass's second harmonic as a note of its own. On 3 saw bass lines (MIDI
+    28-43) they were 83 of 106 extra notes, and onset F1 went from 0.63 to
+    0.82 without them."""
+    if below is None:
+        return events
+    by_pitch: dict[int, list[tuple[float, float]]] = {}
     for event in events:
-        start = event["start"] * beats_per_second + offset_beats
-        duration = max(1 / 64, (event["end"] - event["start"]) * beats_per_second)
+        by_pitch.setdefault(int(event["pitch"]), []).append((float(event["start"]), float(event["end"])))
+    kept = []
+    for event in events:
+        pitch, start, end = int(event["pitch"]), float(event["start"]), float(event["end"])
+        if pitch < below:
+            covered = sum(max(0.0, min(end, b) - max(start, a)) for a, b in by_pitch.get(pitch - 12, ()))
+            if covered > 0.5 * (end - start):
+                continue
+        kept.append(event)
+    return kept
+
+
+def bend_cents(bends: list[int]) -> list[int]:
+    """Basic Pitch's bends (thirds of a semitone) as cents off the note, corrected."""
+    return [round((int(b) - BEND_OFFSET_BINS) * CENTS_PER_BEND_BIN) for b in bends]
+
+
+def level_velocities(levels_db: list[float]) -> list[int]:
+    """Velocity from each note's measured level: the loudest note gets 127 and
+    the rest 127 × 10^(dB below it / 40), so 12 dB down is 64 and 24 dB down
+    32 (gain = 40·log10(velocity/127) dB). An unmeasured level gives 64."""
+    levels = [float(v) for v in levels_db]
+    finite = [v for v in levels if math.isfinite(v)]
+    loudest = max(finite) if finite else 0.0
+    return [max(1, min(127, round(127 * 10 ** ((v - loudest) / 40)))) if math.isfinite(v) else 64
+            for v in levels]
+
+
+def place_notes(events: list[dict], beat_of: Callable[[float], float],
+                velocities: list[int] | None = None,
+                offset_beats: float = 0.0) -> tuple[list[dict], list[int]]:
+    """Basic Pitch's note events (seconds, amplitude 0..1) as clip notes, and
+    the index of the event behind each.
+
+    beat_of maps a time in the file to beats from the source clip's start;
+    offset_beats then moves every note. A note that ends before either
+    start is left out (the source clip never plays it), one that starts
+    before it starts there. velocities: one per event, else 127 × amplitude
+    (Basic Pitch's confidence, not a level)."""
+    notes, kept = [], []
+    for index, event in enumerate(events):
+        start, end = beat_of(float(event["start"])), beat_of(float(event["end"]))
+        start, end = max(0.0, start) + offset_beats, end + offset_beats
+        if end <= offset_beats or end <= 0:
+            continue
+        start = max(0.0, start)
+        velocity = (velocities[index] if velocities is not None
+                    else max(1, min(127, round(127 * float(event["amplitude"])))))
         notes.append({"pitch": int(event["pitch"]), "start_time": round(start, 4),
-                      "duration": round(duration, 4),
-                      "velocity": max(1, min(127, round(127 * float(event["amplitude"]))))})
-    return notes
+                      "duration": round(max(1 / 64, end - start), 4), "velocity": int(velocity)})
+        kept.append(index)
+    return notes, kept
+
+
+def events_to_notes(events: list[dict], tempo: float, offset_beats: float = 0.0,
+                    velocities: list[int] | None = None) -> list[dict]:
+    """Basic Pitch's note events as clip notes at one tempo, the file's
+    second 0 at offset_beats."""
+    beats_per_second = tempo / 60.0
+    return place_notes(events, lambda t: t * beats_per_second, velocities, offset_beats)[0]
 
 
 # ── Finding sounds: the CLAP index ───────────────────────────────────────────

@@ -96,6 +96,14 @@ def parse_note(text: str | int) -> int:
     return parse_pitch_class(m.group(1)) + (int(m.group(2)) + 2) * 12
 
 
+def frequency(value: str | int) -> float:
+    """Hz of a note ("E1", 40: Live's names, A1 = 110 Hz) or of a frequency ("82.4 Hz")."""
+    text = str(value).strip()
+    if text.lower().endswith("hz"):
+        return float(text[:-2])
+    return 440.0 * 2 ** ((parse_note(value) - 69) / 12)
+
+
 def scale_intervals(scale: str | Iterable[int]) -> list[int]:
     """Intervals of a named scale, or an interval list passed through.
 

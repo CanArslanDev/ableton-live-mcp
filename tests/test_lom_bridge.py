@@ -62,7 +62,7 @@ def script():
     surface._lom_init()
     surface.schedule_message = lambda delay, fn: fn()
     browser = fake_live.FakeBrowser(surface._song)
-    app = fake_live.FakeObj(view=fake_live.FakeAppView(), browser=browser)
+    app = fake_live.FakeApplication(browser)
     surface.application = lambda: app
     surface.module = module
     return surface
@@ -631,8 +631,12 @@ def _fake_ml(monkeypatch, tmp_path):
             return {"stems": stems, "sample_rate": 44100, "model": job["model"], "device": "cpu",
                     "seconds": 1.0}
         if task == "transcribe":
-            return {"notes": [{"start": 0.0, "end": 0.5, "pitch": 57, "amplitude": 0.8},
-                              {"start": 1.0, "end": 1.5, "pitch": 60, "amplitude": 0.4}]}
+            # bends as Basic Pitch gives them: thirds of a semitone, one bin high
+            return {"notes": [{"start": 0.0, "end": 0.5, "pitch": 57, "amplitude": 0.8,
+                               "bends": [1, 1, 2, 3]},
+                              {"start": 1.0, "end": 1.5, "pitch": 60, "amplitude": 0.4,
+                               "bends": [1, 1, 1]}],
+                    "frame_s": 256 / 22050}
         if task == "embed":
             out = {}
             if job["texts"]:
@@ -675,26 +679,124 @@ def test_separate_stems_from_a_clip_onto_new_tracks(live_server, tmp_path, monke
     assert result["tracks"][0] == {"track": "Song drums", "clip_index": 1}
 
 
-def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch):
+def _riff(path, rate=44100):
+    """The fake transcription's two notes as tones: A2 (MIDI 57) at -6 dB from
+    0 s, C3 (60) 12 dB lower from 1 s."""
     import numpy as np
     import soundfile as sf
 
+    t = np.arange(int(0.5 * rate)) / rate
+    y = np.zeros(2 * rate)
+    y[:len(t)] = 0.5 * np.sin(2 * np.pi * 220.0 * t)
+    y[rate:rate + len(t)] = 0.5 * 10 ** (-12 / 20) * np.sin(2 * np.pi * 261.63 * t)
+    sf.write(path, y, rate)
+    return path
+
+
+def test_audio_to_midi_writes_notes_in_beats(live_server, tmp_path, monkeypatch):
     script, call = live_server
     jobs = _fake_ml(monkeypatch, tmp_path)
-    wav = tmp_path / "Riff.wav"
-    sf.write(wav, np.zeros(4410), 44100)
+    wav = _riff(tmp_path / "Riff.wav")
     listing = call("audio_to_midi", path=str(wav), lowest="A1")
     assert [n["start_time"] for n in note_dicts(listing)] == [0, 2]
     # Live's note names: A1 is MIDI 45, 110 Hz
     assert jobs[0][1]["minimum_frequency"] == pytest.approx(110.0)
+    # The melodic preset by default (melodia only below MIDI 52); velocity
+    # from each note's level: 12 dB down is 64
+    assert {k: jobs[0][1][k] for k in ("onset_threshold", "frame_threshold", "minimum_note_ms",
+                                       "melodia_trick", "melodia_below")} == {
+        "onset_threshold": 0.6, "frame_threshold": 0.3, "minimum_note_ms": 35.0, "melodia_trick": False,
+        "melodia_below": 52}
+    assert [n["velocity"] for n in note_dicts(listing)] == [127, 64]
+    assert listing["velocity"] == {"from": "level", "loudest_db": -6.0}
+    assert listing["timing"] == {"offset_beats": 0.0, "method": "tempo", "tempo": 120.0}
+    assert "bends" not in listing
     result = call("audio_to_midi", path=str(wav), to_track="Bass", to_clip_index=2,
-                  midi_path=str(tmp_path / "mid"))
+                  midi_path=str(tmp_path / "mid"), preset="legacy")
     clip = script._song.tracks[1].clip_slots[2].clip
     assert clip.name == "Riff MIDI" and clip.length == 4.0
+    # legacy: Basic Pitch's own settings and velocity 127 × its confidence
     assert sorted((n.pitch, n.start_time, n.duration, n.velocity) for n in clip._notes) == [
         (57, 0.0, 1.0, 102), (60, 2.0, 1.0, 51)]
+    assert jobs[1][1]["minimum_note_ms"] == 127.7 and jobs[1][1]["melodia_trick"] is True
     assert result["tempo_used"] == 120.0 and result["notes_found"] == 2
     assert Path(result["midi_file"]["file"]).name == "Riff MIDI.mid"
+    # Given settings win over the preset; frequencies in Hz pass through
+    call("audio_to_midi", path=str(wav), preset="chords", onset_threshold=0.4, highest="2093 Hz")
+    assert jobs[2][1]["onset_threshold"] == 0.4 and jobs[2][1]["melodia_trick"] is True
+    assert jobs[2][1]["maximum_frequency"] == 2093.0 and "melodia_below" not in jobs[2][1]
+
+
+def test_audio_to_midi_drops_a_bass_notes_octave_ghost(live_server, tmp_path, monkeypatch):
+    from MCP_Server import ml
+
+    _script, call = live_server
+    found = [{"start": 0.0, "end": 1.0, "pitch": 33, "amplitude": 0.5, "bends": []},
+             {"start": 0.02, "end": 0.9, "pitch": 45, "amplitude": 0.3, "bends": []},
+             {"start": 1.0, "end": 1.4, "pitch": 45, "amplitude": 0.4, "bends": []}]
+
+    async def run(task, job, report=None, timeout=3600.0):
+        return {"notes": list(found), "frame_s": 256 / 22050}
+
+    monkeypatch.setattr(ml, "run", run)
+    wav = _riff(tmp_path / "Bass.wav")
+    listing = call("audio_to_midi", path=str(wav))
+    # The A2 under the A1 is its second harmonic; the A2 after it is a note
+    assert [(n["pitch"], n["start_time"]) for n in note_dicts(listing)] == [(33, 0), (45, 2)]
+    # chords decodes with melodia everywhere and keeps every note it finds
+    assert len(note_dicts(call("audio_to_midi", path=str(wav), preset="chords"))) == 3
+    found.clear()
+    with pytest.raises(Exception, match='No notes found; try preset="chords"'):
+        call("audio_to_midi", path=str(wav))
+
+
+def test_audio_to_midi_lists_corrected_bends(live_server, tmp_path, monkeypatch):
+    _script, call = live_server
+    _fake_ml(monkeypatch, tmp_path)
+    listing = call("audio_to_midi", path=str(_riff(tmp_path / "Riff.wav")), bends=True,
+                   offset_beats=4)
+    # Basic Pitch's [1, 1, 2, 3] is in tune, then a third and two thirds of a
+    # semitone sharp; the second note never bends and is left out
+    assert listing["bends"] == {"frame_s": 0.01161, "notes": [
+        {"pitch": 57, "start_time": 4.0, "cents": [0, 0, 33, 67]}]}
+    assert [n["start_time"] for n in note_dicts(listing)] == [4, 6]
+
+
+def test_audio_to_midi_follows_the_clips_warp_and_start_marker(live_server, tmp_path, monkeypatch):
+    script, call = live_server
+    _fake_ml(monkeypatch, tmp_path)
+    wav = _riff(tmp_path / "Riff.wav")
+    vox = script._song.tracks[2]
+    clip = vox.clip_slots[0].create_audio_clip(str(wav))
+    # Warped: Live's own beat for each time (the fake warps the file at 90 BPM),
+    # less the start marker in beats
+    clip.file_tempo, clip.start_marker = 90.0, 0.5
+    warped = call("audio_to_midi", track="Vox", clip_index=0)
+    assert [n["start_time"] for n in note_dicts(warped)] == [0, 1]
+    assert warped["timing"]["method"] == "warp" and warped["timing"]["start_marker_beats"] == 0.5
+    # Unwarped: the file in real time from the start marker (seconds) at the
+    # set's tempo; the note that ends before the marker is left out
+    clip.warping, clip.start_marker = False, 0.75
+    unwarped = call("audio_to_midi", track="Vox", clip_index=0, offset_beats=1)
+    assert [n["start_time"] for n in note_dicts(unwarped)] == [1.5]
+    assert unwarped["timing"] == {"offset_beats": 1.0, "note": "The clip loops; the notes follow its file once.",
+                                  "method": "tempo", "tempo": 120.0, "start_marker_seconds": 0.75,
+                                  "notes_before_clip_start": 1}
+    # A warped clip Live cannot map falls back to the tempo, and says so; audio
+    # it cannot read for levels leaves Basic Pitch's velocities, and says so
+    clip.warping, clip.start_marker = True, 0.0
+    (tmp_path / "Riff.txt").write_text("not audio")
+    clip.file_path = str(tmp_path / "Riff.txt")
+
+    def no_warp_map(self, sample_time):
+        raise RuntimeError("no warp map")
+
+    monkeypatch.setattr(fake_live.FakeClip, "sample_to_beat_time", no_warp_map)
+    fallback = call("audio_to_midi", track="Vox", clip_index=0)
+    assert fallback["timing"]["method"] == "tempo" and "did not map" in fallback["timing"]["warning"]
+    assert [n["start_time"] for n in note_dicts(fallback)] == [0, 2]
+    assert fallback["velocity"]["from"] == "amplitude" and "Could not read" in fallback["velocity"]["warning"]
+    assert [n["velocity"] for n in note_dicts(fallback)] == [102, 51]
 
 
 def test_find_similar_sounds_indexes_once_then_searches(live_server, tmp_path, monkeypatch):
@@ -1099,6 +1201,184 @@ def test_build_tracks_drum_rack_and_audio_tracks(live_server, tmp_path):
     track = next(t for t in song.tracks if t.name == "REF drums")
     assert track.mute and ref["audio_clips"][0]["warping"] is False
     assert ref["audio_clips"][0]["start_marker"] == 0.0
+
+
+def _wavs(folder, *names):
+    import numpy as np
+    import soundfile as sf
+    paths = []
+    for name in names:
+        sf.write(folder / name, np.zeros(4410), 44100)
+        paths.append(str(folder / name))
+    return paths
+
+
+def test_build_tracks_loads_samples_by_path_with_simpler_options(live_server, tmp_path):
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    bass, kick, closed, opened = _wavs(tmp_path, "808 C1.wav", "kick.wav", "hat c.wav", "hat o.wav")
+    spec = [{"name": "808", "instrument": {"sample_path": bass, "warping": False, "playback_mode": "classic",
+                                           "start_marker": 32},
+             "settings": {"Volume": "0.0 dB", "Transpose": -3, "Detune": "-12 ct"}},
+            {"name": "Beat", "instrument": {"drum_rack": {
+                "36": {"sample_path": kick, "playback_mode": "one_shot", "start_marker": 64,
+                       "settings": {"Detune": "25 ct"}},
+                "42": {"sample_path": closed, "choke_group": 1},
+                "46": {"sample_path": opened, "choke_group": 1},
+                "38": {"sample": "Snare Tight.wav"}}}}]
+    result = call("build_tracks", tracks=spec, signature=[7, 8], sample_wait_s=0)
+    rows = {r["track"]: r for r in result["tracks"]}
+    assert all(not r["problems"] and "loaded_by_name" not in r for r in rows.values()), result
+    assert (song.signature_numerator, song.signature_denominator) == (7, 8)
+    # The Simpler holds the file itself (replace_sample), its settings by display name
+    simpler = next(t for t in song.tracks if t.name == "808").devices[0]
+    assert rows["808"]["instrument"] == bass and simpler.sample.file_path == bass
+    assert simpler.playback_mode == 0 and simpler.sample.start_marker == 32
+    shown = {p.name: p.str_for_value(p.value) for p in simpler.parameters}
+    assert (shown["Transpose"], shown["Detune"]) == ("-3 st", "-12 ct")
+    assert {p.name: p.value for p in simpler.parameters}["Volume"] == pytest.approx(0.0, abs=0.05)
+    # Pads by path: a chain per note with a Simpler, choke groups on the chains
+    rack = next(t for t in song.tracks if t.name == "Beat").devices[0]
+    pad = rack.drum_pads[36].chains[0].devices[0]
+    assert pad.sample.file_path == kick and pad.playback_mode == 1 and pad.sample.start_marker == 64
+    assert {p.name: p.str_for_value(p.value) for p in pad.parameters}["Detune"] == "25 ct"
+    assert [rack.drum_pads[n].chains[0].choke_group for n in (42, 46)] == [1, 1]
+    assert rack.drum_pads[46].chains[0].devices[0].sample.file_path == opened
+    # Only the pad given by name went through the browser
+    assert [(n, item) for _t, n, item in browser.loaded] == [(38, "Snare Tight.wav")]
+    assert rows["Beat"]["instrument"] == {"36": kick, "42": closed, "46": opened,
+                                          "38": "Drums/Drum Hits/Snare/Snare Tight.wav"}
+    assert len(rack.chains) == 4
+
+
+def test_build_tracks_loads_by_name_where_paths_cannot(live_server, tmp_path, monkeypatch):
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    named, unknown = _wavs(tmp_path, "Kick 808 Long.wav", "Nowhere 1.wav")
+    # Before Live 12.4 there is no replace_sample: the browser finds the file's name
+    object.__setattr__(script.application(), "_version", (12, 3, 5))
+    result = call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {
+        "36": {"sample_path": named, "choke_group": 2}}}}], sample_wait_s=0)
+    row = result["tracks"][0]
+    assert row["loaded_by_name"] == {"36": "replace_sample needs Live 12.4; this is 12.3.5"}
+    assert row["instrument"]["36"].endswith("Kick 808 Long.wav") and not row["problems"]
+    assert next(t for t in song.tracks if t.name == "Kit").devices[0].drum_pads[36].chains[0].choke_group == 2
+    # Neither way: the call fails, saying why for both
+    with pytest.raises(Exception, match="needs Live 12.4.*browser: Live's browser does not list 'Nowhere 1.wav'"):
+        call("build_tracks", tracks=[{"name": "Kit 2", "instrument": {"drum_rack": {
+            "36": {"sample_path": unknown}}}}], sample_wait_s=0)
+
+    # On Live 12.4 a file replace_sample refuses goes to the browser too, and
+    # the Simpler or chain that did not take it is removed
+    object.__setattr__(script.application(), "_version", (12, 4, 6))
+
+    def refuse(self, file_path):
+        raise RuntimeError("Unsupported file")
+
+    monkeypatch.setattr(fake_live.FakeSimpler, "replace_sample", refuse)
+    result = call("build_tracks", tracks=[
+        {"name": "One", "instrument": {"sample_path": named}},
+        {"name": "Kit 3", "instrument": {"drum_rack": {"36": {"sample_path": named}}}}], sample_wait_s=0)
+    one, kit = result["tracks"]
+    assert one["loaded_by_name"] == "replace_sample: Unsupported file"
+    assert one["devices"] == ["Kick 808 Long"]  # the browser's Simpler only
+    assert kit["loaded_by_name"]["36"].startswith("replace_sample:")
+    rack = next(t for t in song.tracks if t.name == "Kit 3").devices[0]
+    assert len(rack.chains) == 1 and rack.drum_pads[36].chains[0].name == "Kick 808 Long"
+    assert len([1 for _t, n, _i in browser.loaded if n == 36]) == 2
+
+
+def test_build_tracks_takes_sample_next_to_sample_path(live_server, tmp_path):
+    """A spec for ableton-live-mcp 2.2.0, which knows only "sample", works
+    here too: the file loads by path, and the name is what the browser looks
+    up when the path cannot be used."""
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    (render,) = _wavs(tmp_path, "render 7.wav")  # a name the browser does not list
+    spec = [{"name": "808", "instrument": {"sample": "Kick 808 Long.wav", "sample_path": render}},
+            {"name": "Kit", "instrument": {"drum_rack": {
+                "36": {"sample": "Kick 808 Long.wav", "sample_path": render}}}}]
+    rows = call("build_tracks", tracks=spec, sample_wait_s=0)["tracks"]
+    assert [r["instrument"] for r in rows] == [render, {"36": render}] and browser.loaded == []
+    object.__setattr__(script.application(), "_version", (12, 3, 5))
+    rows = call("build_tracks", tracks=spec, replace=True, sample_wait_s=0)["tracks"]
+    assert rows[0]["instrument"].endswith("Kick 808 Long.wav") and rows[0]["loaded_by_name"]
+    assert rows[1]["instrument"]["36"].endswith("Kick 808 Long.wav")
+    assert [item for _t, _n, item in browser.loaded] == ["Kick 808 Long.wav"] * 2
+    assert next(t for t in song.tracks if t.name == "808").devices[0].sample.file_path.endswith("Kick 808 Long.wav")
+
+
+@pytest.mark.parametrize("refusal", ["insert_chain", "in_note", "insert_device"])
+def test_build_tracks_rebuilds_a_rack_by_name_when_live_refuses_its_chains(live_server, tmp_path, monkeypatch,
+                                                                          refusal):
+    """None of the calls that build pads by path has run in Live yet. If Live
+    lacks one, the rack goes and every pad comes from the browser on a new one."""
+    script, call = live_server
+    song, browser = script._song, script.application().browser
+    (named,) = _wavs(tmp_path, "Kick 808 Long.wav")
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError(f"Chain has no method '{refusal}'")
+
+    if refusal == "insert_chain":
+        monkeypatch.setattr(fake_live.FakeDrumRack, "insert_chain", refuse)
+    elif refusal == "insert_device":
+        monkeypatch.setattr(fake_live.FakeDrumChain, "insert_device", refuse)
+    else:
+        setter = fake_live.FakeDrumChain.__setattr__
+
+        def no_in_note(self, name, value):
+            if name == "in_note" and value != -1:
+                refuse()
+            setter(self, name, value)
+
+        monkeypatch.setattr(fake_live.FakeDrumChain, "__setattr__", no_in_note)
+    result = call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {
+        "36": {"sample_path": named, "choke_group": 1}, "38": {"sample": "Snare Tight.wav"}}}}],
+        sample_wait_s=0)
+    row = result["tracks"][0]
+    assert not row["problems"] and set(row["loaded_by_name"]) == {"36"}
+    assert row["loaded_by_name"]["36"].startswith("pads by path:") and refusal in row["loaded_by_name"]["36"]
+    assert row["instrument"]["36"].endswith("Kick 808 Long.wav")
+    # One rack, named track, one chain per pad: nothing left over from the attempt
+    track = song.tracks[-1]
+    assert track.name == "Kit" and row["devices"] == ["Drum Rack"]
+    rack = track.devices[0]
+    assert sorted(c.in_note for c in rack.chains) == [36, 38]
+    assert rack.drum_pads[36].chains[0].choke_group == 1
+    assert sorted(n for _t, n, _i in browser.loaded) == [36, 38]
+
+
+def test_build_tracks_rebuilds_a_rack_that_is_gone(live_server, tmp_path, monkeypatch):
+    script, call = live_server
+    song = script._song
+    (named,) = _wavs(tmp_path, "Kick 808 Long.wav")
+
+    def refuse_and_drop_the_rack(self, name, index=-1):
+        song.tracks[-1].devices = []
+        raise RuntimeError("Chain has no method 'insert_device'")
+
+    monkeypatch.setattr(fake_live.FakeDrumChain, "insert_device", refuse_and_drop_the_rack)
+    row = call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {
+        "36": {"sample_path": named}}}}], sample_wait_s=0)["tracks"][0]
+    assert row["devices"] == ["Drum Rack"] and row["loaded_by_name"]["36"].startswith("pads by path:")
+    assert song.tracks[-1].devices[0].drum_pads[36].chains[0].name == "Kick 808 Long"
+
+
+def test_build_tracks_refuses_sampler_options_that_cannot_work(live_server, tmp_path):
+    script, call = live_server
+    before = len(script._song.tracks)
+    (kick,) = _wavs(tmp_path, "kick.wav")
+    for pad, message in (({"sample_path": "kick.wav"}, "must be absolute"),
+                         ({"sample_path": str(tmp_path / "gone.wav")}, "no such file"),
+                         ({"sample_path": kick, "playback_mode": "loop"}, "use classic, one_shot or slicing"),
+                         ({"sample_path": kick, "choke_group": 17}, "choke_group is 0"),
+                         ({"choke_group": 1}, "give sample_path")):
+        with pytest.raises(Exception, match=message):
+            call("build_tracks", tracks=[{"name": "Kit", "instrument": {"drum_rack": {"36": pad}}}])
+    with pytest.raises(Exception, match="1-99 over 1, 2, 4, 8 or 16"):
+        call("build_tracks", tracks=[], signature="7/9")
+    assert len(script._song.tracks) == before
 
 
 def test_build_drum_kit_fills_general_midi_pads(live_server):

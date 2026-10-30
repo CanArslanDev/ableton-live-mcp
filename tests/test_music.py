@@ -23,6 +23,13 @@ def test_parse_note_uses_ableton_octaves():
     assert music.note_name(60) == "C3"
 
 
+def test_frequency_of_a_note_or_in_hertz():
+    assert music.frequency("A1") == pytest.approx(110.0)   # Live's names: A1 = MIDI 45
+    assert music.frequency(40) == pytest.approx(82.407, abs=0.001)
+    assert music.frequency("82.4 Hz") == 82.4
+    assert music.frequency("2093hz") == 2093.0
+
+
 def test_roman_numerals_follow_the_scale():
     chords = music.parse_progression("i VI III VII", "A minor")
     roots = [music.NOTE_NAMES[c["root_pc"]] for c in chords]

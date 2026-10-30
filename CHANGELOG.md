@@ -2,13 +2,137 @@
 
 ## Unreleased
 
+### Added
+
+- `audio_to_midi` takes a `preset`: `melodic` (the default: onset 0.6,
+  frame 0.3, 35 ms, melodia only below MIDI 52), `chords` (melodia at every
+  pitch) or `legacy` (what it did before: 0.5, 0.3, 127.7 ms, melodia on),
+  and `melodia_trick`, which it never passed (it was always on); given, it
+  holds at every pitch. On 63 synthetic renders (plucks, 32nd runs, leads,
+  pads; with reverb, an 808 and a bleed loop), onset F1 went from 0.583
+  (legacy) to 0.687 with melodia off at every pitch, 0.706 with `lowest`
+  just above the 808 (measured by an earlier spike, not again with melodia
+  below MIDI 52). legacy keeps only notes of 139 ms or more: on 32nd-note
+  runs at 140 BPM its F1 was 0.36, melodic's 0.90 (4 clean renders through
+  this server's worker). Without melodia a note needs an attack Basic Pitch
+  sees: it found 3 of 16 pure sines with a 10 ms fade-in (chords 15), 13 of
+  124 notes on synthetic 808 lines and 2 notes for the 336 of six 808 stems
+  (MIDI 22-32; "No notes found" on five of them). So melodic decodes the
+  model's output twice, melodia off from MIDI 52 (165 Hz) up and on below,
+  and drops the low notes melodia reads an octave over a sounding one (a
+  bass's second harmonic: 83 of the 106 extra notes on 3 saw bass lines).
+  Onset F1, melodia off everywhere → melodic (3 renders each, 4 above MIDI
+  52): 808 lines 0.18 → 0.86, with repeated notes 0.18 → 0.49, sine bass
+  0.00 → 0.45, saw bass 0.84 → 0.82, sine bass at MIDI 40-55 0.34 → 0.82;
+  plucks, runs, a lead and pads above MIDI 52 0.915 → 0.916, plucks and
+  pads at MIDI 40-60 0.900 → 0.873. On the 808 stems F1 went from 0.006 to
+  0.17: the notes have their pitch, but Basic Pitch starts them a median
+  109 ms late (IQR 48–187 ms) at 29–52 Hz. When it finds no notes, the
+  error suggests `preset="chords"`.
+- `audio_to_midi(bends=true)` lists the pitch bend of each bent note in
+  cents, one value per model frame (11.6 ms). Basic Pitch 0.4.0 reads
+  in-tune notes a third of a semitone sharp (+1 in 99.4–100 % of the frames
+  of sines at 110, 220, 440 and 880 Hz); the values are corrected by that
+  bin, after which in-tune and ±33-cent sines read 0 and ±33 cents. Live's
+  API has no per-note pitch bend, so bends are returned, not written.
+- `audio_to_midi` velocities follow each note's level
+  (`audio_analysis.note_levels`): a band at the note's pitch, one semitone
+  wide but at most 100 ms long, the loudest of its readings from 20 ms
+  before the note's start to 60 ms after it, none past its end; the
+  loudest note gets 127 and the others 127 × 10^(dB below it / 40). Rank
+  correlation with the true level (Spearman, Basic Pitch on 4 clean
+  synthetic renders each), against 127 × Basic Pitch's amplitude before:
+  plucks 0.62 → 0.98, a legato lead 0.71 → 0.99, triad pads 0.27 → 0.95.
+  On 3 driven 808 lines (MIDI 28-43, -24 to 0 dB, 82 notes) it is 0.98,
+  and equal-level 808 lines get velocities 125–127. Centred on the note's
+  start, a one-semitone window (0.51 s at MIDI 24) read the silence or the
+  note before it: 0.95 and velocities 102–127, and equal-level 808 lines
+  (MIDI 24-45) spread 3.6, 4.1 and 10.0 dB in quarters, 8ths and 16ths at
+  140 BPM, against 0.08, 0.12 and 0.18 dB now. Below MIDI 53 the band is
+  wider than a semitone, so a kick on an 808 note adds 0.9 dB on average.
+  With reverb and detuned pad voices a similar measure ranked plucks at
+  0.81–0.83, a lead at 0.57 and pads at 0.20. `legacy` keeps the old
+  velocity.
+- `audio_to_midi` places notes where the source clip plays them: a warped
+  clip through Live's own warp (`Clip.sample_to_beat_time`, in batches), an
+  unwarped one from its start marker; notes the clip never plays are left
+  out. `offset_beats` moves every note, and `timing` in the result says
+  what applied (or that Live could not map a warped clip). Checked against
+  the fake Live, not yet in Live. `lowest` and `highest` also take Hz
+  ("82.4 Hz").
+- `build_tracks` loads a Simpler's or a drum pad's sample from a file
+  (`sample_path`, absolute) with `SimplerDevice.replace_sample` (Live
+  12.4+), builds those pads without the browser (`insert_chain`, `in_note`,
+  a Simpler per chain) and reads each file back from its Simpler. By name,
+  the browser's first hit could be another file with the same name. On
+  older Live, or when Live refuses a file, the file's name goes to the
+  browser (`loaded_by_name` says why), and the call fails if neither
+  works. Simplers and pads take `playback_mode` (classic, one_shot,
+  slicing) and `start_marker` (sample frames), pads `choke_group` (0–16),
+  and `signature` sets the time signature first. Settings such as
+  `"Detune": "-12 ct"` resolve by name as before. If Live refuses a call
+  that builds pads by path (`insert_chain`, `in_note`,
+  `Chain.insert_device`), the rack is deleted and every pad comes from the
+  browser on a new one, as `loaded_by_name` says. `sample` may come with
+  `sample_path`: it is the name the browser looks up when the path cannot
+  be used, and what 2.2.0, which ignores `sample_path` and the new options
+  without an error, loads. Everything goes through the Remote Script's
+  generic LOM bridge: script 2.1.0 works unchanged. Measured in Live 12.4.6
+  on 2026-10-19 with script 2.1.0, every option passed: files by path on a
+  Simpler and on Drum Rack pads (each read back as the exact path),
+  `playback_mode` classic and one_shot, `start_marker` (frames),
+  `choke_group`, `warping: false`, `"Detune": "-12 ct"`, `signature` "7/8",
+  the browser fallback for a file Live refuses (on a Simpler and on one pad
+  of a rack) and the refusals before anything is built; a 5-track build (an
+  808 Simpler and drum pads, by path) took 7.7 s. Not verified in Live: the
+  rack rebuilt by name (Live 12.4.6 refused none of those calls; the fake
+  Live was made to refuse each), loading on Live before 12.4, and the
+  slicing mode.
+
+### Changed
+
+- `audio_to_midi` defaults to the `melodic` preset and to velocities from
+  each note's level; `preset="legacy"` gives what it gave before.
+- The tempo estimate of the audio analysis tools is found between frames: a
+  parabola through the autocorrelation peak at one beat, then at 2 to 32
+  beats, and it is reported to 0.01 BPM (0.1 before). Whole-frame lags are
+  3.9 BPM apart at 140 BPM (44.1 kHz), and a 137 BPM click track read
+  136.0; it reads 137.0 now. Click tracks from 70 to 175 BPM at 44.1 and
+  48 kHz came within 0.01 BPM wherever the tempo octave was right; the
+  octave choice is unchanged (150 BPM still reads 75).
+
 ### Documentation
 
 - `capture_stems` says its recordings are at the audio device's sample rate
   (often 48 kHz). Read as 44.1 kHz, a capture drifts by 9 %.
 - CLAUDE.md: recordings' sample rate; Live keeps playing a sample it loaded
-  after the file is overwritten on disk, until it restarts (found in
-  beat-lab).
+  after the file is overwritten on disk, until it restarts.
+- CLAUDE.md: what Live 12.4.6 does with the Simplers and pads
+  `build_tracks` makes, measured on 2026-10-19. `replace_sample` reads an
+  overwritten file again, where a browser load keeps the old content.
+  Transpose keeps whole semitones and Detune whole cents from −50 to +50,
+  truncating numbers (display text such as "11.5 ct" rounds). A Simpler's
+  level follows dB = 0.4 × A × (velocity − 70) − 0.096 over its Volume, A
+  being "Vol < Vel" as a fraction (35 % on a Simpler made with
+  `insert_device`, 45 % on a pad loaded through the browser). A choke
+  group cuts with a 1 ms fade; "Snap", on by default, ends a sample
+  10–30 ms early; Glide slides linearly in semitones over the Glide Time
+  (one voice, overlapping notes); notes start within 0.04 ms of their
+  time, and recordings add no offset.
+- The compose-in-live skill says when `preset="chords"` fits and that Basic
+  Pitch starts the lowest notes (under ~50 Hz) about 0.1 s late.
+
+### Tests
+
+- The fake Live, and so the simulator, reports Live 12.4.6 and has Drum
+  Rack chains that a pad lists by their `in_note` (as `DrumPad.chains`
+  does), `SimplerDevice.replace_sample`, Simpler's Detune and
+  `Clip.sample_to_beat_time`. 28 new tests, 370 in all; 2 of them run the
+  real Basic Pitch model, only with `ABLETON_MCP_ML_TESTS=1`.
+- The companion tools' test gives them a connection that raises. It used the
+  server's own, which tried localhost:9877, where a running Live listens,
+  3 times per run (2.5 s; 0.45 s now). No test tries that port now (checked
+  over the whole suite with Live open).
 
 ## 2.2.0 — 2026-10-17
 
