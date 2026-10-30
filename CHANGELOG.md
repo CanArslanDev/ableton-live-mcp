@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.3.0 — 2026-10-30
+
+The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
+The new `build_tracks` options were checked in Live 12.4.6 (2026-10-19);
+`audio_to_midi`'s placement through a clip's warp only against the fake Live.
 
 ### Added
 
