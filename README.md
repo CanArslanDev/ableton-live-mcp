@@ -286,6 +286,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 | New tools answer *"Remote Script … is older than this server"* | Run the installer again and restart Live. If it persists, check that no copy named `AbletonMCP` sits inside the Live app bundle (`…/Contents/App-Resources/MIDI Remote Scripts/`) — it shadows the User Library copy, and Live updates have been seen to restore an old one there. |
 | Claude Desktop: *"AbletonMCP didn't respond within 2 minutes"* | On macOS, check for a pending *"uv wants to access files in your Documents folder"* prompt and allow it, then restart the client. |
 | *"Could not connect to Ableton"* | Live must be running with AbletonMCP selected as a Control Surface; check that port 9877 is free. |
+| *"Connection reset by peer"* as soon as a server connects | The Remote Script serves at most 8 clients, and every MCP server (each assistant session with this server) holds one. Close the sessions you no longer use, or restart Live. |
 | *"Authentication required"* | The MCP server is older than the Remote Script (2.0 wants a session token). Update the server, or point your client at this version. |
 | *"Invalid session token"* | Live restarted and wrote a new token; the server reads it again on the next call. If the server runs as another user or in a container, set `ABLETON_MCP_TOKEN`. |
 | Live's log | `~/Library/Preferences/Ableton/Live <version>/Log.txt` — lines tagged `(AbletonMCP)` |

@@ -399,6 +399,43 @@ recordings at the audio device's 48 kHz.
   check (`Application.get_major/minor/bugfix_version()`) let path loading
   run.
 
+Measured again on 2026-10-29 (Live 12.4.6 Trial, 48 kHz device) in
+reference-dissector's two live checks, which built 8 plans and a song with
+2.2.0's `build_tracks` (pads through the browser, so One-Shot; the 808 a
+Simpler made with `insert_device`, so Classic) and recorded each pad and
+the 808 with `capture_stems`:
+
+- **One-Shot pads hit again** cut the sounding hit with a straight-line
+  fade over 1 ms and start the new one 1.000 ms late (median of 391 hits on
+  18 pads; 98 % within 0.95–1.05 ms). A hit that comes after the file (or
+  Snap) has ended starts on time.
+- **The Classic 808 Simpler** releases over its default Ve Release of 50
+  ms: −1.683 dB a millisecond, −40 dB 23.8 ms after the note's end, silent
+  (−60 dB) at 35.7 ms. A note after one of its own pitch restarts the voice
+  0.94–1.05 ms late. Its filter (on, 22 kHz) delays each note by 0.13–0.46
+  ms, more for lower notes, and cuts upper harmonics.
+- **Simpler loses top end** against the file it plays: about −0.14, −0.32
+  and −0.9 to −2.5 dB at 4–8, 8–12 and 12–20 kHz for a 48 kHz file at
+  Transpose 0; 44.1 kHz files lose more (−1.6 to −1.8 dB at 12–16 kHz,
+  −3.1 to −3.7 dB at 16–18 kHz).
+- **Volume by display text** is held a display step low: "-6.6 dB" reads
+  back −6.605 dB, "-14.9 dB" −14.95 dB; hits play the held value within
+  0.003 dB.
+- **By file name**, the browser's first hit is what loads: a name two files
+  shared put an 808 on an open-hat pad, and a name the browser never listed
+  ("3 .wav") made `build_tracks` raise after its 40 s wait, leaving the
+  tracks already made in the set. `sample_path` does not go through the
+  browser.
+- **Cues land on the Arrangement's grid**, which depends on its zoom:
+  `set_or_delete_cue` at beats 9, 21 and 33 made cues at 8, 20 and 32 in
+  4/4 and at 12, 24 and 36 in 3/4 at the default zoom, and
+  `place_locators` reported them as failed; after four `zoom_view` steps
+  in, beat 9 was placed exactly.
+- **Eight clients at most.** The script serves `MAX_CLIENTS` (8)
+  connections; a ninth is closed at once ("Refusing a connection" in Live's
+  log), which the client sees as "Connection reset by peer". Each MCP
+  server holds one, so eight sessions with the plugin fill it.
+
 Not verified in Live (check each in a scratch set before claiming it):
 
 - The rack rebuilt by name when `insert_chain`, `in_note` or
@@ -407,7 +444,9 @@ Not verified in Live (check each in a scratch set before claiming it):
   call deletes a single rack chain). Live 12.4.6 refused none of them, so
   only `fake_live` has seen it.
 - Samples on Live before 12.4 (the browser, by file name).
-- `playback_mode` slicing (2), and one_shot on overlapping hits of one pad.
+- `playback_mode` slicing (2), and one_shot set by `playback_mode` on a pad
+  built by path (overlapping hits were measured on One-Shot pads loaded
+  through the browser, above).
 - `audio_to_midi` on a warped clip: `Clip.sample_to_beat_time(frames)`
   minus `start_marker` (beats) as the note's beat in the new clip; on an
   unwarped clip `start_marker` in seconds; `Clip.sample_rate`, else the

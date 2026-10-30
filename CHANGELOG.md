@@ -121,6 +121,18 @@
   time, and recordings add no offset.
 - The compose-in-live skill says when `preset="chords"` fits and that Basic
   Pitch starts the lowest notes (under ~50 Hz) about 0.1 s late.
+- CLAUDE.md: what Live 12.4.6 did in reference-dissector's live checks of
+  2026-10-29, which built 8 plans and a song with 2.2.0's `build_tracks`
+  and recorded every pad. One-Shot pads hit again start the new hit 1.000
+  ms late (391 hits) and fade the old one out over 1 ms; the Classic 808
+  Simpler releases at −1.683 dB/ms, restarts a note of its own pitch ~1 ms
+  late, and its filter delays notes 0.13–0.46 ms; Simpler loses top end
+  (more for 44.1 kHz files); a Volume sent as display text is held a step
+  low; loading by file name took another file of the same name, and a
+  name the browser never listed made the build stop half-made; cues land
+  on the Arrangement's zoom-dependent grid.
+- README and the ableton-setup skill: "Connection reset by peer" means the
+  Remote Script already serves its 8 clients (one per MCP server).
 
 ### Tests
 

@@ -28,6 +28,7 @@ what it says rather than guessing.
 | Symptom | Cause and fix |
 |---|---|
 | Could not connect to Ableton Live | Live is not running, or AbletonMCP is not chosen as a Control Surface, or something else holds port 9877. |
+| "Connection reset by peer" right after connecting | The Remote Script serves at most 8 clients, one per MCP server; other assistant sessions hold them. Ask the user to close the sessions they no longer use, or to restart Live. |
 | "older than this server" / outdated script | `install_remote_script()`, then restart Live. If the version does not change, an old `AbletonMCP` folder inside the Live application (…/Contents/App-Resources/MIDI Remote Scripts/) shadows the User Library copy; `doctor()` finds it. Live updates have restored one there. |
 | Authentication required | The server is older than the Remote Script, which wants the session token since 2.0. Update the server. |
 | Invalid session token | Live restarted and wrote a new token (~/.ableton-mcp/live-session.json); the next call reads it again. Across users or containers, set `ABLETON_MCP_TOKEN`. |
