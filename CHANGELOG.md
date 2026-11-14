@@ -28,7 +28,7 @@
     the number did not hold), choke groups, locators Live moved and the time
     signature. `bars="9-16"` builds a short excerpt.
 - refdissect is not a dependency: jobs run it in a uv environment of its own
-  (Python 3.12, pinned to reference-dissector 0970a03;
+  (Python 3.12, pinned to reference-dissector 21d82d7;
   `ABLETON_MCP_REFDISSECT=<checkout>` runs a local one), detached from the
   server in their own process group, with records in `~/.ableton-mcp/jobs/`
   (`ABLETON_MCP_JOBS_DIR`) and a `job.json` in the work folder. A job

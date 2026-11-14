@@ -188,13 +188,13 @@ What `refdissect blueprint WORK [--out FILE]` writes, field by field, from
 
 | Blueprint | From |
 |---|---|
-| `name` | the song's name (the work folder's) |
+| `name` | the song's name: the folder holding the stems' folder (the name the plan already gives the 808 one-shot), else the work folder's |
 | `made_by` | `"refdissect <version or commit>"` |
 | `tempo`, `length_beats` | `plan.tempo`, `plan.length_beats` |
 | `time_signature` | `meter_of(plan)` |
 | `locators` | `[{"name": n, "beat": float(round(b))} for n, b in plan.locators]` |
 | `files["808"]` | `{"source": t808.sample_path, "name": t808.sample, "sha1": one_shot_digest(t808.sample_path)}`, when the 808 track has a one-shot |
-| `files["pad-<note>"]` | `{"source": pad.path, "name": pad_sample(pad.path, file_db), "gain_db": file_db}` (`gain_db` only under 0), optionally `"sha1"` of the source |
+| `files["pad-<note>"]` | `{"source": pad.path, "name": pad_sample(pad.path, file_db), "gain_db": file_db}` (`gain_db` only under 0), and `"sha1"` of the source (refdissect always writes it) |
 | track `808 (synth)` | `build_spec`'s, with `"instrument": {"file": "808", "warping": false}` instead of `sample`, `settings` = `simpler_808(t808)`, `"voices"` only when the plan has one (never `null`) |
 | track `Drums (library)` | `build_spec`'s, each pad `{"file": "pad-<note>", "warping": false, "settings": {Volume (a number), Transpose, Detune, Vol < Vel, Snap}, "choke_group"?}` (`choke_group` only when 1–16) |
 | melodic and `REF` tracks | `build_spec`'s, the stems' paths absolute |
