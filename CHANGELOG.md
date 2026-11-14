@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `separate_stems` pins torch 2.14.1 in its Demucs environment. Unpinned, a
+  fresh environment resolves torch 2.15.0, whose stems on Apple GPUs (MPS)
+  put the bass into "other" (measured by reference-dissector, which pins the
+  same version).
+
 ## 2.3.0 — 2026-10-30
 
 The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.

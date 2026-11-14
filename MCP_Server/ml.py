@@ -41,8 +41,13 @@ class Environment:
 
 
 ENVIRONMENTS = {
-    # Demucs 4.1 loads its weights from Hugging Face (htdemucs: ~80 MB)
-    "separate": Environment("3.12", ("demucs==4.1.0", "soundfile>=0.12", "scipy>=1.11"),
+    # Demucs 4.1 loads its weights from Hugging Face (htdemucs: ~80 MB).
+    # torch is pinned: unpinned it resolves 2.15.0, whose stems on Apple GPUs
+    # (MPS) put the bass into "other". reference-dissector measured its bass
+    # stems at a correlation of -0.01 to 0.06 with the true bass, against
+    # 0.98 for stems that torch 2.14.1 gives back byte for byte
+    "separate": Environment("3.12", ("demucs==4.1.0", "torch==2.14.1", "soundfile>=0.12",
+                                     "scipy>=1.11"),
                             "torch and Demucs, ~400 MB"),
     # Basic Pitch 0.4 wants TensorFlow < 2.15 on Python 3.11+; on 3.10 it
     # runs its own model through Core ML (macOS), ONNX (Windows) or TFLite

@@ -60,6 +60,13 @@ def test_jobs_run_in_their_own_uv_environment(monkeypatch, tmp_path):
     assert env["PYTHONUNBUFFERED"] == "1"
 
 
+def test_demucs_environment_pins_torch():
+    # torch 2.15.0 on Apple GPUs (MPS) puts the bass into "other"
+    packages = ml.ENVIRONMENTS["separate"].packages
+    assert "torch==2.14.1" in packages
+    assert [p for p in packages if p.startswith("torch")] == ["torch==2.14.1"]
+
+
 def test_missing_uv_is_explained(monkeypatch, tmp_path):
     monkeypatch.delenv("UV", raising=False)
     monkeypatch.setattr(ml.shutil, "which", lambda name: None)
