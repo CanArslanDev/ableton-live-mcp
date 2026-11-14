@@ -2958,6 +2958,346 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     f"sidechain from {source}: {e}")
         return to_json({"tracks": report, "sidechains": len(sidechains)})
 
+    # ── Reference songs: reference-dissector jobs and blueprints ─────────────
+    # (reference_jobs.py runs refdissect in its own uv environment, detached;
+    # blueprint.py holds the format; the full profile only)
+
+    @tool(tier="full")
+    async def dissect_reference(path: str | None = None, track: int | str | None = None,
+                                clip_index: int | None = None,
+                                arrangement_clip_index: int | None = None,
+                                model: str = "htdemucs", melodic: bool = True,
+                                slides: bool = False, steps: list[str] | None = None) -> str:
+        """Start analysing a reference song with reference-dissector, as a job:
+        stems, tempo grid, sections, drum hits matched to the user's samples,
+        the 808, melodic notes, and a blueprint to build it with. Returns a job
+        id at once: follow it with reference_job, then build_from_blueprint.
+        About 5 minutes for a 2-minute song on Apple Silicon (the first run
+        sets up ~2 GB); index_sound_library must have run once.
+
+        - path: an audio file, or track + clip_index / arrangement_clip_index
+        - model: Demucs model (htdemucs | htdemucs_ft | htdemucs_6s)
+        - melodic: transcribe the tonal stems too; slides: the 808's slides
+        - steps: run part of the chain again on the song's folder, e.g.
+          ["match", "plan", "blueprint"] after a new index (separate, analyze,
+          melodic, match, fit-808, plan, blueprint)
+        """
+        from . import reference_jobs as jobs
+
+        if not re.fullmatch(r"[A-Za-z0-9_]+", model or ""):
+            raise ValueError(f"model {model!r}: a Demucs model name such as htdemucs")
+        source = await audio_source(path, track, clip_index, arrangement_clip_index)
+        chosen = jobs.resolve_steps(steps, melodic)
+        work = jobs.work_folder(source["name"], source["file"])
+        planned = await asyncio.to_thread(jobs.dissect_steps, source["file"], work, chosen, model,
+                                          slides)
+        await asyncio.to_thread(jobs.claim_folder, work, source["file"])
+        record = await asyncio.to_thread(jobs.start, "dissect", source["name"], work, planned, {
+            "source": source["file"], "model": model, "melodic": melodic, "slides": slides})
+        expected = sum(step["expected_s"] for step in planned)
+        return to_json({
+            "job": record["id"], "steps": chosen, "work": str(work), "refdissect": record["refdissect"],
+            "estimate": f"about {max(1, round(expected / 60))} min once set up; the first run also "
+                        "downloads its environments and models (~2 GB)",
+            "next": f'reference_job(job_id="{record["id"]}") until it is done'})
+
+    @tool(tier="full")
+    async def index_sound_library(folders: list[str] | None = None) -> str:
+        """Index the user's samples for dissect_reference to match drum sounds
+        and 808s against, as a job (refdissect inventory, index-library and its
+        808 index): once, and again when the library changes. About a minute
+        per 9,000 sounds on Apple Silicon after the first run's setup. Returns
+        a job id: follow it with reference_job.
+
+        folders: default the User Library and Live's Core Library samples.
+        """
+        from . import reference_jobs as jobs
+
+        chosen = [Path(f).expanduser() for f in folders] if folders else jobs.default_sound_folders()
+        missing = [str(f) for f in chosen if not f.is_dir()]
+        if missing or not chosen:
+            raise FileNotFoundError(f"No such folder: {', '.join(missing) or 'no User Library or Core Library found; pass folders'}")
+        library = jobs.library_dir()
+        planned = await asyncio.to_thread(jobs.index_steps, chosen)
+        record = await asyncio.to_thread(jobs.start, "index", "sound library", library, planned,
+                                         {"folders": [str(f) for f in chosen]})
+        return to_json({"job": record["id"], "folders": [str(f) for f in chosen],
+                        "index": str(library), "refdissect": record["refdissect"],
+                        "next": f'reference_job(job_id="{record["id"]}") until it is done'})
+
+    @tool(tier="full")
+    async def reference_job(job_id: str | None = None, wait: float = 20.0, cancel: bool = False,
+                            ctx: Context | None = None) -> str:
+        """A dissect_reference or index_sound_library job: waits up to `wait`
+        seconds (at most 60) for its next step, with progress notifications,
+        then gives its state. Done, it gives a summary: tempo, meter, sections,
+        pads with their match verdicts, 808 notes, files. Without job_id: the
+        recent jobs. cancel=True stops the job and all it started.
+        """
+        from . import reference_jobs as jobs
+
+        if job_id is None:
+            if cancel:
+                raise ValueError("cancel needs the job_id")
+            rows = await asyncio.to_thread(jobs.recent, 10)
+            return to_json({"jobs": [jobs.brief(r) for r in rows]} if rows else
+                           {"jobs": [], "note": "No reference jobs yet: dissect_reference starts one"})
+        if cancel:
+            return to_json(jobs.status(await asyncio.to_thread(jobs.cancel, job_id)))
+        record = await asyncio.to_thread(jobs.load, job_id)
+        mark = (record.get("state"), record.get("step"))
+        deadline = time.monotonic() + max(0.0, min(float(wait), 60.0))
+        shown = -1.0
+        while record.get("state") in jobs.ACTIVE and time.monotonic() < deadline:
+            progress = float(record.get("progress") or 0.0)
+            if progress > shown:
+                shown = progress
+                steps = [s["name"] for s in record.get("steps", [])]
+                where = (f"{record['step']} ({steps.index(record['step']) + 1}/{len(steps)})"
+                         if record.get("step") in steps else "starting")
+                await report_progress(ctx, round(progress * 100, 1), 100,
+                                      f"{record.get('name')}: {where}")
+            await asyncio.sleep(1.0)
+            record = await asyncio.to_thread(jobs.load, job_id)
+            if (record.get("state"), record.get("step")) != mark:
+                break
+        return to_json(jobs.status(record))
+
+    def load_blueprint(value: str | dict) -> tuple[dict, Path | None, str]:
+        """(blueprint, its folder or None, where it came from): a job id, a
+        file or its folder, JSON text or the object itself."""
+        from . import reference_jobs as jobs
+
+        if isinstance(value, dict):
+            return value, None, "the blueprint given"
+        text = str(value).strip()
+        if text.startswith("{"):
+            return json.loads(text), None, "the blueprint given"
+        if re.fullmatch(r"[A-Za-z0-9._-]+", text) and jobs.record_path(text).is_file():
+            record = jobs.load(text)
+            file = Path(record["work"]) / "blueprint.json"
+            if record.get("kind") != "dissect":
+                raise ValueError(f"Job {text} indexed the sound library: give a dissect_reference job")
+            if record.get("state") != "done":
+                raise RuntimeError(f"Job {text} is {record.get('state')} (step {record.get('step')}): "
+                                   "wait for it with reference_job")
+            if not file.is_file():
+                raise FileNotFoundError(f"Job {text} wrote no blueprint.json in {record['work']}: "
+                                        "its refdissect has no `blueprint` command")
+        else:
+            file = Path(text).expanduser().resolve()  # Live gets absolute paths
+            if file.is_dir():
+                file = file / "blueprint.json"
+            if not file.is_file():
+                raise FileNotFoundError(f"No blueprint at {file} (give a job id, a blueprint.json "
+                                        "or its folder)")
+        return json.loads(file.read_text(encoding="utf-8")), file.parent, str(file)
+
+    def moved_cues(placed: list[dict], before: list[float]) -> list[dict]:
+        """The locators Live did not make where asked: a cue at a beat neither
+        asked for nor in the set before (Live snapped it to the Arrangement's
+        grid, which depends on the zoom) is deleted, by moving the playhead
+        there and toggling it in the next call, and listed."""
+        asked = [p["time"] for p in placed]
+        cues = lom_get("live_set cue_points", ["name", "time"])["items"]
+        stray = [c for c in cues if all(abs(c["time"] - t) > 1e-3 for t in asked + before)]
+        failed = [p for p in placed if p.get("error")]
+        out = []
+        for cue in stray:
+            near = min(failed, key=lambda p: abs(p["time"] - cue["time"]), default=None)
+            if near is not None:
+                failed.remove(near)
+            send("lom_set", {"path": "live_set", "property": "current_song_time",
+                             "value": float(cue["time"])})
+            time.sleep(0.05)
+            send("lom_call", {"path": "live_set", "method": "set_or_delete_cue"})
+            out.append({"name": near["name"] if near else cue["name"],
+                        "asked": near["time"] if near else None, "live": cue["time"]})
+        out += [{"name": p["name"], "asked": p["time"], "live": None} for p in failed]
+        left = lom_get("live_set cue_points", ["name", "time"])["items"] if stray else cues
+        for row in out:
+            row["deleted"] = row["live"] is not None and all(abs(c["time"] - row["live"]) > 1e-3
+                                                             for c in left)
+        return out
+
+    def read_back(blueprint: dict, base: Path | None, placed: dict[str, Path],
+                  tracks: dict[str, int], checks: dict[str, bool]) -> dict:
+        """What Live holds after the build, against the blueprint: the time
+        signature, each Simpler's file (by content), numeric Volumes (sent
+        again as display text where the number did not hold), choke groups
+        (set again where they differ) and voices."""
+        from . import blueprint as bp
+
+        out: dict[str, Any] = {}
+        if checks["time_signature"]:
+            song = lom_get("live_set", ["signature_numerator", "signature_denominator"])
+            live = f"{song['signature_numerator']}/{song['signature_denominator']}"
+            out["time_signature"] = {"want": blueprint["time_signature"], "live": live,
+                                     "same": live == blueprint["time_signature"]}
+        samples, volumes, chokes = {}, {}, {}
+        for _i, name, note, options in bp.samplers(blueprint):
+            if name not in tracks:
+                continue
+            key = f"{name} pad {note}" if note else name
+            rack = f"live_set tracks {tracks[name]} devices 0"
+            chain = f"{rack} drum_pads {note} chains 0" if note else None
+            device = f"{chain} devices 0" if note else rack
+            want = (placed.get(options["file"]) if options.get("file")
+                    else Path(options["sample_path"]).expanduser() if options.get("sample_path") else None)
+            if checks["samples"] and want is not None:
+                try:
+                    held = lom_get(f"{device} sample", ["file_path"]).get("file_path")
+                    same = bool(held) and Path(held).is_file() and bp.sha1(Path(held)) == bp.sha1(want)
+                    samples[key] = {"want": str(want), "live": held, "same": same}
+                except Exception as e:  # no Simpler there, or one without a sample
+                    samples[key] = {"want": str(want), "live": None, "same": False, "error": str(e)}
+            volume = (options.get("settings") or {}).get("Volume") if note else (
+                (next(t for t in blueprint["tracks"] if t["name"] == name).get("settings") or {}).get("Volume"))
+            if checks["volumes"] and isinstance(volume, (int, float)):
+                parameter = f"{device} parameters {selector('Volume')}"
+
+                def reading(parameter: str = parameter) -> dict:
+                    try:
+                        got = lom_get(parameter, ["value", "$display"])
+                        return {"value": got.get("value"), "display": got.get("$display")}
+                    except Exception as e:
+                        return {"error": str(e)}
+
+                got = reading()
+                row = {"want": float(volume), **got,
+                       "held": bp.volume_held(float(volume), got.get("value"), got.get("display"))}
+                if not row["held"] and "error" not in got:
+                    try:  # Live's way before: a display step under the text (-6.6 holds -6.605)
+                        batch([op_display(parameter, f"{float(volume):.1f} dB")])
+                        row["then"] = then = reading()
+                        row["by_text"] = (isinstance(then.get("value"), (int, float))
+                                          and abs(float(then["value"]) - float(volume)) <= bp.VOLUME_TEXT_DB)
+                    except Exception as e:
+                        row["text_error"] = str(e)
+                volumes[key] = row
+            group = options.get("choke_group")
+            if checks["choke_groups"] and note and group is not None:
+                try:
+                    live = lom_get(chain, ["choke_group"]).get("choke_group")
+                    if live != int(group):
+                        send("lom_set", {"path": chain, "property": "choke_group", "value": int(group)})
+                        live = lom_get(chain, ["choke_group"]).get("choke_group")
+                    chokes[key] = {"want": int(group), "live": live, "same": live == int(group)}
+                except Exception as e:
+                    chokes[key] = {"want": int(group), "live": None, "same": False, "error": str(e)}
+        if samples:
+            out["samples"] = {"checked": len(samples),
+                              "wrong": {k: v for k, v in samples.items() if not v["same"]}}
+        if volumes:
+            out["volumes"] = {"checked": len(volumes), "held": sum(v["held"] for v in volumes.values())}
+            by_text = [k for k, v in volumes.items() if v.get("by_text")]
+            if by_text:
+                out["volumes"]["held_by_text"] = by_text
+            missed = {k: v for k, v in volumes.items() if not v["held"] and not v.get("by_text")}
+            if missed:
+                out["volumes"]["not_held"] = missed
+        if chokes:
+            out["choke_groups"] = {"checked": len(chokes),
+                                   "wrong": {k: v for k, v in chokes.items() if not v["same"]}}
+        return out
+
+    @tool(tier="full")
+    def build_from_blueprint(blueprint: str | dict[str, Any], bars: str | None = None) -> str:
+        """Build a blueprint (a beat as JSON: tempo, meter, locators, tracks
+        and their sample files; docs/blueprint-v1.md) in the open, empty Live
+        set, then read back what Live holds: every Simpler's file, pad Volumes,
+        choke groups, locators Live moved, the time signature.
+
+        - blueprint: a finished dissect_reference job's id, a blueprint.json
+          (or its folder), or the blueprint itself
+        - bars: "9-16" builds only those bars (from 1), moved to the start,
+          for a quick listen
+        """
+        from . import als, blueprint as bp, ml
+
+        data, base, origin = load_blueprint(blueprint)
+        bp.check(data)
+        problems = bp.check_sources(data, base)
+        if problems:
+            raise FileNotFoundError("The blueprint's files: " + "; ".join(problems[:10]))
+        report: dict[str, Any] = {"blueprint": data.get("name") or origin}
+        if bars:
+            a, b = bp.parse_bars(bars)
+            from . import reference_jobs as jobs
+            data = bp.excerpt(data, (a, b), base, (base or jobs.data_dir()) / f"excerpt-{a}-{b}")
+            report["excerpt"] = data["meta"]["excerpt"]
+        overview = send("get_session_overview")
+        busy = [t["name"] for t in overview["tracks"]
+                if t.get("devices") or t.get("session_clips") or t.get("arrangement_clip_count")]
+        if busy:
+            raise RuntimeError(f"The set is not empty ({', '.join(busy)}): open a new Live set first")
+        before = len(overview["tracks"])
+        cues_before = [float(c["time"]) for c in overview.get("cue_points") or []]
+        numerator, denominator = bp.signature(data["time_signature"])
+        # the meter before any locator: Live snaps a new cue to the Arrangement's grid
+        batch([op_set("live_set", "tempo", float(data["tempo"])),
+               op_set("live_set", "signature_numerator", numerator),
+               op_set("live_set", "signature_denominator", denominator)])
+        folder = ml.generated_folder(als._user_libraries())
+        placed, files = bp.put_files(data, base, folder)
+        spec = bp.build_spec(data, placed, base)
+        try:
+            built = json.loads(build_tracks(spec, sample_wait_s=40.0))
+        except Exception as e:
+            try:
+                made = send("get_session_overview")["tracks"][before:]
+                left = ", ".join(f"{t['name']!r} ({', '.join(t.get('devices') or []) or 'no device'})"
+                                 for t in made) or "no track"
+            except Exception as again:  # Live is gone too
+                left = f"unknown tracks ({again})"
+            raise RuntimeError(f"build_tracks stopped: {e}. It left {left} in the set: delete "
+                               "them, or open a new set, before building again") from e
+        tracks = {t["name"]: t["index"] for t in send("get_session_overview")["tracks"][before:]}
+        checks = bp.checks_on(data)
+        report.update(tempo=data["tempo"], time_signature=data["time_signature"], tracks=[
+            {"track": row["track"], "devices": row.get("devices"), "notes": row.get("notes", 0),
+             **({"audio_clips": len(row["audio_clips"])} if row.get("audio_clips") else {}),
+             **({"problems": row["problems"]} if row.get("problems") else {}),
+             **({"loaded_by_name": row["loaded_by_name"]} if row.get("loaded_by_name") else {})}
+            for row in built["tracks"]])
+        report["files"] = {"folder": str(folder), **{
+            action: sum(f["action"] == action for f in files)
+            for action in ("copied", "scaled", "kept", "replaced") if any(f["action"] == action for f in files)}}
+        if any(f["action"] == "replaced" for f in files):
+            report["files"]["note"] = ("A file of another content had this name: Live may keep "
+                                       "playing the old one where it loaded it by name, until it restarts")
+        voices = {}
+        for spec_track in data["tracks"]:
+            if spec_track.get("voices") is None or spec_track["name"] not in tracks:
+                continue
+            device = f"live_set tracks {tracks[spec_track['name']]} devices 0"
+            want = int(spec_track["voices"])
+            try:
+                send("lom_set", {"path": device, "property": "voices", "value": want})
+                live = lom_get(device, ["voices"]).get("voices") if checks["voices"] else want
+                voices[spec_track["name"]] = {"want": want, "live": live, "same": live == want}
+            except Exception as e:
+                voices[spec_track["name"]] = {"want": want, "live": None, "same": False, "error": str(e)}
+        if data.get("locators"):
+            placed_cues = place_locators([(c["name"], float(c["beat"])) for c in data["locators"]])
+            report["locators"] = sum("error" not in p for p in placed_cues)
+            moved = moved_cues(placed_cues, cues_before) if checks["locators"] else [
+                {"name": p["name"], "asked": p["time"], "live": None} for p in placed_cues if p.get("error")]
+            if moved:
+                report["locators_moved"] = moved
+        report["checks"] = read_back(data, base, placed, tracks, checks)
+        if voices:
+            report["checks"]["voices"] = voices
+        batch([op_set("live_set", "current_song_time", 0.0),
+               op_call("live_app view", "show_view", VIEWS["arrangement"])], stop_on_error=False)
+        found = report["checks"]
+        report["ok"] = not (
+            any("problems" in t for t in report["tracks"]) or report.get("locators_moved")
+            or not found.get("time_signature", {"same": True})["same"]
+            or found.get("samples", {}).get("wrong") or found.get("choke_groups", {}).get("wrong")
+            or found.get("volumes", {}).get("not_held") or any(not v["same"] for v in voices.values()))
+        return to_json(report)
+
     @tool(idempotent=True)
     def set_device_parameter_by_name(track: int | str, device: int | str,
                                      parameter: int | str, value: float | None = None,

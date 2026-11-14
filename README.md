@@ -71,14 +71,16 @@ while testing against Live 12.3.
 | **Real-time analyzer** | `install_analyzer` puts the AbletonMCP Analyzer, a Max for Live device this server generates, on a track or the master; `read_analyzer` then reports per track, while the set plays and without recording, octave-band levels, loudness (within ~0.1 LU of an offline BS.1770 measurement in our test), stereo correlation and width, peak and RMS. Needs Max for Live (Suite, Standard with the add-on, or the Trial) |
 | **Live companion** | An optional Extensions SDK add-on for Live 12.4.5+ Suite (`extension/`): "Share … with AbletonMCP" in Live's right-click menus tells `get_live_selection` which bars, clips or tracks you mean; `confirm_in_live` asks yes/no in a dialog inside Live; `render_track_audio` renders an audio track without playing the set. Not yet run inside Live (it is checked against the SDK's types and a simulated host) |
 | **Machine learning** | `separate_stems` splits a mix into drums, bass, vocals and other with Demucs, optionally onto new tracks where the source clip was; `audio_to_midi` turns a melody, bass line or chords into a MIDI clip with Spotify's Basic Pitch (presets for melodies, bass lines and chords, velocities from each note's level, notes placed through the clip's warp and start marker, pitch bends in cents on request); `find_similar_sounds` finds samples by description ("dusty vinyl kick") or by example with CLAP; `generate_audio` makes a sound or a loop from a text prompt with MusicGen small and puts it on an audio track, a Drum Rack pad or a Simpler, with the set's tempo and key in the prompt (MusicGen's weights are CC-BY-NC 4.0: non-commercial use). Each runs in its own environment that uv sets up the first time (Demucs ~0.5 GB, Basic Pitch ~150 MB, CLAP ~1.2 GB, MusicGen ~2.5 GB) and leaves the server's memory when done. On an M-series Mac: a 20-second mix separates in ~9 s, a phrase transcribes in ~4 s, a search over indexed sounds takes ~4 s, an 8-second loop is generated in ~19 s |
+| **Reference songs** (full profile) | "Make a beat like this song": `dissect_reference` takes a song apart with [reference-dissector](https://github.com/CanArslanDev/reference-dissector) as a job (stems, tempo grid, sections, drum hits matched to your own samples, the 808, melodic notes), `reference_job` follows it with progress and summarizes what it found, `build_from_blueprint` builds the result in an empty set and reads back what Live holds, `index_sound_library` indexes your samples once. See [Reference songs](#reference-songs-full-profile) |
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview` and `ableton://events`, pushed to clients that subscribe (both MCP protocol versions) |
 | **Panels** | In clients that support MCP Apps (Claude Desktop, claude.ai), 22 tools show an interactive panel with their result: mixer and Session grid with scene launch, level meters, the mix doctor's masking heat map, the reference curve with a one-click EQ, snapshot A/B buttons, a piano roll of generated clips, a Drum Rack pad grid with sample swapping, and a makam keyboard. Other clients get the same results as text |
 | **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
-76 tools in the default profile (104 with `ABLETON_MCP_PROFILE=full`), plus
+77 tools in the default profile (109 with `ABLETON_MCP_PROFILE=full`), plus
 workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
-`arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`.
+`arrange_from_loop`, `release_check`, `explain_my_set`, `match_reference`
+(and `beat_like_reference` in the full profile).
 
 ### Audio analysis
 
@@ -104,15 +106,39 @@ The original upstream tools that newer ones replace (`set_tempo`,
 default to keep the tool list short. Set `ABLETON_MCP_PROFILE=full` to get
 them back.
 
-### Built with it
+### Reference songs (full profile)
 
 [**reference-dissector**](https://github.com/CanArslanDev/reference-dissector)
 takes a reference track apart: the tempo grid, the tuning, every drum hit, the
-exact samples from your own library and a synthesized 808. It rebuilds the
-track in Live through this server's tools, with the original stems muted
-underneath for A/B. Its docs also cover the Live behaviour measured along the
-way and how a model that cannot hear can still tell whether two sounds are the
-same.
+exact samples from your own library and a synthesized 808. With
+`ABLETON_MCP_PROFILE=full`, an assistant runs it end to end from here:
+
+1. `index_sound_library()` once: a job that indexes the User Library and the
+   Core Library's samples (about a minute per 9,000 sounds).
+2. `dissect_reference(path=...)` (or an audio clip) starts the analysis as a
+   job and returns its id at once; about 5 minutes for a 2-minute song.
+3. `reference_job(job_id=..., wait=20)` waits for the next step with progress
+   notifications, and once done gives tempo, meter, sections, each pad's
+   sample with its match verdict, the 808's notes and the files written.
+   `cancel=True` stops the job and everything it started.
+4. `build_from_blueprint(blueprint=<job id>)` builds the result in an empty
+   set over this server's own connection (`bars="9-16"` for a short excerpt),
+   with the reference's stems on audio tracks underneath for A/B, and reads back what Live
+   holds: each Simpler's file, pad Volumes, choke groups, locators Live moved.
+5. `render_and_analyze` and `compare_to_reference` to listen; the
+   `beat_like_reference` prompt walks through all of it.
+
+refdissect is not a dependency: jobs run it in a uv environment of its own
+(Python 3.12, pinned to one commit), detached from the server in their own
+process group, so a job outlives a restart of the client and one job runs at
+a time. The first run downloads about 2 GB (refdissect, torch, Demucs,
+beat_this, Basic Pitch); then it works offline. Data goes to
+`~/Music/Ableton MCP/Reference Dissector/` (the library index in `library/`,
+one folder per song, named after its file), job records to `~/.ableton-mcp/jobs/`. The result is a
+[blueprint](docs/blueprint-v1.md), a JSON format anything can write.
+Measured on macOS with Apple Silicon only; 16 GB of RAM recommended (an
+analysis peaks at about 2 GB). Needs Live 12.4 to load samples by path
+(earlier versions go through the browser by file name).
 
 ---
 
@@ -200,7 +226,10 @@ versions match.
 Environment variables: `ABLETON_MCP_PROFILE=full` (every original tool),
 `ABLETON_HOST` / `ABLETON_PORT` (where the server looks for Live),
 `ABLETON_MCP_TOKEN` (the session token, when the server cannot read
-`~/.ableton-mcp/live-session.json`). In Live's environment:
+`~/.ableton-mcp/live-session.json`), `ABLETON_MCP_REFDISSECT` (a local
+reference-dissector checkout to run instead of the pinned one),
+`ABLETON_MCP_REFERENCE_DIR` and `ABLETON_MCP_JOBS_DIR` (where reference jobs
+keep their data and records). In Live's environment:
 `ABLETON_MCP_VERBOSE=1` (log every command to Live's Log.txt) and
 `ABLETON_MCP_AUTH=0` (accept clients that do not send the token).
 
@@ -295,7 +324,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 370 tests, no Live or models required
+uv run --with pytest pytest -q            # 434 tests, no Live or models required
 (cd extension && npm ci && npm test)       # the Extensions SDK add-on
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb
@@ -319,8 +348,9 @@ Script, the way Live does, so the server and its tools run without Ableton
 (no sound; the browser holds a few samples). Point a server at it with
 `ABLETON_MCP_SESSION_FILE=~/.ableton-mcp/simulator-session.json`.
 
-[`evals/`](evals/README.md) holds 32 `claude plugin eval` cases (mixing,
-composing, makams and usuls, arrangement and transitions, memory, safety) that run the plugin's real
+[`evals/`](evals/README.md) holds 33 `claude plugin eval` cases (mixing,
+composing, makams and usuls, arrangement and transitions, building from a
+reference job, memory, safety) that run the plugin's real
 server against a fresh simulated set each time and check the resulting set,
 not the reply:
 
@@ -332,7 +362,9 @@ claude plugin eval . --scaffold --allow-real-servers \
 ## Privacy
 
 Nothing leaves your machine. The server talks only to Live on localhost and
-reads no credentials. The upstream project's telemetry and dataset recorder
+reads no credentials. The machine-learning and reference tools download their
+environments and models the first time (PyPI, GitHub, Hugging Face); the songs
+and samples they work on stay where they are. The upstream project's telemetry and dataset recorder
 (Supabase) were removed in 2.2.0; the Remote Script no longer installs the
 listeners that fed it.
 

@@ -1,0 +1,283 @@
+{
+ "format": "ableton-mcp-blueprint",
+ "version": 1,
+ "name": "Short beat",
+ "made_by": "by hand: tests/fixtures/blueprints",
+ "tempo": 120,
+ "time_signature": "4/4",
+ "length_beats": 8,
+ "locators": [
+  {
+   "name": "A (1)",
+   "beat": 0
+  },
+  {
+   "name": "B (2)",
+   "beat": 4
+  }
+ ],
+ "files": {
+  "808": {
+   "source": "samples/808.wav",
+   "name": "808 719984e5.wav",
+   "sha1": "719984e5"
+  },
+  "kick": {
+   "source": "samples/kick.wav",
+   "name": "kick 820c5e7b.wav",
+   "sha1": "820c5e7b"
+  },
+  "snare": {
+   "source": "samples/snare.wav",
+   "name": "snare 5ae65d91.wav"
+  },
+  "hat": {
+   "source": "samples/hat-closed.wav",
+   "name": "hat-closed fa599570.wav"
+  }
+ },
+ "tracks": [
+  {
+   "name": "808 (synth)",
+   "instrument": {
+    "file": "808",
+    "warping": false,
+    "playback_mode": "classic"
+   },
+   "settings": {
+    "Volume": "0.0 dB",
+    "Vol < Vel": 0.35,
+    "Snap": "Off",
+    "F On": "Off",
+    "Ve Release": "50.0 ms",
+    "Transpose": 36,
+    "Detune": -12
+   },
+   "volume_db": -2.0,
+   "clips": [
+    {
+     "start": 0,
+     "length": 8,
+     "name": "808",
+     "notes": [
+      {
+       "pitch": 24,
+       "start_time": 0,
+       "duration": 1.5,
+       "velocity": 115
+      },
+      {
+       "pitch": 24,
+       "start_time": 4,
+       "duration": 1.5,
+       "velocity": 110
+      },
+      {
+       "pitch": 27,
+       "start_time": 6,
+       "duration": 1.0,
+       "velocity": 100
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Drums (library)",
+   "instrument": {
+    "drum_rack": {
+     "36": {
+      "file": "kick",
+      "warping": false,
+      "playback_mode": "one_shot",
+      "settings": {
+       "Transpose": 0,
+       "Detune": 0,
+       "Vol < Vel": 0.35,
+       "Snap": "Off",
+       "Volume": -3.0
+      }
+     },
+     "38": {
+      "file": "snare",
+      "warping": false,
+      "playback_mode": "one_shot",
+      "settings": {
+       "Transpose": 0,
+       "Detune": 0,
+       "Vol < Vel": 0.35,
+       "Snap": "Off",
+       "Volume": -6.6
+      }
+     },
+     "42": {
+      "file": "hat",
+      "warping": false,
+      "playback_mode": "one_shot",
+      "settings": {
+       "Transpose": 2,
+       "Detune": -8,
+       "Vol < Vel": 0.35,
+       "Snap": "Off",
+       "Volume": -9.5
+      }
+     }
+    }
+   },
+   "volume_db": -4.0,
+   "clips": [
+    {
+     "start": 0,
+     "length": 8,
+     "name": "Drums",
+     "notes": [
+      {
+       "pitch": 36,
+       "start_time": 0,
+       "duration": 1,
+       "velocity": 120
+      },
+      {
+       "pitch": 36,
+       "start_time": 2.5,
+       "duration": 1,
+       "velocity": 120
+      },
+      {
+       "pitch": 36,
+       "start_time": 4,
+       "duration": 1,
+       "velocity": 120
+      },
+      {
+       "pitch": 36,
+       "start_time": 6.5,
+       "duration": 1,
+       "velocity": 120
+      },
+      {
+       "pitch": 38,
+       "start_time": 1,
+       "duration": 1,
+       "velocity": 105
+      },
+      {
+       "pitch": 38,
+       "start_time": 3,
+       "duration": 1,
+       "velocity": 105
+      },
+      {
+       "pitch": 38,
+       "start_time": 5,
+       "duration": 1,
+       "velocity": 105
+      },
+      {
+       "pitch": 38,
+       "start_time": 7,
+       "duration": 1,
+       "velocity": 105
+      },
+      {
+       "pitch": 42,
+       "start_time": 0.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 0.5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 1.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 1.5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 2.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 2.5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 3.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 3.5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 4.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 4.5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 5.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 5.5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 6.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 6.5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 7.0,
+       "duration": 1,
+       "velocity": 80
+      },
+      {
+       "pitch": 42,
+       "start_time": 7.5,
+       "duration": 1,
+       "velocity": 90
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

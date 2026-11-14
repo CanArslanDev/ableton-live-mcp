@@ -81,6 +81,34 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
   into drums, bass, vocals and other on new tracks, e.g. to sample a part or
   to transcribe just the bass. The first use of each downloads its model.
 
+## A beat like a reference song
+
+With the full profile (`ABLETON_MCP_PROFILE=full`), reference-dissector takes
+a song apart on this computer and the result is built in Live (measured on
+macOS with Apple Silicon only; the first run downloads ~2 GB):
+
+1. `index_sound_library()` once (and again when the library changes): a job
+   that indexes the User Library and the Core Library's samples, so drum
+   hits and 808s are matched against sounds the user owns.
+2. `dissect_reference(path="/path/to/song.mp3")` (or `track=`, `clip_index=`)
+   starts the analysis and returns a job id at once: stems, tempo grid,
+   sections, drum hits matched to samples, the 808, melodic notes and a
+   blueprint. About 5 minutes for a 2-minute song.
+3. `reference_job(job_id=..., wait=20)` until it is done; it sends progress
+   while it waits. The summary gives tempo, meter, sections, each pad's file
+   with its match verdict ("same sample", "same family", "no close match")
+   and the 808's notes: say plainly which sounds are only near.
+   `reference_job(job_id=..., cancel=True)` stops it; `steps=["match", "plan",
+   "blueprint"]` reruns part of the chain (after a new index, say).
+4. In an empty set: `build_from_blueprint(blueprint=<job id>)`, or
+   `bars="9-16"` for a quick excerpt. It reports what Live did not take
+   (a Simpler holding another file, Volumes, choke groups, moved locators).
+5. Listen: `render_and_analyze(...)` over a section and
+   `compare_to_reference(reference_path=..., ...)` over the same bars.
+
+The prompt `beat_like_reference` walks through this. The song, its stems and
+the plan stay on the user's computer.
+
 ## Arrange
 
 When the scenes are ready, `build_arrangement(sections=[{"name": "Intro",

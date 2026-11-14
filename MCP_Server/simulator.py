@@ -132,9 +132,16 @@ def _device(device: Any) -> dict:
     if sample is not None:
         item["sample"] = os.path.basename(sample.file_path)
         item["reversed"] = bool(getattr(device, "reversed", False))
+    if getattr(device, "voices", None) is not None:
+        item["voices"] = device.voices
     pads = getattr(device, "drum_pads", None)
     if pads:
         item["pads"] = {str(p.note): p.name for p in pads if p.name or p.chains}
+        item["chains"] = {str(p.note): [{"name": getattr(c, "name", ""),
+                                         "choke_group": getattr(c, "choke_group", 0),
+                                         "devices": [_device(d) for d in getattr(c, "devices", [])]}
+                                        for c in p.chains]
+                          for p in pads if p.chains}
     return item
 
 

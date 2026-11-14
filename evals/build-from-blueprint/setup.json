@@ -1,0 +1,68 @@
+[
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set",
+   "method": "delete_track",
+   "args": [
+    2
+   ]
+  }
+ },
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set",
+   "method": "delete_track",
+   "args": [
+    1
+   ]
+  }
+ },
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set",
+   "method": "delete_track",
+   "args": [
+    0
+   ]
+  }
+ },
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set",
+   "method": "create_midi_track",
+   "args": [
+    -1
+   ]
+  }
+ },
+ {
+  "type": "lom_call",
+  "params": {
+   "path": "live_set",
+   "method": "create_midi_track",
+   "args": [
+    -1
+   ]
+  }
+ },
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set",
+   "property": "tempo",
+   "value": 98.0
+  }
+ },
+ {
+  "type": "lom_set",
+  "params": {
+   "path": "live_set",
+   "property": "signature_numerator",
+   "value": 3
+  }
+ }
+]
