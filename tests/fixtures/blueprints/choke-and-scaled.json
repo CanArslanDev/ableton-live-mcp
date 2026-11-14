@@ -1,0 +1,261 @@
+{
+ "format": "ableton-mcp-blueprint",
+ "version": 1,
+ "name": "Choke and scaled",
+ "made_by": "by hand: tests/fixtures/blueprints",
+ "tempo": 90,
+ "time_signature": "3/4",
+ "length_beats": 12,
+ "locators": [
+  {
+   "name": "Intro (1)",
+   "beat": 0
+  },
+  {
+   "name": "Hook (3)",
+   "beat": 6
+  }
+ ],
+ "files": {
+  "kick": {
+   "source": "samples/kick.wav",
+   "name": "kick 820c5e7b.wav"
+  },
+  "closed": {
+   "source": "samples/hat-closed.wav",
+   "name": "hat-closed fa599570.wav"
+  },
+  "open": {
+   "source": "samples/hat-open.wav",
+   "name": "hat-open 5397b99f.wav"
+  },
+  "clap": {
+   "source": "samples/hot-clap.wav",
+   "name": "hot-clap ccc9a8ab -3.10dB.wav",
+   "gain_db": -3.1,
+   "sha1": "ccc9a8ab"
+  }
+ },
+ "tracks": [
+  {
+   "name": "Drums (library)",
+   "instrument": {
+    "drum_rack": {
+     "36": {
+      "file": "kick",
+      "warping": false,
+      "settings": {
+       "Transpose": 0,
+       "Detune": 0,
+       "Vol < Vel": 0.35,
+       "Snap": "Off",
+       "Volume": 0.0
+      }
+     },
+     "39": {
+      "file": "clap",
+      "warping": false,
+      "settings": {
+       "Transpose": 0,
+       "Detune": 0,
+       "Vol < Vel": 0.35,
+       "Snap": "Off",
+       "Volume": 0.0
+      }
+     },
+     "42": {
+      "file": "closed",
+      "warping": false,
+      "choke_group": 1,
+      "settings": {
+       "Transpose": 0,
+       "Detune": 0,
+       "Vol < Vel": 0.35,
+       "Snap": "Off",
+       "Volume": -4.0
+      }
+     },
+     "46": {
+      "file": "open",
+      "warping": false,
+      "choke_group": 1,
+      "settings": {
+       "Transpose": 0,
+       "Detune": 0,
+       "Vol < Vel": 0.35,
+       "Snap": "Off",
+       "Volume": -14.9
+      }
+     }
+    }
+   },
+   "volume_db": -6.0,
+   "clips": [
+    {
+     "start": 0,
+     "length": 12,
+     "name": "Drums",
+     "notes": [
+      {
+       "pitch": 36,
+       "start_time": 0,
+       "duration": 1,
+       "velocity": 118
+      },
+      {
+       "pitch": 36,
+       "start_time": 3,
+       "duration": 1,
+       "velocity": 118
+      },
+      {
+       "pitch": 36,
+       "start_time": 6,
+       "duration": 1,
+       "velocity": 118
+      },
+      {
+       "pitch": 36,
+       "start_time": 9,
+       "duration": 1,
+       "velocity": 118
+      },
+      {
+       "pitch": 39,
+       "start_time": 1.5,
+       "duration": 1,
+       "velocity": 100
+      },
+      {
+       "pitch": 39,
+       "start_time": 4.5,
+       "duration": 1,
+       "velocity": 100
+      },
+      {
+       "pitch": 39,
+       "start_time": 7.5,
+       "duration": 1,
+       "velocity": 100
+      },
+      {
+       "pitch": 39,
+       "start_time": 10.5,
+       "duration": 1,
+       "velocity": 100
+      },
+      {
+       "pitch": 42,
+       "start_time": 0,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 1,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 2,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 3,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 4,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 5,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 6,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 7,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 8,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 9,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 42,
+       "start_time": 10,
+       "duration": 1,
+       "velocity": 90
+      },
+      {
+       "pitch": 46,
+       "start_time": 11,
+       "duration": 1,
+       "velocity": 95
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "other (notes)",
+   "instrument": "Drift",
+   "mute": true,
+   "volume_db": -12.0,
+   "clips": [
+    {
+     "start": 0,
+     "length": 12,
+     "name": "other",
+     "notes": [
+      {
+       "pitch": 62,
+       "start_time": 0,
+       "duration": 3,
+       "velocity": 90
+      },
+      {
+       "pitch": 65,
+       "start_time": 3,
+       "duration": 3,
+       "velocity": 90
+      },
+      {
+       "pitch": 69,
+       "start_time": 6,
+       "duration": 6,
+       "velocity": 90
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "checks": {
+  "locators": true,
+  "voices": false
+ }
+}

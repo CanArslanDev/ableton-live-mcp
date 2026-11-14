@@ -1,0 +1,139 @@
+{
+ "format": "ableton-mcp-blueprint",
+ "version": 1,
+ "name": "Glide and stem",
+ "made_by": "by hand: tests/fixtures/blueprints",
+ "tempo": 140,
+ "time_signature": "4/4",
+ "length_beats": 8,
+ "locators": [
+  {
+   "name": "A (1)",
+   "beat": 0
+  },
+  {
+   "name": "B (2)",
+   "beat": 4
+  }
+ ],
+ "files": {
+  "808": {
+   "source": "samples/808.wav",
+   "name": "808 719984e5.wav"
+  }
+ },
+ "tracks": [
+  {
+   "name": "808 (synth)",
+   "instrument": {
+    "file": "808",
+    "warping": false
+   },
+   "settings": {
+    "Volume": "0.0 dB",
+    "Vol < Vel": 0.35,
+    "Snap": "Off",
+    "F On": "Off",
+    "Ve Release": "50.0 ms",
+    "Transpose": 35,
+    "Detune": 21,
+    "Glide Mode": "Glide",
+    "Glide Time": "45.0 ms"
+   },
+   "voices": 1,
+   "volume_db": 0.0,
+   "clips": [
+    {
+     "start": 0,
+     "length": 8,
+     "name": "808",
+     "notes": [
+      {
+       "pitch": 26,
+       "start_time": 0,
+       "duration": 2.02,
+       "velocity": 115
+      },
+      {
+       "pitch": 29,
+       "start_time": 2,
+       "duration": 1.5,
+       "velocity": 110
+      },
+      {
+       "pitch": 26,
+       "start_time": 4,
+       "duration": 2.02,
+       "velocity": 112
+      },
+      {
+       "pitch": 31,
+       "start_time": 6,
+       "duration": 1.9,
+       "velocity": 105
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Drums (by name)",
+   "instrument": {
+    "drum_rack": {
+     "38": {
+      "sample": "Snare Tight.wav",
+      "settings": {
+       "Volume": -6.0
+      }
+     }
+    }
+   },
+   "clips": [
+    {
+     "start": 0,
+     "length": 8,
+     "name": "Snare",
+     "notes": [
+      {
+       "pitch": 38,
+       "start_time": 1,
+       "duration": 1,
+       "velocity": 100
+      },
+      {
+       "pitch": 38,
+       "start_time": 3,
+       "duration": 1,
+       "velocity": 100
+      },
+      {
+       "pitch": 38,
+       "start_time": 5,
+       "duration": 1,
+       "velocity": 100
+      },
+      {
+       "pitch": 38,
+       "start_time": 7,
+       "duration": 1,
+       "velocity": 100
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "REF drums",
+   "kind": "audio",
+   "mute": true,
+   "volume_db": -4.0,
+   "audio_clips": [
+    {
+     "file": "samples/ref-drums.wav",
+     "start": 0,
+     "warping": false
+    }
+   ]
+  }
+ ]
+}

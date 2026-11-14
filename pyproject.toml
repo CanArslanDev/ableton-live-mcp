@@ -57,7 +57,7 @@ include = ["MCP_Server*"]
 
 [tool.setuptools.package-data]
 "MCP_Server.bundled_ableton_remote_script" = ["AbletonMCP_init.py"]
-"MCP_Server" = ["midi_tools/*.js"]
+"MCP_Server" = ["midi_tools/*.js", "schemas/*.json"]
 
 [tool.ruff]
 target-version = "py310"

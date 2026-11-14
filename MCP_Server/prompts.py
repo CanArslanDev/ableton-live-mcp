@@ -6,6 +6,8 @@ assistant still decides the details and asks before destructive changes.
 
 from __future__ import annotations
 
+from .tooling import in_profile
+
 # Integrated loudness / true-peak ceilings the platforms normalise to. Spotify
 # and SoundCloud publish theirs; the others are the commonly measured values.
 LOUDNESS_TARGETS = {
@@ -126,6 +128,9 @@ structure (lengths in bars): {structure}.
 4. Switch to the Arrangement (select_in_live view="arrangement") and
    summarise the layout."""
 
+    if in_profile("full"):  # its tools are the full profile's
+        register_reference_prompt(mcp)
+
     @mcp.prompt(name="release_check", title="Release check")
     def release_check(platform: str = "spotify") -> str:
         """Measure the master against a platform's loudness target."""
@@ -155,3 +160,37 @@ focus on: {focus}.
    the groove and the sound design / mix choices you can see, in plain
    language. Point out one or two things worth trying next.
 Do not change anything in the set."""
+
+
+def register_reference_prompt(mcp) -> None:
+    @mcp.prompt(name="beat_like_reference", title="A beat like this song")
+    def beat_like_reference(reference_path: str, bars: str = "") -> str:
+        """Analyse a reference song with reference-dissector, build what it found, then listen."""
+        excerpt = f', bars="{bars}"' if bars else ""
+        return f"""Make a beat like the song at {reference_path} in Ableton Live, with
+reference-dissector. Its tools are in the full profile (ABLETON_MCP_PROFILE=full), run
+on this computer and were measured on macOS with Apple Silicon only.
+
+1. reference_job() lists earlier jobs: a finished one for this song can be built
+   again without a new analysis.
+2. dissect_reference(path="{reference_path}") starts the analysis and returns a job
+   id. If it says there is no sound library index, run index_sound_library() first
+   (once; minutes) and follow that job to the end. Tell the user the analysis takes
+   about 5 minutes for a 2-minute song, and that the first run downloads ~2 GB.
+3. reference_job(job_id=<id>, wait=20) until the state is done; one line per step.
+   If it failed or was lost, show the error and the log lines, and offer to run it
+   again (steps= picks up from the files already written).
+4. Read the summary to the user: tempo, meter, sections, each pad's sound with its
+   match verdict (say plainly which are only "same family" or "no close match"),
+   the 808's notes, and the files written.
+5. get_session_overview: the set must be empty (ask the user to open a new Live set
+   if it is not). Then build_from_blueprint(blueprint=<job id>{excerpt}); for a first
+   listen, bars="9-16" builds a short excerpt that is quicker to check.
+6. Report the build's checks: a Simpler holding another file, Volumes or choke
+   groups Live did not take, locators Live moved. Fix what you can, say what you
+   cannot.
+7. Listen: render_and_analyze over a section, then compare_to_reference with
+   reference_path="{reference_path}" over the same bars. Report loudness and tonal
+   differences and propose fixes; ask before changing the mix.
+
+The song, its stems and the plan stay on this computer: do not upload or share them."""

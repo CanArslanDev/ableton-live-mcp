@@ -2,6 +2,7 @@
 right, through the same server tools the plugin offers, against the simulator."""
 
 import asyncio
+import importlib.util
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver import MCPServer
 
 from MCP_Server import extended_tools, journal
 from MCP_Server import server as live_server
@@ -95,9 +97,13 @@ SOLUTIONS = {
                          ("set_track_mixer", {"track": "Vox", "volume_db": -3, "pan": "C"})],
     "scenes": [("manage_scene", {"action": "create", "name": "Verse"}),
                ("manage_scene", {"action": "create", "name": "Chorus"})],
+    "build-from-blueprint": [("reference_job", {}),
+                             ("build_from_blueprint", {"blueprint": "dissect-20261101-120000"})],
 }
 # Cases about leaving the set alone: their checks pass before anything happens
 UNTOUCHED_PASSES = {"set-overview", "preview-no-write", "missing-track", "delete-track"}
+# Cases whose tools are in the full profile only (run them with ABLETON_MCP_PROFILE=full)
+FULL_PROFILE = {"build-from-blueprint"}
 
 
 @pytest.fixture
@@ -113,6 +119,16 @@ def simulated_case(tmp_path, monkeypatch):
         session = tmp_path / "live-session.json"
         monkeypatch.setenv("ABLETON_MCP_SESSION_FILE", str(session))
         monkeypatch.delenv("ABLETON_PORT", raising=False)
+        if (folder / "prepare.py").exists():  # what scaffold.sh puts in the run's home first
+            from MCP_Server import als
+            monkeypatch.setenv("ABLETON_MCP_JOBS_DIR", str(tmp_path / "jobs"))
+            monkeypatch.setenv("ABLETON_MCP_REFERENCE_DIR", str(tmp_path / "Reference Dissector"))
+            monkeypatch.setattr(als, "_user_libraries", lambda: [tmp_path / "home" / "Music" / "Ableton"
+                                                                 / "User Library"])
+            spec = importlib.util.spec_from_file_location(f"prepare_{name}", folder / "prepare.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.prepare(tmp_path / "home")
         simulator = Simulator(free_port(), session, check=load_check(folder / "check.py"))
         if (folder / "setup.json").exists():
             simulator.run_setup(json.loads((folder / "setup.json").read_text()))
@@ -148,15 +164,20 @@ def test_every_case_has_a_solution_and_its_files():
 
 
 @pytest.mark.parametrize("name", CASES)
-def test_the_right_actions_pass_every_check(name, simulated_case):
+def test_the_right_actions_pass_every_check(name, simulated_case, monkeypatch):
     simulator = simulated_case(name)
+    server = live_server.mcp
+    if name in FULL_PROFILE:
+        monkeypatch.setenv("ABLETON_MCP_PROFILE", "full")
+        server = MCPServer("full")
+        extended_tools.register(server, live_server.get_ableton_connection)
     before = simulator.checks()
     graded = set(re.findall(r'"check:([a-z0-9-]+)"', (EVALS / name / "case.yaml").read_text()))
     assert graded == {key.split(":", 1)[1] for key in before}, "graders and check disagree"
     if name not in UNTOUCHED_PASSES:
         assert not all(before.values()), "the check passes without any work"
     for tool, arguments in SOLUTIONS[name]:
-        result = asyncio.run(live_server.mcp.call_tool(tool, arguments))
+        result = asyncio.run(server.call_tool(tool, arguments))
         assert not result.is_error, (tool, result.content[0].text)
     after = simulator.checks()
     assert after and all(after.values()), after

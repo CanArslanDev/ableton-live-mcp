@@ -35,6 +35,9 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/analyzer.py` | UDP/OSC listener for the analyzer's messages; levels, bands, correlation, approximate LUFS. |
 | `MCP_Server/ml.py` | Runs machine-learning jobs (Demucs, Basic Pitch, CLAP, MusicGen) in uv-built environments; Basic Pitch's presets, octave-ghost removal, bends in cents, velocities from levels, notes placed in beats; the CLAP sound index; generation prompts and folders. |
 | `MCP_Server/ml_worker.py` | The job side: runs in those environments, imports nothing from `MCP_Server`, talks JSON lines. |
+| `MCP_Server/reference_jobs.py` | reference-dissector (refdissect) as detached jobs: the pinned commit (`REFDISSECT_COMMIT`), each step's command, job records in `~/.ableton-mcp/jobs`, one job at a time, lost and cancelled jobs, the summaries `reference_job` gives. |
+| `MCP_Server/reference_runner.py` | The job side: run by path (`python -I`) in its own process group, stdlib only; runs the steps, keeps the record (and the work folder's `job.json`) up to date. |
+| `MCP_Server/blueprint.py`, `MCP_Server/schemas/blueprint-v1.schema.json`, `docs/blueprint-v1.md` | The blueprint format `build_from_blueprint` builds: schema, validator, files to copy (scaled where they peak over full scale), excerpts (`bars`), the `build_tracks` spec. |
 | `MCP_Server/als.py` | Reads Live Set files (.als) without Live: settings, tracks, devices, clips and notes, samples, comparing and finding sets. Never writes them. |
 | `MCP_Server/device_recipes.py` | Ready-made device chains (parameter names as Live 12.3 shows them). |
 | `MCP_Server/memory.py` | Notes that outlast a conversation: in the set (`Song.set_data`, key `ableton_mcp_memory`) and in `~/.ableton-mcp/memory.json`; the `memory` tool and the overview's `memory`. |
@@ -48,7 +51,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, `replace_sample`, Live's version: 12.4.6). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
-| `evals/` | `claude plugin eval` suite: 32 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
+| `evals/` | `claude plugin eval` suite: 33 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
 | `packaging/build_mcpb.py`, `packaging/mcpb/` | Claude Desktop extension: manifest template, icon, build script (fills in version and tools). |
 | `.claude-plugin/`, `skills/` | Claude Code plugin (MCP server + skills) and its marketplace entry. |
 | `.github/workflows/` | CI (tests, lint, wheel/sdist/.mcpb) and tag-triggered GitHub releases. |
@@ -68,6 +71,7 @@ claude plugin eval . --scaffold --allow-real-servers \
 uvx ruff check .                               # lint (rules in pyproject.toml)
 uv run python packaging/build_mcpb.py          # dist/ableton-live-mcp-<version>.mcpb (needs Node.js)
 claude plugin validate .                       # plugin manifest + skills
+uv run python -m MCP_Server.blueprint FILE.json  # a blueprint's problems (schema, references, files)
 ```
 
 ## Rules when changing the Remote Script
@@ -490,7 +494,9 @@ Not verified in Live (check each in a scratch set before claiming it):
   "full")`; "full" ones only appear with `ABLETON_MCP_PROFILE=full`.
 - **Context cost.** Every tool's description and schema is sent to the model
   each session (69 core tools ≈ 15k tokens, down from 22k; with Phase 4's
-  tools 76 ≈ 16.7k, measured 2026-10-11), and every result on every call.
+  tools 76 ≈ 16.7k, measured 2026-10-11; the four reference tools add
+  3,123 characters, ≈ 0.8k tokens, to the full profile only), and every
+  result on every call.
   So: `register_tool` strips pydantic
   titles, `"default": null` and nullable `anyOf` from the advertised schema
   (`compact_schema`; validation still uses the signature); `to_json` writes
@@ -537,6 +543,38 @@ Not verified in Live (check each in a scratch set before claiming it):
   complete for clients without Apps. `tests/test_ui.py` checks serving,
   wiring and (with node) that every panel's script parses; check the look in
   a real or mock host (headless Chrome) after changing a panel.
+
+## Reference jobs and blueprints (not yet run with Live or real models)
+
+- refdissect runs as `uv run --isolated --no-project --python 3.12 --with
+  "reference-dissector @ <archive of REFDISSECT_COMMIT>" refdissect …`
+  (`reference_jobs.refdissect_command`), never imported: its memory (2 GB
+  for an analysis), its Python (3.11+) and its pins (torch for Demucs) stay
+  out of the server. Move the pin by changing `REFDISSECT_COMMIT` to a commit
+  of reference-dissector's main; `ABLETON_MCP_REFDISSECT=<checkout>` runs a
+  local checkout instead and `doctor` names which one is used.
+- A job's steps are refdissect's own commands (separate, analyze, melodic,
+  match, fit-808, plan, blueprint; inventory and index-library for the
+  library). A missing subcommand (argparse's "invalid choice") skips an
+  optional step instead of failing the job: `blueprint` exists only in a
+  refdissect that writes this format.
+- Records are written atomically and by one process at a time: the server
+  before the runner starts and after it is gone (cancel), the runner in
+  between. "lost" is never written; it is read from a running record whose
+  runner is gone or that has not been written for `STALE_S`. The runner
+  leads a session of its own, so its pid names the job's process group even
+  after it dies (`killpg(pid)`); `is_runner` checks the pid's command line
+  (`ps`), so a pid another process took is never signalled (Unix gives no
+  process the id of a living group, so leftovers cannot hide behind one).
+- `build_from_blueprint` runs inside the server on its connection (no ninth
+  client), calls `build_tracks` once, then reads back. Its steps follow
+  refdissect's `live-build` as measured in Live 12.4.6 (meter before
+  locators, Volume as a number then as text, choke groups on the chain,
+  `voices` after the build), but this code has only run against
+  `fake_live`.
+- Tests stand a script in for refdissect (`tests/test_reference_jobs.py`:
+  real processes, no uv, no models); conftest points the jobs and data
+  folders at temporary ones. The eval case needs `ABLETON_MCP_PROFILE=full`.
 
 ## Packaging and releases
 

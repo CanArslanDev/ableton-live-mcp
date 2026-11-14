@@ -20,9 +20,22 @@ def _load_build_mcpb():
     return module
 
 
-def _registered_tools() -> set[str]:
+def _registered_tools(profile: str = "core") -> set[str]:
     import MCP_Server.server as server
-    return {t.name for t in asyncio.run(server.mcp.list_tools())}
+    if profile == "core":
+        return {t.name for t in asyncio.run(server.mcp.list_tools())}
+    import os
+    previous = os.environ.get("ABLETON_MCP_PROFILE")
+    os.environ["ABLETON_MCP_PROFILE"] = profile
+    try:
+        importlib.reload(server)
+        return {t.name for t in asyncio.run(server.mcp.list_tools())}
+    finally:
+        if previous is None:
+            os.environ.pop("ABLETON_MCP_PROFILE")
+        else:
+            os.environ["ABLETON_MCP_PROFILE"] = previous
+        importlib.reload(server)
 
 
 def test_versions_agree():
@@ -94,7 +107,7 @@ def test_skills_have_frontmatter():
 
 @pytest.mark.parametrize("path", _skills(), ids=lambda p: p.parent.name)
 def test_skills_only_name_real_tools(path):
-    tools = _registered_tools()
+    tools = _registered_tools("full")  # skills may name the full profile's tools, and say so
     called = set(re.findall(r"`([a-z_]+)\(", path.read_text(encoding="utf-8")))
     assert called, path
     assert called <= tools, sorted(called - tools)

@@ -1,6 +1,6 @@
 # Eval suite
 
-32 tasks a producer would ask for, run by `claude plugin eval` against the
+33 tasks a producer would ask for, run by `claude plugin eval` against the
 plugin's real MCP server and the **simulator** (`ableton-mcp-simulator`: the
 real Remote Script over an in-memory Live set, no Ableton needed). Each run
 gets a fresh simulated set; when the agent is done, deterministic checks read
@@ -17,6 +17,7 @@ what is in the set, not what the agent says about it.
 | Editing | transpose-clip, quantize-clip, filter-sweep |
 | Arrangement and transitions | locators, arrangement-layout, drum-fill, build-up, fade-out |
 | Browser | drum-kit |
+| Reference songs (full profile) | build-from-blueprint |
 | Memory | remember-decision, follow-the-notes |
 | Safety | preview-no-write, undo-tempo, missing-track |
 
@@ -29,6 +30,12 @@ claude plugin eval . --scaffold --allow-real-servers \
   --ablation none --no-publish -j 4
 ```
 
+- build-from-blueprint uses a tool of the full profile: run it with
+  `ABLETON_MCP_PROFILE=full` in the environment (the plugin's server takes
+  it from there), e.g. `ABLETON_MCP_PROFILE=full claude plugin eval . --case
+  build-from-blueprint ...`. Its scaffold first puts a finished reference
+  job in the run's home (`prepare.py`: a record, and a work folder with the
+  blueprint `tests/fixtures/blueprints/short-beat.json` and its samples).
 - `--scaffold` lets each case start its simulator; `--allow-real-servers` and
   `--allow-tools` let the plugin's server run and its tools be called.
 - `--ablation none`: without the plugin there are no Live tools, so a

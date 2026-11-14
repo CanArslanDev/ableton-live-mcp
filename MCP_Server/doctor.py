@@ -276,6 +276,40 @@ def check_companion() -> dict:
         return _check("companion", "warn", f"AbletonMCP Companion error: {e}")
 
 
+def check_reference_dissector() -> dict:
+    """reference-dissector, which the full profile's reference tools run
+    (dissect_reference, index_sound_library): which one, uv, the library
+    index, a job running. It runs nothing and downloads nothing."""
+    from . import reference_jobs as jobs
+    from .ml import uv_executable
+
+    source = jobs.refdissect_source()
+    if source["problem"]:
+        return _check("reference-dissector", "warn", source["problem"],
+                      "Point ABLETON_MCP_REFDISSECT at a reference-dissector checkout, or unset "
+                      "it to run the pinned version.")
+    parts = [source["describe"]]
+    try:
+        uv_executable()
+    except RuntimeError:
+        parts.append("uv not found (the reference tools set refdissect up with it)")
+    library = jobs.library_dir()
+    index = library / "library.npz"
+    if index.is_file():
+        size = sum(f.stat().st_size for f in library.rglob("library*") if f.is_file())
+        days = int((time.time() - index.stat().st_mtime) // 86400)
+        made = "today" if days == 0 else f"{days} day{'s' if days > 1 else ''} ago"
+        parts.append(f"library index {size / 1e6:.0f} MB, made {made} ({library})")
+    else:
+        parts.append(f"no sound library index yet (index_sound_library writes it to {library})")
+    busy = jobs.running()
+    if busy is not None:
+        parts.append(f"job {busy['id']} running ({busy.get('step') or 'starting'})")
+    if not (sys.platform == "darwin" and platform.machine() == "arm64"):
+        parts.append("measured on macOS with Apple Silicon only")
+    return _check("reference-dissector", "info", "; ".join(parts))
+
+
 def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
     checks = [check_server(), check_installed_scripts(), check_bundle_copies()]
     versions = live_versions()
@@ -286,6 +320,7 @@ def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
     checks += connection
     checks.append(check_live_log())
     checks.append(check_companion())
+    checks.append(check_reference_dissector())
     problems = [c for c in checks if c["status"] in ("fail", "warn")]
     return {"ok": not any(c["status"] == "fail" for c in checks),
             "problems": len(problems), "checks": checks}

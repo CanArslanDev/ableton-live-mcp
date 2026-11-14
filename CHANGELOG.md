@@ -2,6 +2,74 @@
 
 ## Unreleased
 
+### Added
+
+- **"Make a beat like this song", end to end (full profile).** Four tools
+  run [reference-dissector](https://github.com/CanArslanDev/reference-dissector)
+  (refdissect) and build its result in Live:
+  - `index_sound_library(folders=None)`: a job that indexes the user's
+    samples for matching (refdissect `inventory`, `index-library` and its
+    808 index); by default the User Library and Live's Core Library samples.
+  - `dissect_reference(path | track/clip, model, melodic, slides, steps)`:
+    a job that runs refdissect's steps (separate, analyze, melodic, match,
+    fit-808, plan, blueprint) on a song, or part of them again on its folder,
+    and returns the job's id at once.
+  - `reference_job(job_id=None, wait=20, cancel=False)`: waits up to `wait`
+    seconds for the next step with progress notifications, then gives the
+    state; once done, a summary from plan.json (tempo, meter, sections, pads
+    with their match verdicts, 808 notes, files). Without an id it lists the
+    recent jobs; `cancel` stops the job's whole process group.
+  - `build_from_blueprint(blueprint, bars=None)`: builds a blueprint in the
+    open, empty set over this server's own connection (so the Remote
+    Script's 8-client limit no longer gets in the way): tempo and meter,
+    the files copied into the User Library (scaled to full scale where a
+    file peaks over it), one `build_tracks` call, voices, locators, then
+    read-backs of every Simpler's file, pad Volumes (sent again as text where
+    the number did not hold), choke groups, locators Live moved and the time
+    signature. `bars="9-16"` builds a short excerpt.
+- refdissect is not a dependency: jobs run it in a uv environment of its own
+  (Python 3.12, pinned to reference-dissector 0970a03;
+  `ABLETON_MCP_REFDISSECT=<checkout>` runs a local one), detached from the
+  server in their own process group, with records in `~/.ableton-mcp/jobs/`
+  (`ABLETON_MCP_JOBS_DIR`) and a `job.json` in the work folder. A job
+  outlives the server; one whose runner is gone reads as `lost` (and, while
+  processes it started still run, keeps the next job from starting until
+  `cancel` stops them); one job runs at a time. A pid another process took
+  since is never taken for the job's. Data goes to `~/Music/Ableton
+  MCP/Reference Dissector/` (`ABLETON_MCP_REFERENCE_DIR`), one folder per
+  song named after its file (`(2)` for another file of the same name).
+  Measured on macOS with Apple Silicon only.
+- **Blueprint v1** ([docs/blueprint-v1.md](docs/blueprint-v1.md)): a JSON
+  format for a beat to build, with a JSON Schema
+  (`MCP_Server/schemas/blueprint-v1.schema.json`), a validator
+  (`MCP_Server.blueprint.validate`, `python -m MCP_Server.blueprint FILE`)
+  and three example blueprints in `tests/fixtures/blueprints/`.
+- The `beat_like_reference` prompt (full profile) and a section of the
+  compose-in-live skill chain the four tools with `render_and_analyze` and
+  `compare_to_reference`.
+- `doctor` reports reference-dissector: the pinned commit or the local
+  checkout, uv, the library index's size and age, a job running.
+- The simulator's state shows each Drum Rack pad's chains (choke group,
+  devices) and a Simpler's voices; the fake Simpler has the parameters the
+  build sets (`Vol < Vel`, `Snap`, `F On`, `Ve Release`, `Glide Mode`,
+  `Glide Time`) and `voices`.
+
+### Tests
+
+- `tests/test_blueprint.py`: the schema and the validator, files copied,
+  scaled and kept, excerpts, and every fixture built against the simulator
+  (read-backs, a Volume set again as text, a locator Live moved, a set that
+  is not empty, a changed file, a build that stops part-way).
+- `tests/test_reference_jobs.py`: jobs with a stand-in for refdissect (real
+  processes, no uv or models): every step and the summary, steps run again,
+  inputs checked first, one job at a time, cancel (the steps' processes go
+  too), a failed step, a refdissect without the `blueprint` command, lost
+  jobs, a runner killed alone (its steps stopped by cancel), a pid another
+  process took, songs of one name, the library index, a job built by its
+  id, doctor, the profile.
+- An eval case, `build-from-blueprint` (needs `ABLETON_MCP_PROFILE=full`):
+  a finished job in the run's home, built into an empty simulated set.
+
 ### Fixed
 
 - `separate_stems` pins torch 2.14.1 in its Demucs environment. Unpinned, a

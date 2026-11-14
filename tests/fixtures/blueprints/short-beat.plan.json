@@ -1,0 +1,230 @@
+{
+ "tempo": 120.0,
+ "beats_per_bar": 4,
+ "beat_unit": 4,
+ "length_beats": 8.0,
+ "locators": [
+  [
+   "A (1)",
+   0.0
+  ],
+  [
+   "B (2)",
+   4.0
+  ]
+ ],
+ "tracks": {
+  "drums": {
+   "pads": {
+    "36": {
+     "template": "kick1",
+     "path": "/library/kick.wav",
+     "transpose": 0,
+     "ncc": 0.981,
+     "verdict": "same sample",
+     "role": "kick",
+     "vol_vel": 0.35,
+     "volume_db": -3.0
+    },
+    "38": {
+     "template": "snare1",
+     "path": "/library/snare.wav",
+     "transpose": 0,
+     "ncc": 0.902,
+     "verdict": "same family",
+     "role": "snare",
+     "vol_vel": 0.35,
+     "volume_db": -6.6
+    },
+    "42": {
+     "template": "hat1",
+     "path": "/library/hat-closed.wav",
+     "transpose": 2,
+     "detune_cents": -8,
+     "ncc": 0.953,
+     "verdict": "same sample",
+     "role": "hat",
+     "vol_vel": 0.35,
+     "volume_db": -9.5
+    }
+   },
+   "notes": [
+    {
+     "pitch": 36,
+     "start_time": 0,
+     "duration": 1,
+     "velocity": 120
+    },
+    {
+     "pitch": 36,
+     "start_time": 2.5,
+     "duration": 1,
+     "velocity": 120
+    },
+    {
+     "pitch": 36,
+     "start_time": 4,
+     "duration": 1,
+     "velocity": 120
+    },
+    {
+     "pitch": 36,
+     "start_time": 6.5,
+     "duration": 1,
+     "velocity": 120
+    },
+    {
+     "pitch": 38,
+     "start_time": 1,
+     "duration": 1,
+     "velocity": 105
+    },
+    {
+     "pitch": 38,
+     "start_time": 3,
+     "duration": 1,
+     "velocity": 105
+    },
+    {
+     "pitch": 38,
+     "start_time": 5,
+     "duration": 1,
+     "velocity": 105
+    },
+    {
+     "pitch": 38,
+     "start_time": 7,
+     "duration": 1,
+     "velocity": 105
+    },
+    {
+     "pitch": 42,
+     "start_time": 0.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 0.5,
+     "duration": 1,
+     "velocity": 90
+    },
+    {
+     "pitch": 42,
+     "start_time": 1.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 1.5,
+     "duration": 1,
+     "velocity": 90
+    },
+    {
+     "pitch": 42,
+     "start_time": 2.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 2.5,
+     "duration": 1,
+     "velocity": 90
+    },
+    {
+     "pitch": 42,
+     "start_time": 3.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 3.5,
+     "duration": 1,
+     "velocity": 90
+    },
+    {
+     "pitch": 42,
+     "start_time": 4.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 4.5,
+     "duration": 1,
+     "velocity": 90
+    },
+    {
+     "pitch": 42,
+     "start_time": 5.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 5.5,
+     "duration": 1,
+     "velocity": 90
+    },
+    {
+     "pitch": 42,
+     "start_time": 6.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 6.5,
+     "duration": 1,
+     "velocity": 90
+    },
+    {
+     "pitch": 42,
+     "start_time": 7.0,
+     "duration": 1,
+     "velocity": 80
+    },
+    {
+     "pitch": 42,
+     "start_time": 7.5,
+     "duration": 1,
+     "velocity": 90
+    }
+   ]
+  },
+  "808": {
+   "notes": [
+    {
+     "pitch": 24,
+     "start_time": 0,
+     "duration": 1.5,
+     "velocity": 115
+    },
+    {
+     "pitch": 24,
+     "start_time": 4,
+     "duration": 1.5,
+     "velocity": 110
+    },
+    {
+     "pitch": 27,
+     "start_time": 6,
+     "duration": 1.0,
+     "velocity": 100
+    }
+   ],
+   "sample": "Short beat 808.wav",
+   "sample_path": "/work/synth808.wav",
+   "transpose": 36,
+   "detune_cents": -12,
+   "tuning_cents": -12.0
+  }
+ },
+ "stems": {},
+ "levels": {
+  "headroom_db": 4.0
+ }
+}
