@@ -428,15 +428,28 @@ def _instrument(name, class_name):
         _hz("Filter Freq", 0.8), FakeParam("Filter Res", 0.2), _db("Volume", -12.0, -70.0, 6.0)])
 
 
+def _release_display(ms):
+    return "%.1f ms" % ms if ms < 1000 else "%.2f s" % (ms / 1000.0)
+
+
 class FakeSimpler(FakeDevice):
+    """Simpler with the parameters the tools set by name (Live 12.4's names;
+    "Vol < Vel" a raw 0..1, Live's default for a Simpler made with
+    insert_device) and voices, a property of the device."""
+
     def __init__(self, name, sample=None):
         super(FakeSimpler, self).__init__(name, "OriginalSimpler", [
             _percent("S Start", 0.0),
             FakeParam("Transpose", 0.0, -48.0, 48.0, display=lambda v: "%d st" % round(v)),
             FakeParam("Detune", 0.0, -50.0, 50.0, display=lambda v: "%d ct" % round(v)),
             _db("Volume", -12.0, -36.0, 36.0),
-            _choice("Trigger Mode", ["Trigger", "Gate"], 1)],
-            sample=sample, playback_mode=0, reversed=False)
+            _choice("Trigger Mode", ["Trigger", "Gate"], 1),
+            FakeParam("Vol < Vel", 0.35, 0.0, 1.0, display=lambda v: "%.0f %%" % (100 * v)),
+            _switch("Snap", True), _switch("F On", True),
+            FakeParam("Ve Release", 50.0, 1.0, 60000.0, display=_release_display),
+            _choice("Glide Mode", ["Off", "Glide", "Portamento"]),
+            FakeParam("Glide Time", 50.0, 0.0, 5000.0, display=_release_display)],
+            sample=sample, playback_mode=0, reversed=False, voices=6)
 
     def reverse(self):
         self.reversed = not self.reversed
