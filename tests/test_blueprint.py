@@ -30,6 +30,17 @@ def fixture(name):
     return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
+def absolute(data):
+    """The blueprint with its files' and audio clips' paths absolute, as one
+    passed as an object needs them."""
+    for entry in (data.get("files") or {}).values():
+        entry["source"] = str(FIXTURES / entry["source"])
+    for track in data["tracks"]:
+        for clip in track.get("audio_clips") or []:
+            clip["file"] = str(FIXTURES / clip["file"])
+    return data
+
+
 # ── The format ───────────────────────────────────────────────────────────────
 
 def test_the_schema_is_valid_json_schema():
@@ -269,7 +280,7 @@ def test_an_excerpt_with_glide_voices_a_stem_and_a_pad_by_name(empty_live, tmp_p
     call = empty_live
     folder = tmp_path / "work"  # the excerpt's stems go beside the blueprint
     folder.mkdir()
-    data = json.loads(json.dumps(fixture("glide-and-stem")).replace('"samples/', f'"{FIXTURES}/samples/'))
+    data = absolute(fixture("glide-and-stem"))
     (folder / "blueprint.json").write_text(json.dumps(data))
     report = call("build_from_blueprint", blueprint=str(folder), bars="2-2")
     assert report["ok"] is True, report
@@ -317,7 +328,7 @@ def test_locators_live_moves_are_deleted_and_reported(empty_live, monkeypatch):
     data = fixture("short-beat")
     data["locators"].append({"name": "C (2.3)", "beat": 6.5})  # 6.5 snaps to 8
     data["length_beats"] = 12
-    data = json.loads(json.dumps(data).replace('"samples/', f'"{FIXTURES}/samples/'))
+    data = absolute(data)
     report = call("build_from_blueprint", blueprint=data)
     assert report["locators_moved"] == [{"name": "C (2.3)", "asked": 6.5, "live": 8.0, "deleted": True}]
     assert report["ok"] is False
@@ -359,7 +370,7 @@ def test_a_changed_file_is_refused_before_live_is_touched(empty_live, tmp_path):
 def test_a_failed_build_says_what_it_left(empty_live, monkeypatch):
     call = empty_live
     data = copy.deepcopy(fixture("short-beat"))
-    data = json.loads(json.dumps(data).replace('"samples/', f'"{FIXTURES}/samples/'))
+    data = absolute(data)
     data["tracks"][1]["instrument"] = "No Such Synth"
     # the track that failed is not named yet: build_tracks names it with its settings
     with pytest.raises(ToolError, match=r"build_tracks stopped: Could not insert 'No Such Synth'.* It left "

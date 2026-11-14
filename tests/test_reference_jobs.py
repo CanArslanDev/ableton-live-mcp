@@ -20,6 +20,9 @@ from MCP_Server import reference_jobs as jobs
 from MCP_Server import reference_runner
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "blueprints"
+# Leftover steps and reused pids are found through Unix process groups and ps;
+# on Windows (not claimed yet) a job is only what this server's handle says
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="Unix process groups and ps")
 
 # refdissect's commands as far as a job uses them: each writes what the real
 # one writes for the next step. FAKE_MODE: "slow" (analyze waits a minute),
@@ -106,7 +109,8 @@ def fake_refdissect(tmp_path, monkeypatch):
     yield call
     for job_id, process in list(jobs._PROCESSES.items()):  # nothing outlives a test
         if process.poll() is None:
-            jobs._signal_group(process.pid, signal.SIGKILL)
+            jobs._signal_group(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            process.kill()
             process.wait()
         jobs._PROCESSES.pop(job_id, None)
 
@@ -462,6 +466,7 @@ def test_songs_of_one_name_get_folders_of_their_own(fake_refdissect):
     assert json.loads((Path(second["work"]) / "source.json").read_text())["file"] == str(other.resolve())
 
 
+@POSIX_ONLY
 def test_a_runner_killed_alone_leaves_steps_that_cancel_stops(fake_refdissect, monkeypatch):
     call = fake_refdissect
     library(call.tmp)
@@ -484,6 +489,7 @@ def test_a_runner_killed_alone_leaves_steps_that_cancel_stops(fake_refdissect, m
     assert jobs.running() is None
 
 
+@POSIX_ONLY
 def test_a_pid_another_process_took_is_not_the_job(fake_refdissect):
     import subprocess
 
