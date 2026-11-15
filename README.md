@@ -138,7 +138,14 @@ one folder per song, named after its file), job records to `~/.ableton-mcp/jobs/
 [blueprint](docs/blueprint-v1.md), a JSON format anything can write.
 Measured on macOS with Apple Silicon only; 16 GB of RAM recommended (an
 analysis peaks at about 2 GB). Needs Live 12.4 to load samples by path
-(earlier versions go through the browser by file name).
+(earlier versions go through the browser by file name). In Live 12.4.6 a
+whole song's blueprint (10 tracks, 1,881 notes) built in about 7 seconds
+and recorded the same, sample for sample, as reference-dissector's own build.
+
+To turn the full profile on in Claude Code, start it with the variable in its
+environment (`ABLETON_MCP_PROFILE=full claude`, or export it in your shell
+profile); in Claude Desktop, pick "full" under the extension's Tool set.
+`doctor` says when the server runs without these tools.
 
 ---
 

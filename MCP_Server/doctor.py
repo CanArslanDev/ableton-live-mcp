@@ -279,9 +279,11 @@ def check_companion() -> dict:
 def check_reference_dissector() -> dict:
     """reference-dissector, which the full profile's reference tools run
     (dissect_reference, index_sound_library): which one, uv, the library
-    index, a job running. It runs nothing and downloads nothing."""
+    index, a job running, and whether this server has those tools (they are
+    in the full profile only). It runs nothing and downloads nothing."""
     from . import reference_jobs as jobs
     from .ml import uv_executable
+    from .tooling import active_profile
 
     source = jobs.refdissect_source()
     if source["problem"]:
@@ -307,6 +309,9 @@ def check_reference_dissector() -> dict:
         parts.append(f"job {busy['id']} running ({busy.get('step') or 'starting'})")
     if not (sys.platform == "darwin" and platform.machine() == "arm64"):
         parts.append("measured on macOS with Apple Silicon only")
+    if active_profile() != "full":
+        parts.append(f"its tools are off: this server runs the {active_profile()} profile "
+                     "(start the client with ABLETON_MCP_PROFILE=full in its environment)")
     return _check("reference-dissector", "info", "; ".join(parts))
 
 

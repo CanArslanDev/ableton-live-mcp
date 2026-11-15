@@ -440,6 +440,29 @@ the 808 with `capture_stems`:
   log), which the client sees as "Connection reset by peer". Each MCP
   server holds one, so eight sessions with the plugin fill it.
 
+Measured on 2026-11-14 (Live 12.4.6 Trial, 48 kHz device) by
+reference-dissector's `live-build`, which builds a plan through
+`build_from_blueprint` (Simplers by path), against its `live-build
+--direct` (pads through the browser), each recorded with `capture_stems`:
+
+- An 8-bar excerpt (8 tracks, 133 notes, 4.4 s) and PIRAMIT's whole plan
+  (10 tracks, 1,881 notes in one `build_tracks` call, 7.1 s; `--direct`
+  7.6 s) built with clean read-backs: every Simpler held its file (4 and
+  11), 13 of 13 pad Volumes held as numbers (none needed the text), every
+  locator placed, 4/4 read back.
+- **A Simpler made with `insert_device` starts with a 0.1 ms Fade In**; a
+  pad the browser loads starts at 0 (Fade Out 0.1 ms on both). It was the
+  only audible difference between the two builds: 4 samples at 48 kHz at
+  each kick and hat onset (the drum track's residual −68.4 dB). With
+  "Fade In" set to 0 (refdissect's blueprints do) every track of both
+  plans recorded equal to `--direct`'s sample for sample.
+- Every pad's chain plays at C3 (60), built by `insert_chain` or by the
+  browser. A pad made by path differs from the browser's in what a
+  One-Shot pad with no modulation does not play (voices 6 against 3; LFO
+  and pitch envelope on with no amount; envelope times).
+- The Remote Script served 4 clients; the build's connection was not
+  refused.
+
 Not verified in Live (check each in a scratch set before claiming it):
 
 - The rack rebuilt by name when `insert_chain`, `in_note` or
@@ -544,7 +567,7 @@ Not verified in Live (check each in a scratch set before claiming it):
   wiring and (with node) that every panel's script parses; check the look in
   a real or mock host (headless Chrome) after changing a panel.
 
-## Reference jobs and blueprints (not yet run with Live or real models)
+## Reference jobs and blueprints (`build_from_blueprint` checked in Live; the jobs not yet run with real refdissect)
 
 - refdissect runs as `uv run --isolated --no-project --python 3.12 --with
   "reference-dissector @ <archive of REFDISSECT_COMMIT>" refdissect …`
@@ -568,10 +591,23 @@ Not verified in Live (check each in a scratch set before claiming it):
   process the id of a living group, so leftovers cannot hide behind one).
 - `build_from_blueprint` runs inside the server on its connection (no ninth
   client), calls `build_tracks` once, then reads back. Its steps follow
-  refdissect's `live-build` as measured in Live 12.4.6 (meter before
-  locators, Volume as a number then as text, choke groups on the chain,
-  `voices` after the build), but this code has only run against
-  `fake_live`.
+  refdissect's `live-build --direct` as measured in Live 12.4.6 (meter
+  before locators, Volume as a number then as text, choke groups on the
+  chain, `voices` after the build). Checked in Live 12.4.6 on 2026-11-14
+  through refdissect's `live-build` (below, under replica mode).
+- refdissect's `live-build` (its `[live]` extra) imports `MCP_Server.server`
+  after setting `ABLETON_MCP_PROFILE=full`, calls the tool in-process
+  (`mcp.call_tool("build_from_blueprint", {"blueprint": <file>, "bars":
+  "A-B"})`), calls `blueprint.excerpt(data, (a, b), base, out_dir)`
+  directly for `--stems-out`, and reads the report's keys (`tracks`,
+  `problems`, `locators`, `locators_moved` with `name`/`asked`/`live`/
+  `deleted`, `checks.samples|volumes|choke_groups|voices|time_signature`
+  with `want`/`live`/`same`, `volumes.held_by_text`/`not_held`, `files`,
+  `excerpt`, `ok`). These are an interface: change one only with
+  refdissect, and say so in the CHANGELOG.
+- The jobs themselves (`dissect_reference`, `index_sound_library`,
+  `reference_job`) have not yet run refdissect for real (uv, the pinned
+  archive, Demucs and the models); only the stand-in below.
 - Tests stand a script in for refdissect (`tests/test_reference_jobs.py`:
   real processes, no uv, no models); conftest points the jobs and data
   folders at temporary ones. The eval case needs `ABLETON_MCP_PROFILE=full`.

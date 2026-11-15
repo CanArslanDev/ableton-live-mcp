@@ -10,7 +10,7 @@
     "format": {"const": "ableton-mcp-blueprint"},
     "version": {"const": 1},
     "name": {"type": "string", "description": "What is built (the song's name), for the report."},
-    "made_by": {"type": "string", "description": "What wrote the blueprint, e.g. \"refdissect 0970a03\"."},
+    "made_by": {"type": "string", "description": "What wrote the blueprint, e.g. \"refdissect 0.1.0 2245889\"."},
     "meta": {"type": "object", "description": "Free-form notes; the build ignores them."},
     "tempo": {"type": "number", "minimum": 20, "maximum": 999},
     "time_signature": {"type": "string", "pattern": "^[1-9][0-9]?/(1|2|4|8|16)$"},

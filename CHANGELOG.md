@@ -28,7 +28,7 @@
     the number did not hold), choke groups, locators Live moved and the time
     signature. `bars="9-16"` builds a short excerpt.
 - refdissect is not a dependency: jobs run it in a uv environment of its own
-  (Python 3.12, pinned to reference-dissector 21d82d7;
+  (Python 3.12, pinned to reference-dissector 2245889;
   `ABLETON_MCP_REFDISSECT=<checkout>` runs a local one), detached from the
   server in their own process group, with records in `~/.ableton-mcp/jobs/`
   (`ABLETON_MCP_JOBS_DIR`) and a `job.json` in the work folder. A job
@@ -48,11 +48,22 @@
   compose-in-live skill chain the four tools with `render_and_analyze` and
   `compare_to_reference`.
 - `doctor` reports reference-dissector: the pinned commit or the local
-  checkout, uv, the library index's size and age, a job running.
+  checkout, uv, the library index's size and age, a job running, and that
+  its tools are off when the server runs the core profile.
 - The simulator's state shows each Drum Rack pad's chains (choke group,
   devices) and a Simpler's voices; the fake Simpler has the parameters the
   build sets (`Vol < Vel`, `Snap`, `F On`, `Ve Release`, `Glide Mode`,
-  `Glide Time`) and `voices`.
+  `Glide Time`, `Fade In`, `Fade Out`) and `voices`. As in Live 12.4.6, a
+  Simpler made with `insert_device` starts with a 0.1 ms Fade In and a pad
+  the browser loads at 0, playing at C3 (it played the pad's own note), so
+  a blueprint from reference-dissector (pads at `"Fade In": 0`) builds
+  cleanly in the simulator; before, the parameter was missing.
+
+### Changed
+
+- The setup skill, the README and Claude Desktop's Tool set option say that
+  the full profile also holds the reference-song tools, and how to turn it
+  on (`ABLETON_MCP_PROFILE=full claude` in Claude Code).
 
 ### Tests
 

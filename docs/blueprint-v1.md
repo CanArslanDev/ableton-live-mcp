@@ -6,6 +6,9 @@ tracks with their instruments, settings and notes, the sample files to copy
 into the User Library, and which read-backs to run once Live has built it.
 `build_from_blueprint` (full profile) builds one in the open, empty set over
 the server's own connection and reports what Live did and did not take.
+Checked in Live 12.4.6 (2026-11-14) with refdissect's blueprints: clean
+read-backs, and recordings equal sample for sample to refdissect's own
+build through the browser.
 
 [reference-dissector](https://github.com/CanArslanDev/reference-dissector)
 writes one per analysed song (`refdissect blueprint WORK` → `WORK/blueprint.json`,
@@ -28,7 +31,7 @@ run by `dissect_reference` as its last step); anything else may write one too.
   "format": "ableton-mcp-blueprint",
   "version": 1,
   "name": "Short beat",
-  "made_by": "refdissect 0970a03",
+  "made_by": "refdissect 0.1.0 2245889",
   "tempo": 120,
   "time_signature": "4/4",
   "length_beats": 8,
@@ -39,7 +42,7 @@ run by `dissect_reference` as its last step); anything else may write one too.
   },
   "tracks": [
     {"name": "808 (synth)",
-     "instrument": {"file": "808", "warping": false},
+     "instrument": {"file": "808", "warping": false, "playback_mode": "classic"},
      "settings": {"Volume": "0.0 dB", "Transpose": 36, "Detune": -12, "Vol < Vel": 0.35,
                   "Snap": "Off", "F On": "Off", "Ve Release": "50.0 ms"},
      "voices": 1,
@@ -48,8 +51,9 @@ run by `dissect_reference` as its last step); anything else may write one too.
                 "notes": [{"pitch": 24, "start_time": 0, "duration": 1.5, "velocity": 115}]}]},
     {"name": "Drums (library)",
      "instrument": {"drum_rack": {
-       "39": {"file": "pad-39", "warping": false, "choke_group": 1,
-              "settings": {"Volume": -6.6, "Transpose": 0, "Detune": 0, "Vol < Vel": 0.35, "Snap": "Off"}}}},
+       "39": {"file": "pad-39", "warping": false, "playback_mode": "one_shot", "choke_group": 1,
+              "settings": {"Volume": -6.6, "Transpose": 0, "Detune": 0, "Vol < Vel": 0.35, "Snap": "Off",
+                           "F On": "Off", "Fade In": 0.0}}}},
      "volume_db": -4.0,
      "clips": [{"start": 0, "length": 8, "name": "Drums", "notes": []}]},
     {"name": "REF drums", "kind": "audio", "mute": true,
@@ -189,14 +193,14 @@ What `refdissect blueprint WORK [--out FILE]` writes, field by field, from
 | Blueprint | From |
 |---|---|
 | `name` | the song's name: the folder holding the stems' folder (the name the plan already gives the 808 one-shot), else the work folder's |
-| `made_by` | `"refdissect <version or commit>"` |
+| `made_by` | `"refdissect <version> <commit>"` (the commit only from a git checkout) |
 | `tempo`, `length_beats` | `plan.tempo`, `plan.length_beats` |
 | `time_signature` | `meter_of(plan)` |
 | `locators` | `[{"name": n, "beat": float(round(b))} for n, b in plan.locators]` |
 | `files["808"]` | `{"source": t808.sample_path, "name": t808.sample, "sha1": one_shot_digest(t808.sample_path)}`, when the 808 track has a one-shot |
 | `files["pad-<note>"]` | `{"source": pad.path, "name": pad_sample(pad.path, file_db), "gain_db": file_db}` (`gain_db` only under 0), and `"sha1"` of the source (refdissect always writes it) |
-| track `808 (synth)` | `build_spec`'s, with `"instrument": {"file": "808", "warping": false}` instead of `sample`, `settings` = `simpler_808(t808)`, `"voices"` only when the plan has one (never `null`) |
-| track `Drums (library)` | `build_spec`'s, each pad `{"file": "pad-<note>", "warping": false, "settings": {Volume (a number), Transpose, Detune, Vol < Vel, Snap}, "choke_group"?}` (`choke_group` only when 1–16) |
+| track `808 (synth)` | `build_spec`'s, with `"instrument": {"file": "808", "warping": false, "playback_mode": "classic"}` instead of `sample`, `settings` = `simpler_808(t808)`, `"voices"` only when the plan has one (never `null`) |
+| track `Drums (library)` | `build_spec`'s, each pad `{"file": "pad-<note>", "warping": false, "playback_mode": "one_shot", "settings": {Volume (a number), Transpose, Detune, Vol < Vel, Snap, "F On": "Off", "Fade In": 0}, "choke_group"?}` (`choke_group` only when 1–16). A Simpler loaded by path starts Classic with its filter on and a 0.1 ms Fade In, where the browser's pad is One-Shot, unfiltered, without one: the blueprint says what it wants |
 | melodic and `REF` tracks | `build_spec`'s, the stems' paths absolute |
 | `checks` | left out (all on) |
 

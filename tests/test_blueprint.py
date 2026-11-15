@@ -252,6 +252,10 @@ def test_a_blueprint_is_built_and_read_back(empty_live):
     hat = chains["42"][0]["devices"][0]
     assert hat["sample"].startswith("hat-closed ") and hat["parameters"]["Volume"] == "-9.5 dB"
     assert hat["parameters"]["Transpose"] == "2 st"
+    # refdissect's pads (blueprint.PAD_OFF): filter off, Fade In 0 where a
+    # Simpler made by path starts at 0.1 ms (Live 12.4.6); the 808 keeps its own
+    assert (hat["parameters"]["F On"], hat["parameters"]["Fade In"]) == ("Off", "0.0 ms")
+    assert shown["Fade In"] == "0.1 ms" and hat["parameters"]["Fade Out"] == "0.1 ms"
     clip = tracks["Drums (library)"]["arrangement_clips"][0]
     assert (clip["name"], clip["length"], len(clip["notes"])) == ("Drums", 8, 24)
     # The Simplers hold the copies in the User Library, not the blueprint's files
@@ -297,6 +301,7 @@ def test_an_excerpt_with_glide_voices_a_stem_and_a_pad_by_name(empty_live, tmp_p
     assert tracks["REF drums"]["mute"]
     pad = tracks["Drums (by name)"]["devices"][0]["chains"]["38"][0]["devices"][0]
     assert pad["sample"] == "Snare Tight.wav"
+    assert pad["parameters"]["Fade In"] == "0.0 ms"  # the browser's pads start at 0 (Live 12.4.6)
     assert [(c["name"], c["time"]) for c in state["locators"]] == [("B (2)", 0)]
     assert state["browser"]["loaded"]
 

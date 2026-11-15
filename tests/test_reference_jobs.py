@@ -373,6 +373,10 @@ def test_doctor_names_the_refdissect_it_runs(tmp_path, monkeypatch):
     folder.mkdir(parents=True)
     (folder / "library.npz").write_bytes(b"x" * 3_000_000)
     assert "library index 3 MB" in doctor.check_reference_dissector()["detail"]
+    monkeypatch.setenv("ABLETON_MCP_PROFILE", "core")
+    assert "its tools are off: this server runs the core profile" in doctor.check_reference_dissector()["detail"]
+    monkeypatch.setenv("ABLETON_MCP_PROFILE", "full")
+    assert "its tools are off" not in doctor.check_reference_dissector()["detail"]
     monkeypatch.setenv("ABLETON_MCP_REFDISSECT", str(tmp_path / "nowhere"))
     check = doctor.check_reference_dissector()
     assert check["status"] == "warn" and "holds no pyproject.toml" in check["detail"]

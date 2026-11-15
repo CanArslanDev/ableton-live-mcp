@@ -46,6 +46,11 @@ themselves and do not need export.
 
 ## Tool set
 
-`ABLETON_MCP_PROFILE=full` adds the original upstream tools that newer tools
-replace (for prompts written against them). The default `core` profile has one
-tool per job.
+`ABLETON_MCP_PROFILE=full` adds the reference-song tools (`dissect_reference`,
+`reference_job`, `index_sound_library`, `build_from_blueprint`) and the
+original upstream tools that newer tools replace (for prompts written against
+them). The default `core` profile has one tool per job. The server reads the
+variable from the client's environment: in Claude Code, start it as
+`ABLETON_MCP_PROFILE=full claude` (or export it in the shell profile); in
+Claude Desktop, pick "full" under the extension's Tool set. `doctor`'s
+reference-dissector line says when the server runs without them.
