@@ -607,7 +607,18 @@ Not verified in Live (check each in a scratch set before claiming it):
   refdissect, and say so in the CHANGELOG.
 - The jobs themselves (`dissect_reference`, `index_sound_library`,
   `reference_job`) have not yet run refdissect for real (uv, the pinned
-  archive, Demucs and the models); only the stand-in below.
+  archive, Demucs and the models); only the stand-in below. Paths go to
+  refdissect absolute (its steps run in the work or library folder).
+- A rerun `plan` brings `blueprint` along; a blueprint file whose
+  `meta.plan_sha1` no longer matches its `plan.json` is refused
+  (`blueprint.plan_changed`).
+- libsndfile writes the time into a float WAV's PEAK chunk: two writes of
+  the same samples a second apart differ in bytes. Scaled copies and cut
+  stems are therefore compared and named by their audio
+  (`blueprint.audio_digest`), never by the file's SHA-1.
+- A process group whose only member is its unreaped zombie leader still
+  answers `killpg(pgid, 0)` (Linux) or refuses it with EPERM (macOS);
+  `group_alive` asks `ps` for a member that is not a zombie.
 - Tests stand a script in for refdissect (`tests/test_reference_jobs.py`:
   real processes, no uv, no models); conftest points the jobs and data
   folders at temporary ones. The eval case needs `ABLETON_MCP_PROFILE=full`.

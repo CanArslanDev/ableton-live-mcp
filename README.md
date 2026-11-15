@@ -230,7 +230,8 @@ Run only one MCP client against Live at a time. Ask the assistant to call
 `doctor` to confirm the server and the script
 versions match.
 
-Environment variables: `ABLETON_MCP_PROFILE=full` (every original tool),
+Environment variables: `ABLETON_MCP_PROFILE=full` (the reference-song tools
+and every original tool),
 `ABLETON_HOST` / `ABLETON_PORT` (where the server looks for Live),
 `ABLETON_MCP_TOKEN` (the session token, when the server cannot read
 `~/.ableton-mcp/live-session.json`), `ABLETON_MCP_REFDISSECT` (a local
@@ -331,7 +332,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 434 tests, no Live or models required
+uv run --with pytest pytest -q            # 449 tests, no Live or models required
 (cd extension && npm ci && npm test)       # the Extensions SDK add-on
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb

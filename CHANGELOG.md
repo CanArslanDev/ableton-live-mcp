@@ -36,8 +36,10 @@ only with a stand-in for refdissect, not with the pinned one and its models.
     the files copied into the User Library (scaled to full scale where a
     file peaks over it), one `build_tracks` call, voices, locators, then
     read-backs of every Simpler's file, pad Volumes (sent again as text where
-    the number did not hold), choke groups, locators Live moved and the time
-    signature. `bars="9-16"` builds a short excerpt.
+    the number did not hold), choke groups, locators Live moved, the time
+    signature and the tempo. `bars="9-16"` builds a short excerpt. A
+    blueprint older than the plan beside it (`meta.plan_sha1`) is refused,
+    and a `plan` run again brings `blueprint` along.
 - refdissect is not a dependency: jobs run it in a uv environment of its own
   (Python 3.12, pinned to reference-dissector 2245889;
   `ABLETON_MCP_REFDISSECT=<checkout>` runs a local one), detached from the
@@ -49,12 +51,19 @@ only with a stand-in for refdissect, not with the pinned one and its models.
   since is never taken for the job's. Data goes to `~/Music/Ableton
   MCP/Reference Dissector/` (`ABLETON_MCP_REFERENCE_DIR`), one folder per
   song named after its file (`(2)` for another file of the same name).
-  Measured on macOS with Apple Silicon only.
+  Paths reach refdissect absolute. Measured on macOS with Apple Silicon only.
 - **Blueprint v1** ([docs/blueprint-v1.md](docs/blueprint-v1.md)): a JSON
   format for a beat to build, with a JSON Schema
   (`MCP_Server/schemas/blueprint-v1.schema.json`), a validator
   (`MCP_Server.blueprint.validate`, `python -m MCP_Server.blueprint FILE`)
-  and three example blueprints in `tests/fixtures/blueprints/`.
+  and three example blueprints in `tests/fixtures/blueprints/`. Besides the
+  schema, the validator refuses what the build would ignore or fail on:
+  settings where `build_tracks` does not read them, a pitch outside MIDI's
+  0–127, two locators on one beat, a sidechain from no track of the
+  blueprint, a copy renamed to another format. File names take their
+  extension in any case; one file under two paths (same `sha1`) is one copy.
+  Scaled copies and cut stems are compared and named by their audio (a float
+  WAV's header carries the time it was written).
 - The `beat_like_reference` prompt (full profile) and a section of the
   compose-in-live skill chain the four tools with `render_and_analyze` and
   `compare_to_reference`.
@@ -75,6 +84,7 @@ only with a stand-in for refdissect, not with the pinned one and its models.
 - The setup skill, the README and Claude Desktop's Tool set option say that
   the full profile also holds the reference-song tools, and how to turn it
   on (`ABLETON_MCP_PROFILE=full claude` in Claude Code).
+- `jsonschema` is a dependency of its own (it came only through `mcp`).
 
 ### Tests
 
@@ -88,7 +98,13 @@ only with a stand-in for refdissect, not with the pinned one and its models.
   too), a failed step, a refdissect without the `blueprint` command, lost
   jobs, a runner killed alone (its steps stopped by cancel), a pid another
   process took, songs of one name, the library index, a job built by its
-  id, doctor, the profile.
+  id, doctor, the profile; another server seeing a running job (through
+  `ps`) and cancelling it, a runner deaf to SIGTERM, an unreaped runner,
+  a job still starting, relative paths, the default folders.
+- `tests/test_blueprint.py` also: copies and stems kept across a second
+  (float WAV headers), a Volume that really refuses a number, the tempo and
+  an audio clip left warped read back, the validator's new refusals, a
+  blueprint older than its plan, clips that start inside an excerpt.
 - An eval case, `build-from-blueprint` (needs `ABLETON_MCP_PROFILE=full`):
   a finished job in the run's home, built into an empty simulated set.
 
@@ -98,6 +114,8 @@ only with a stand-in for refdissect, not with the pinned one and its models.
   fresh environment resolves torch 2.15.0, whose stems on Apple GPUs (MPS)
   put the bass into "other" (measured by reference-dissector, which pins the
   same version).
+- `build_tracks` reports an audio clip Live left warped (asked unwarped) or
+  put at another beat, and the errors of setting it up, which it dropped.
 
 ## 2.3.0 — 2026-10-30
 

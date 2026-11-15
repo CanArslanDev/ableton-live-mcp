@@ -2173,7 +2173,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """The audio file to work on: `path`, or the file behind an audio clip
         (with what decides where its sound plays: warping, start marker, loop)."""
         if path:
-            file = Path(path).expanduser()
+            file = Path(path).expanduser().resolve()  # jobs run in another folder
             if not file.is_file():
                 raise FileNotFoundError(f"No such audio file: {file}")
             return {"file": str(file), "name": file.stem}
@@ -2944,9 +2944,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     steps.append(op_set(cp, "warping", False))
                 # back to the file's start (loop_start carries start_marker)
                 steps += [op_set(cp, "loop_start", 0.0), op_set(cp, "start_marker", 0.0)]
-                batch(steps, stop_on_error=False)
-                row.setdefault("audio_clips", []).append(
-                    lom_get(cp, ["start_time", "end_time", "start_marker", "warping"]))
+                done = batch_summary(batch(steps, stop_on_error=False))
+                row["problems"] += [f"audio clip {Path(str(clip['file'])).name}: {step['error']}"
+                                    for step in done["steps"] if isinstance(step, dict) and "error" in step]
+                held = lom_get(cp, ["start_time", "end_time", "start_marker", "warping"])
+                if clip.get("warping", False) is False and held.get("warping"):
+                    row["problems"].append(f"audio clip {Path(str(clip['file'])).name}: Live left it warped")
+                if abs(float(held.get("start_time", 0.0)) - float(clip.get("start", 0.0))) > 1e-6:
+                    row["problems"].append(f"audio clip {Path(str(clip['file'])).name}: starts at beat "
+                                           f"{held.get('start_time')}, not {clip.get('start', 0.0)}")
+                row.setdefault("audio_clips", []).append(held)
             report.append(row)
         for device_id, source, owner in sidechains:
             device = f"id {device_id}"
@@ -3013,7 +3020,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """
         from . import reference_jobs as jobs
 
-        chosen = [Path(f).expanduser() for f in folders] if folders else jobs.default_sound_folders()
+        chosen = ([Path(f).expanduser().resolve() for f in folders] if folders  # the job runs elsewhere
+                  else jobs.default_sound_folders())
         missing = [str(f) for f in chosen if not f.is_dir()]
         if missing or not chosen:
             raise FileNotFoundError(f"No such folder: {', '.join(missing) or 'no User Library or Core Library found; pass folders'}")
@@ -3091,7 +3099,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             if not file.is_file():
                 raise FileNotFoundError(f"No blueprint at {file} (give a job id, a blueprint.json "
                                         "or its folder)")
-        return json.loads(file.read_text(encoding="utf-8")), file.parent, str(file)
+        data = json.loads(file.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            from . import blueprint as bp
+
+            stale = bp.plan_changed(data, file.parent)
+            if stale:
+                raise ValueError(f"{file}: {stale}")
+        return data, file.parent, str(file)
 
     def moved_cues(placed: list[dict], before: list[float]) -> list[dict]:
         """The locators Live did not make where asked: a cue at a beat neither
@@ -3123,17 +3138,21 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     def read_back(blueprint: dict, base: Path | None, placed: dict[str, Path],
                   tracks: dict[str, int], checks: dict[str, bool]) -> dict:
         """What Live holds after the build, against the blueprint: the time
-        signature, each Simpler's file (by content), numeric Volumes (sent
+        signature and tempo, each Simpler's file (by content), numeric Volumes (sent
         again as display text where the number did not hold), choke groups
         (set again where they differ) and voices."""
         from . import blueprint as bp
 
         out: dict[str, Any] = {}
+        song = lom_get("live_set", ["signature_numerator", "signature_denominator", "tempo"])
         if checks["time_signature"]:
-            song = lom_get("live_set", ["signature_numerator", "signature_denominator"])
             live = f"{song['signature_numerator']}/{song['signature_denominator']}"
             out["time_signature"] = {"want": blueprint["time_signature"], "live": live,
                                      "same": live == blueprint["time_signature"]}
+        if checks["tempo"]:
+            want = float(blueprint["tempo"])
+            out["tempo"] = {"want": want, "live": song.get("tempo"),
+                            "same": abs(float(song.get("tempo") or 0.0) - want) <= bp.TEMPO_BPM}
         samples, volumes, chokes = {}, {}, {}
         for _i, name, note, options in bp.samplers(blueprint):
             if name not in tracks:
@@ -3294,6 +3313,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         report["ok"] = not (
             any("problems" in t for t in report["tracks"]) or report.get("locators_moved")
             or not found.get("time_signature", {"same": True})["same"]
+            or not found.get("tempo", {"same": True})["same"]
             or found.get("samples", {}).get("wrong") or found.get("choke_groups", {}).get("wrong")
             or found.get("volumes", {}).get("not_held") or any(not v["same"] for v in voices.values()))
         return to_json(report)

@@ -96,10 +96,12 @@ macOS with Apple Silicon only; the first run downloads ~2 GB):
    blueprint. About 5 minutes for a 2-minute song.
 3. `reference_job(job_id=..., wait=20)` until it is done; it sends progress
    while it waits. The summary gives tempo, meter, sections, each pad's file
-   with its match verdict ("same sample", "same family", "no close match")
-   and the 808's notes: say plainly which sounds are only near.
-   `reference_job(job_id=..., cancel=True)` stops it; `steps=["match", "plan",
-   "blueprint"]` reruns part of the chain (after a new index, say).
+   with its match verdict ("same sample", "same sample (likely)", "candidate:
+   maybe the same sample, processed", "same sound as …", "same family", "no
+   close match") and the 808's notes: say plainly which sounds are only near.
+   `reference_job(job_id=..., cancel=True)` stops it;
+   `dissect_reference(path=..., steps=["match", "plan"])` reruns part of the
+   chain (after a new index, say; `plan` brings `blueprint` along).
 4. In an empty set: `build_from_blueprint(blueprint=<job id>)`, or
    `bars="9-16"` for a quick excerpt. It reports what Live did not take
    (a Simpler holding another file, Volumes, choke groups, moved locators).

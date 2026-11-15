@@ -89,9 +89,11 @@ Each entry: `{"source", "name", "gain_db"?, "sha1"?}`.
 - `source`: the file, absolute, or relative to the blueprint file's folder (a
   blueprint passed as an object needs absolute paths).
 - `name`: its name in `<User Library>/Samples/AbletonMCP Generated/` (no
-  folder, an audio extension). **Name a file after its content** (a digest in
-  the name): Live keeps playing what it loaded through the browser under a
-  name after the file is overwritten, until it restarts.
+  folder; an audio extension in any case: `.wav`, `.aif`, `.aiff`, `.flac`,
+  `.mp3`, `.ogg`; an unscaled copy keeps its source's). **Name a file after
+  its content** (a digest in the name): Live keeps playing what it loaded
+  through the browser under a name after the file is overwritten, until it
+  restarts.
 - `gain_db` (≤ 0): under 0, the copy is the file scaled by it, written as a
   32-bit float WAV at the file's own rate and channels; the name must end
   `.wav`. For a file that peaks over full scale: the gain that brings it to
@@ -99,9 +101,13 @@ Each entry: `{"source", "name", "gain_db"?, "sha1"?}`.
 - `sha1`: the start (8–40 hex digits) of the source's SHA-1. The build
   refuses a source whose content changed since the blueprint was written.
 
-A copy already there with the same content is kept; one with other content is
-replaced, and the report says so (`files.replaced`, with Live's caveat). Names are compared without case
-(one file on macOS's and Windows' disks).
+A copy already there with the same content is kept (a scaled copy: the same
+audio, since libsndfile stamps the time into a float WAV's header); one with
+other content is replaced, and the report says so (`files.replaced`, with
+Live's caveat). Names are compared without case (one file on macOS's and
+Windows' disks): two entries may share a name only as one file, from the
+same source or with the same `sha1` (one file in two library folders), and
+the same `gain_db`.
 Without a User Library the copies go to `~/.ableton-mcp/generated`, as
 `generate_audio`'s do.
 
@@ -135,13 +141,21 @@ The rest is `build_tracks`':
 A pad's `choke_group` is 0 (none) to 16. A pad's `Volume` given as a number
 (dB) is read back after the build (below).
 
+Where settings go: a Drum Rack pad's in the pad (`drum_rack.<note>.settings`),
+a track's Simpler's (and any other instrument's) in the track's `settings`;
+the validator refuses the other places, which `build_tracks` would ignore.
+A pitch is a MIDI number or a note name in Live's octaves (C3 = 60) within
+0–127. `sidechain_from` names another track of the blueprint. Locators take
+one beat each (Live keeps one cue per beat).
+
 ### `checks`
 
 | Check | What is read back |
 |---|---|
 | `time_signature` | Live's signature against the blueprint's |
+| `tempo` | Live's tempo against the blueprint's, within 0.001 BPM |
 | `samples` | every sampler with `file` or `sample_path`: the file its Simpler holds, compared by content (SHA-1) with the copy (or the `sample_path`) |
-| `volumes` | every sampler whose `settings.Volume` is a number: the parameter's value within 0.001 dB and its display within 0.006 dB. One that does not hold is sent again as display text (`"-6.6 dB"`), Live's way before, and counts as held by text within 0.06 dB (Live 12.4.6 held "-6.6 dB" as −6.605) |
+| `volumes` | every sampler whose `settings.Volume` is a number: the parameter's value within 0.001 dB, and its display the dB rounded to the digits it shows (two decimals from −10 dB up, one below). One that does not hold is sent again as display text (`"-6.6 dB"`), Live's way before, and counts as held by text within 0.06 dB (Live 12.4.6 held "-6.6 dB" as −6.605) |
 | `choke_groups` | every pad with a `choke_group`: its chain's group, set again once where it differs |
 | `locators` | a cue Live put at a beat nobody asked for (it snaps new cues to the Arrangement's grid, which depends on the zoom) is deleted and listed under `locators_moved`, with the beat asked and the beat Live chose |
 | `voices` | the Simpler's voices after setting them |
@@ -149,14 +163,17 @@ A pad's `choke_group` is 0 (none) to 16. A pad's `Volume` given as a number
 ## What `build_from_blueprint` does
 
 1. Validates the blueprint and checks its files on disk (every source and
-   audio clip there, `sha1` matching) before touching Live.
+   audio clip there, `sha1` matching) before touching Live. A blueprint
+   file whose `meta.plan` changed after it was made (`meta.plan_sha1`, as
+   refdissect writes them) is refused: make it again.
 2. With `bars="A-B"` (from 1, as Live's ruler counts): makes an excerpt that
    starts at 0. Notes that start in those bars move back by bar A's start and
    end by bar B's end (a note starting before bar A is left out), clips are
    cut to the bars, locators kept if they fall in them, and unwarped audio
    clips are cut at the same instants into `excerpt-A-B/` beside the
-   blueprint, each named by its content (a file that ends before the
-   excerpt is left out).
+   blueprint, each named by its audio (a file that ends before the excerpt
+   is left out). A warped audio clip cannot be cut at the tempo alone, so
+   `bars` refuses a blueprint that has one.
 3. Refuses a set that is not empty (a track with a device or a clip).
 4. Sets the tempo and the time signature (before any locator: Live snaps
    cues to the meter's grid).
@@ -164,7 +181,9 @@ A pad's `choke_group` is 0 (none) to 16. A pad's `Volume` given as a number
 6. Calls `build_tracks` once with the spec (samplers pointed at their copies).
    If it stops, the error says where and which tracks it left in the set.
 7. Sets `voices`, places the locators, runs the checks, moves the playhead to
-   0 and shows the Arrangement.
+   0 and shows the Arrangement. An audio clip Live left warped (when the
+   blueprint says `"warping": false`) or put elsewhere is one of its track's
+   `problems`.
 
 The report:
 
@@ -174,6 +193,7 @@ The report:
  "files": {"folder": "…/User Library/Samples/AbletonMCP Generated", "copied": 4},
  "locators": 2,
  "checks": {"time_signature": {"want": "4/4", "live": "4/4", "same": true},
+            "tempo": {"want": 120.0, "live": 120.0, "same": true},
             "samples": {"checked": 4, "wrong": {}},
             "volumes": {"checked": 3, "held": 3},
             "choke_groups": {"checked": 2, "wrong": {}},
@@ -202,6 +222,7 @@ What `refdissect blueprint WORK [--out FILE]` writes, field by field, from
 | track `808 (synth)` | `build_spec`'s, with `"instrument": {"file": "808", "warping": false, "playback_mode": "classic"}` instead of `sample`, `settings` = `simpler_808(t808)`, `"voices"` only when the plan has one (never `null`) |
 | track `Drums (library)` | `build_spec`'s, each pad `{"file": "pad-<note>", "warping": false, "playback_mode": "one_shot", "settings": {Volume (a number), Transpose, Detune, Vol < Vel, Snap, "F On": "Off", "Fade In": 0}, "choke_group"?}` (`choke_group` only when 1–16). A Simpler loaded by path starts Classic with its filter on and a 0.1 ms Fade In, where the browser's pad is One-Shot, unfiltered, without one: the blueprint says what it wants |
 | melodic and `REF` tracks | `build_spec`'s, the stems' paths absolute |
+| `meta` | `{"plan": "plan.json", "plan_sha1": <its SHA-1's first 12 hex digits>}`: the build refuses the blueprint once that plan changed |
 | `checks` | left out (all on) |
 
 The checks that need no Live stay in refdissect's command (the 808's digest
