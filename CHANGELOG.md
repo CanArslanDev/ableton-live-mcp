@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 2.4.0 — 2026-11-15
+
+The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
+The new tools are in the full profile: start the client with
+`ABLETON_MCP_PROFILE=full` in its environment (`ABLETON_MCP_PROFILE=full
+claude` in Claude Code; "full" under the extension's Tool set in Claude
+Desktop). `build_from_blueprint` was checked in Live 12.4.6 on 2026-11-14,
+through reference-dissector's `live-build`: an 8-bar excerpt and a whole
+song (10 tracks, 1,881 notes) built with clean read-backs and recorded equal,
+sample for sample, to its build through the browser. The jobs
+(`dissect_reference`, `index_sound_library`, `reference_job`) have run
+only with a stand-in for refdissect, not with the pinned one and its models.
 
 ### Added
 
