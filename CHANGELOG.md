@@ -41,7 +41,7 @@ only with a stand-in for refdissect, not with the pinned one and its models.
     blueprint older than the plan beside it (`meta.plan_sha1`) is refused,
     and a `plan` run again brings `blueprint` along.
 - refdissect is not a dependency: jobs run it in a uv environment of its own
-  (Python 3.12, pinned to reference-dissector 2245889;
+  (Python 3.12, pinned to reference-dissector 11a264c;
   `ABLETON_MCP_REFDISSECT=<checkout>` runs a local one), detached from the
   server in their own process group, with records in `~/.ableton-mcp/jobs/`
   (`ABLETON_MCP_JOBS_DIR`) and a `job.json` in the work folder. A job
