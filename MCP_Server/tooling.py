@@ -17,7 +17,9 @@ Live round-trip never stalls the event loop.
 Profiles (``ABLETON_MCP_PROFILE``):
 - ``core`` (default): one tool per job. The original tools that newer ones
   cover (set_tempo, fire_clip, get_clip_notes, …) are left out.
-- ``full``: every tool, for clients and prompts written against the old set.
+- ``full``: every tool, for clients and prompts written against the old set,
+  and the reference-song tools (dissect_reference, reference_job,
+  index_sound_library, build_from_blueprint).
 """
 
 from __future__ import annotations

@@ -40,7 +40,7 @@ from typing import Any
 
 from .reference_runner import log_tail, write_json
 
-REFDISSECT_COMMIT = "21d82d72ee89e21b82a7bff4d8d8805af283bac9"
+REFDISSECT_COMMIT = "11a264c29a0297859bfa5efc47477aa8ae1fe751"
 REFDISSECT_URL = ("https://github.com/CanArslanDev/reference-dissector/archive/"
                   f"{REFDISSECT_COMMIT}.zip")
 REFDISSECT_PYTHON = "3.12"  # refdissect needs 3.11+; the server runs on 3.10 too
@@ -80,7 +80,7 @@ _PROCESSES: dict[str, subprocess.Popen] = {}
 def data_dir() -> Path:
     custom = os.environ.get("ABLETON_MCP_REFERENCE_DIR")
     if custom:
-        return Path(custom).expanduser()
+        return Path(custom).expanduser().resolve()  # the jobs run in their work folders
     return Path.home() / "Music" / "Ableton MCP" / "Reference Dissector"
 
 
@@ -90,7 +90,7 @@ def library_dir() -> Path:
 
 def jobs_dir() -> Path:
     custom = os.environ.get("ABLETON_MCP_JOBS_DIR")
-    return Path(custom).expanduser() if custom else Path.home() / ".ableton-mcp" / "jobs"
+    return Path(custom).expanduser().resolve() if custom else Path.home() / ".ableton-mcp" / "jobs"
 
 
 def refdissect_source() -> dict:
@@ -156,7 +156,8 @@ def stems_folder(work: Path, model: str) -> Path:
 
 
 def resolve_steps(steps: list[str] | str | None, melodic: bool = True) -> list[str]:
-    """The steps to run, in the chain's order (melodic=False leaves melodic out)."""
+    """The steps to run, in the chain's order (melodic=False leaves melodic out;
+    plan brings blueprint along, which a new plan.json makes stale)."""
     if steps is None:
         wanted = set(DISSECT_STEPS)
     else:
@@ -167,6 +168,8 @@ def resolve_steps(steps: list[str] | str | None, melodic: bool = True) -> list[s
         if unknown:
             raise ValueError(f"Unknown step {', '.join(unknown)}: the steps are "
                              f"{', '.join(DISSECT_STEPS)}")
+        if "plan" in wanted:
+            wanted.add("blueprint")
     chosen = [s for s in DISSECT_STEPS if s in wanted and (melodic or s != "melodic")]
     if not chosen:
         raise ValueError("No step to run")
@@ -299,14 +302,35 @@ def is_runner(record: dict) -> bool:
             and f"{record['id']}.json" in line)
 
 
+def group_states(pgid: int) -> list[str] | None:
+    """`ps`'s state of each process in a process group, None where ps
+    cannot tell."""
+    try:
+        found = subprocess.run(["ps", "-A", "-o", "pgid=,stat="], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if found.returncode != 0:
+        return None
+    states = []
+    for line in found.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == str(int(pgid)):
+            states.append(parts[1])
+    return states
+
+
 def group_alive(pgid: int) -> bool:
+    """Whether a process group has a process that is not a zombie. A group
+    whose leader is an unreaped zombie still answers kill (Linux) or
+    refuses it with EPERM (macOS), so ps decides."""
     try:
         os.killpg(int(pgid), 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
-    return True
+        pass
+    states = group_states(pgid)
+    return True if states is None else any(not state.startswith("Z") for state in states)
 
 
 def leftovers(record: dict) -> bool:
@@ -593,6 +617,14 @@ def plan_summary(work: Path, record: dict | None = None) -> dict:
     files: dict[str, Any] = {"plan": str(work / "plan.json")}
     blueprint = work / "blueprint.json"
     files["blueprint"] = str(blueprint) if blueprint.is_file() else None
+    stale = None
+    if blueprint.is_file():
+        from .blueprint import plan_changed
+
+        try:
+            stale = plan_changed(json.loads(blueprint.read_text(encoding="utf-8")), work)
+        except (OSError, ValueError):
+            stale = None
     midi = sorted(str(p) for p in (work / "midi").glob("*.mid"))
     if midi:
         files["midi"] = midi
@@ -600,7 +632,10 @@ def plan_summary(work: Path, record: dict | None = None) -> dict:
     if stems_folder(work, model).is_dir():
         files["stems"] = str(stems_folder(work, model))
     out["files"] = files
-    if blueprint.is_file() and record is not None:
+    if stale:
+        out["blueprint_stale"] = stale
+        out["next"] = stale
+    elif blueprint.is_file() and record is not None:
         out["next"] = f'build_from_blueprint(blueprint="{record["id"]}") in an empty Live set'
     elif not blueprint.is_file():
         out["next"] = ("No blueprint.json: this refdissect cannot write one yet (it needs its "

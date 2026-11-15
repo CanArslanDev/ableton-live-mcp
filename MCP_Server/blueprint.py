@@ -31,16 +31,20 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from . import music
+
 FORMAT = "ableton-mcp-blueprint"
 VERSION = 1
 SCHEMA_PATH = Path(__file__).with_name("schemas") / "blueprint-v1.schema.json"
-CHECKS = ("time_signature", "samples", "volumes", "choke_groups", "locators", "voices")
+CHECKS = ("time_signature", "tempo", "samples", "volumes", "choke_groups", "locators", "voices")
+TEMPO_BPM = 1e-3  # how far Live's tempo may be from the blueprint's
 GENERATED = Path("Samples") / "AbletonMCP Generated"
-# A Volume holds when its value is within this of the blueprint's dB, and its
-# display (two decimals from -10 dB up) within VOLUME_DISPLAY_DB. Sent as
-# display text instead, Live 12.4.6 held a display step under it ("-6.6 dB"
-# held -6.605, "-14.9 dB" -14.95): within VOLUME_TEXT_DB counts as held so
-VOLUME_VALUE_DB, VOLUME_DISPLAY_DB, VOLUME_TEXT_DB = 1e-3, 0.006, 0.06
+# A Volume holds when its value is within VOLUME_VALUE_DB of the blueprint's
+# dB, and its display rounds to it (within half its last digit: Live shows
+# two decimals from -10 dB up, one below). Sent as display text instead,
+# Live 12.4.6 held a display step under it ("-6.6 dB" held -6.605, "-14.9 dB"
+# -14.95): within VOLUME_TEXT_DB counts as held so
+VOLUME_VALUE_DB, VOLUME_TEXT_DB = 1e-3, 0.06
 
 
 @lru_cache(maxsize=1)
@@ -127,11 +131,28 @@ def validate(blueprint: Any) -> list[str]:
         if track.get("voices") is not None and not (isinstance(instrument, dict)
                                                     and "drum_rack" not in instrument):
             problems.append(f"{where}: voices is a Simpler's: give the track a sampler instrument")
+        if isinstance(instrument, dict) and "drum_rack" in instrument and track.get("settings"):
+            problems.append(f"{where}: a Drum Rack track's settings go on its pads (drum_rack.<note>.settings)")
+        if isinstance(instrument, dict) and "drum_rack" not in instrument and instrument.get("settings"):
+            problems.append(f"{where}: a track's Simpler takes the track's settings, not instrument.settings")
+        for f, fx in enumerate(track.get("effects") or []):
+            source = fx.get("sidechain_from")
+            if source is not None and (source not in names or source == track["name"]):
+                problems.append(f"{where}.effects[{f}]: sidechain_from {source!r} names no other track "
+                                "of the blueprint")
         for c, clip in enumerate(track.get("clips") or []):
             late = [n for n in clip.get("notes") or [] if n["start_time"] >= clip["length"]]
             if late:
                 problems.append(f"{where}.clips[{c}]: {len(late)} notes start at or after the clip's "
                                 f"length ({clip['length']:g})")
+            for pitch in sorted({str(n["pitch"]) for n in clip.get("notes") or [] if isinstance(n["pitch"], str)}):
+                try:
+                    number = music.parse_note(pitch)
+                except ValueError:
+                    number = None
+                if number is None or not 0 <= number <= 127:
+                    problems.append(f"{where}.clips[{c}]: pitch {pitch!r} is not a note of MIDI's 0-127 "
+                                    "(C3 = 60)")
     for _index, name, note, options in samplers(blueprint):
         where = f"blueprint.tracks ({name}{f' pad {note}' if note else ''})"
         given = [k for k in ("file", "sample_path", "sample") if options.get(k)]
@@ -150,19 +171,37 @@ def validate(blueprint: Any) -> list[str]:
         if gain < 0 and not entry["name"].lower().endswith(".wav"):
             problems.append(f"blueprint.files.{key}: a scaled copy (gain_db {gain:g}) is a WAV: "
                             "name it .wav")
+        if gain >= 0 and Path(entry["name"]).suffix.lower() != Path(entry["source"]).suffix.lower():
+            problems.append(f"blueprint.files.{key}: a copy keeps its file's format: name it "
+                            f"{Path(entry['source']).suffix or 'with the source extension'}, not "
+                            f"{Path(entry['name']).suffix}")
     copies = [e["name"].lower() for e in files.values()]  # one file on macOS's and Windows' disks
     for name in sorted({n for n in copies if copies.count(n) > 1}):
-        sources = {(e["source"], float(e.get("gain_db") or 0)) for e in files.values()
-                   if e["name"].lower() == name}
-        if len(sources) > 1:
+        entries = [e for e in files.values() if e["name"].lower() == name]
+        if not all(same_file(entries[0], e) for e in entries[1:]):
             problems.append(f"blueprint.files: {name!r} names two different files (names are compared "
-                            "without case)")
+                            "without case; one file under two paths needs the same sha1 on both)")
     length = blueprint.get("length_beats")
+    beats = [loc["beat"] for loc in blueprint.get("locators") or []]
     for i, locator in enumerate(blueprint.get("locators") or []):
         if length is not None and locator["beat"] >= length:
             problems.append(f"blueprint.locators[{i}] ({locator['name']}): beat {locator['beat']:g} "
                             f"is past the end ({length:g})")
+        if beats.index(locator["beat"]) < i:
+            problems.append(f"blueprint.locators[{i}] ({locator['name']}): a locator is at beat "
+                            f"{locator['beat']:g} already (Live keeps one per beat)")
     return problems
+
+
+def same_file(a: dict, b: dict) -> bool:
+    """Whether two files entries are one copy: the same source and gain, or
+    the same gain and content (one sha1 the start of the other)."""
+    if float(a.get("gain_db") or 0) != float(b.get("gain_db") or 0):
+        return False
+    if a["source"] == b["source"]:
+        return True
+    x, y = a.get("sha1"), b.get("sha1")
+    return bool(x and y) and (x.startswith(y) or y.startswith(x))
 
 
 def check(blueprint: Any) -> dict:
@@ -201,6 +240,22 @@ def sha1(path: Path) -> str:
     return digest.hexdigest()
 
 
+def plan_changed(blueprint: dict, folder: Path | None) -> str | None:
+    """Why a blueprint is older than the plan beside it, or None: refdissect
+    records the plan it was made from (meta.plan, meta.plan_sha1, the start
+    of the plan file's SHA-1)."""
+    meta = blueprint.get("meta") if isinstance(blueprint.get("meta"), dict) else {}
+    name, digest = meta.get("plan"), meta.get("plan_sha1")
+    if folder is None or not isinstance(name, str) or not isinstance(digest, str) or not digest:
+        return None
+    plan = folder / name
+    if plan.is_file() and not sha1(plan).startswith(digest):
+        return (f"{plan.name} changed after this blueprint was made from it (refdissect plan ran "
+                "again without blueprint): make the blueprint again (dissect_reference with "
+                "steps=[\"blueprint\"], or refdissect blueprint)")
+    return None
+
+
 def check_sources(blueprint: dict, base: Path | None) -> list[str]:
     """What the disk says against the blueprint: every file, sample_path and
     audio clip there, each copied file's content the one its sha1 names."""
@@ -232,6 +287,28 @@ def check_sources(blueprint: dict, base: Path | None) -> list[str]:
     return problems
 
 
+def audio_digest(path: Path) -> str:
+    """SHA-1 of a sound file's audio: its format, sample format, rate,
+    channels and samples, not its bytes. libsndfile writes a time stamp into
+    a float WAV's PEAK chunk, so the same samples written a second apart
+    differ in bytes."""
+    import numpy as np
+    import soundfile as sf
+
+    info = sf.info(str(path))
+    samples, _rate = sf.read(str(path), dtype="float64", always_2d=True)
+    digest = hashlib.sha1(f"{info.format} {info.subtype} {info.samplerate} {info.channels}".encode())
+    digest.update(np.ascontiguousarray(samples).tobytes())
+    return digest.hexdigest()
+
+
+def same_audio(a: Path, b: Path) -> bool:
+    try:
+        return audio_digest(a) == audio_digest(b)
+    except Exception:  # not a sound file soundfile reads
+        return False
+
+
 def scaled_samples(source: Path, gain_db: float):
     import numpy as np
     import soundfile as sf
@@ -243,8 +320,9 @@ def scaled_samples(source: Path, gain_db: float):
 def put_files(blueprint: dict, base: Path | None, folder: Path) -> tuple[dict[str, Path], list[dict]]:
     """Each file of the blueprint in folder under its name: copied as it is,
     or with gain_db under 0 written scaled by it (a 32-bit float WAV at the
-    file's rate and channels). A file there with that content already is
-    kept; one with other content is replaced and reported, since Live keeps
+    file's rate and channels). A file there with that content (for a scaled
+    copy, the same audio) already is kept; one with other content is
+    replaced and reported, since Live keeps
     playing what it loaded under a name through the browser until it
     restarts. Returns {key: path} and a row per file."""
     import soundfile as sf
@@ -262,7 +340,7 @@ def put_files(blueprint: dict, base: Path | None, folder: Path) -> tuple[dict[st
         else:
             shutil.copyfile(source, temporary)
         existed = target.is_file()
-        if existed and sha1(target) == sha1(temporary):
+        if existed and (same_audio(target, temporary) if gain < 0 else sha1(target) == sha1(temporary)):
             temporary.unlink()
             action = "kept"
         else:
@@ -330,8 +408,9 @@ def song_length(blueprint: dict) -> float:
 def trim(source: Path, out_dir: Path, seconds: tuple[float, float]) -> Path | None:
     """source's samples from seconds[0] to seconds[1] (fewer where it ends
     first), in its rate and sample format, in out_dir under its name and the
-    content's digest (Live keeps playing what it loaded under a name); None
-    when the file ends before seconds[0]."""
+    audio's digest (Live keeps playing what it loaded under a name; a file
+    there under that name already is kept); None when the file ends before
+    seconds[0]."""
     import soundfile as sf
 
     info = sf.info(str(source))
@@ -342,8 +421,11 @@ def trim(source: Path, out_dir: Path, seconds: tuple[float, float]) -> Path | No
     out_dir.mkdir(parents=True, exist_ok=True)
     temporary = out_dir / f".{source.stem}.{os.getpid()}.tmp{source.suffix}"
     sf.write(str(temporary), x, rate, subtype=info.subtype, format=info.format)
-    target = out_dir / f"{source.stem} {sha1(temporary)[:8]}{source.suffix}"
-    os.replace(temporary, target)
+    target = out_dir / f"{source.stem} {audio_digest(temporary)[:8]}{source.suffix}"
+    if target.is_file():
+        temporary.unlink()
+    else:
+        os.replace(temporary, target)
     return target
 
 
@@ -415,10 +497,18 @@ def display_db(text: Any) -> float | None:
         return float("-inf") if "inf" in str(text) else None
 
 
+def display_step(text: str) -> float:
+    """The last digit's step in a display ("-6.60 dB": 0.01, "-12.3 dB": 0.1)."""
+    number = str(text).replace("dB", "").strip()
+    return 10.0 ** -len(number.split(".", 1)[1]) if "." in number else 1.0
+
+
 def volume_held(want: float, value: Any, display: Any) -> bool:
+    """The value within VOLUME_VALUE_DB of want, and the display (where
+    there is one) want rounded to the digits it shows."""
     shown = display_db(display) if isinstance(display, str) else None
     return (isinstance(value, (int, float)) and abs(float(value) - want) <= VOLUME_VALUE_DB
-            and (shown is None or abs(shown - want) <= VOLUME_DISPLAY_DB))
+            and (shown is None or abs(shown - want) <= display_step(display) / 2 + 1e-9))
 
 
 def main(argv: list[str] | None = None) -> int:

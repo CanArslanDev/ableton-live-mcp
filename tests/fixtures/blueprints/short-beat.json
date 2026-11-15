@@ -95,7 +95,9 @@
        "Detune": 0,
        "Vol < Vel": 0.35,
        "Snap": "Off",
-       "Volume": -3.0
+       "Volume": -3.0,
+       "F On": "Off",
+       "Fade In": 0.0
       }
      },
      "38": {
@@ -107,7 +109,9 @@
        "Detune": 0,
        "Vol < Vel": 0.35,
        "Snap": "Off",
-       "Volume": -6.6
+       "Volume": -6.6,
+       "F On": "Off",
+       "Fade In": 0.0
       }
      },
      "42": {
@@ -119,7 +123,9 @@
        "Detune": -8,
        "Vol < Vel": 0.35,
        "Snap": "Off",
-       "Volume": -9.5
+       "Volume": -9.5,
+       "F On": "Off",
+       "Fade In": 0.0
       }
      }
     }

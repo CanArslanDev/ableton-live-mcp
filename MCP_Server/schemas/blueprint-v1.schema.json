@@ -10,7 +10,7 @@
     "format": {"const": "ableton-mcp-blueprint"},
     "version": {"const": 1},
     "name": {"type": "string", "description": "What is built (the song's name), for the report."},
-    "made_by": {"type": "string", "description": "What wrote the blueprint, e.g. \"refdissect 0970a03\"."},
+    "made_by": {"type": "string", "description": "What wrote the blueprint, e.g. \"refdissect 0.1.0 2245889\"."},
     "meta": {"type": "object", "description": "Free-form notes; the build ignores them."},
     "tempo": {"type": "number", "minimum": 20, "maximum": 999},
     "time_signature": {"type": "string", "pattern": "^[1-9][0-9]?/(1|2|4|8|16)$"},
@@ -41,6 +41,7 @@
       "additionalProperties": false,
       "properties": {
         "time_signature": {"type": "boolean"},
+        "tempo": {"type": "boolean"},
         "samples": {"type": "boolean"},
         "volumes": {"type": "boolean"},
         "choke_groups": {"type": "boolean"},
@@ -57,8 +58,8 @@
       "properties": {
         "source": {"type": "string", "minLength": 1,
                    "description": "The file: absolute, or relative to the blueprint's folder."},
-        "name": {"type": "string", "pattern": "^[^/\\\\]+\\.(wav|WAV|aif|AIF|aiff|AIFF|flac|FLAC|mp3|MP3|ogg|OGG)$",
-                 "description": "Its name in the User Library; name it after its content (Live keeps playing what it loaded under a name)."},
+        "name": {"type": "string", "pattern": "^[^/\\\\]+\\.([wW][aA][vV]|[aA][iI][fF][fF]?|[fF][lL][aA][cC]|[mM][pP]3|[oO][gG][gG])$",
+                 "description": "Its name in the User Library, with an audio extension in any case (an unscaled copy keeps its source's); name it after its content (Live keeps playing what it loaded under a name)."},
         "gain_db": {"type": "number", "maximum": 0, "minimum": -120,
                     "description": "Under 0: the copy is the file scaled by this, as a 32-bit float WAV."},
         "sha1": {"type": "string", "pattern": "^[0-9a-f]{8,40}$",

@@ -43,7 +43,7 @@
     "profile": {
       "type": "string",
       "title": "Tool set",
-      "description": "core: one tool per job (recommended). full: also the original tools that newer ones replace, for prompts written against them.",
+      "description": "core: one tool per job (recommended). full: also the reference-song tools (make a beat like a song with reference-dissector) and the original tools that newer ones replace.",
       "default": "core",
       "required": false
     }

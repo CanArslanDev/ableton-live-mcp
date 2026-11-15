@@ -181,8 +181,8 @@ on this computer and were measured on macOS with Apple Silicon only.
    If it failed or was lost, show the error and the log lines, and offer to run it
    again (steps= picks up from the files already written).
 4. Read the summary to the user: tempo, meter, sections, each pad's sound with its
-   match verdict (say plainly which are only "same family" or "no close match"),
-   the 808's notes, and the files written.
+   match verdict (say plainly which are only a "candidate", "same family" or "no
+   close match"), the 808's notes, and the files written.
 5. get_session_overview: the set must be empty (ask the user to open a new Live set
    if it is not). Then build_from_blueprint(blueprint=<job id>{excerpt}); for a first
    listen, bars="9-16" builds a short excerpt that is quicker to check.

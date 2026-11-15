@@ -175,7 +175,7 @@ def test_an_excerpt_starts_at_zero_with_its_stems_cut(tmp_path):
     assert part["locators"] == [{"name": "B (2)", "beat": 0}]
     stem = Path(part["tracks"][2]["audio_clips"][0]["file"])
     assert stem.parent == tmp_path / "excerpt" and part["tracks"][2]["audio_clips"][0]["start"] == 0
-    assert stem.name == f"ref-drums {bp.sha1(stem)[:8]}.wav"
+    assert stem.name == f"ref-drums {bp.audio_digest(stem)[:8]}.wav"
     info = sf.info(stem)
     assert info.samplerate == 8000 and info.subtype == "PCM_16"
     assert abs(info.frames - (8 - 4) * 60 / 140 * 8000) <= 1
@@ -235,6 +235,7 @@ def test_a_blueprint_is_built_and_read_back(empty_live):
     assert report["locators"] == 2 and "locators_moved" not in report
     checks = report["checks"]
     assert checks["time_signature"] == {"want": "4/4", "live": "4/4", "same": True}
+    assert checks["tempo"] == {"want": 120.0, "live": 120.0, "same": True}
     assert checks["samples"] == {"checked": 4, "wrong": {}}
     assert checks["volumes"] == {"checked": 3, "held": 3}
     state = call.simulator.state()
@@ -252,6 +253,10 @@ def test_a_blueprint_is_built_and_read_back(empty_live):
     hat = chains["42"][0]["devices"][0]
     assert hat["sample"].startswith("hat-closed ") and hat["parameters"]["Volume"] == "-9.5 dB"
     assert hat["parameters"]["Transpose"] == "2 st"
+    # reference-dissector's pad settings (its PAD_OFF): filter off, Fade In 0 where a
+    # Simpler made by path starts at 0.1 ms (Live 12.4.6); the 808 keeps its own
+    assert (hat["parameters"]["F On"], hat["parameters"]["Fade In"]) == ("Off", "0.0 ms")
+    assert shown["Fade In"] == "0.1 ms" and hat["parameters"]["Fade Out"] == "0.1 ms"
     clip = tracks["Drums (library)"]["arrangement_clips"][0]
     assert (clip["name"], clip["length"], len(clip["notes"])) == ("Drums", 8, 24)
     # The Simplers hold the copies in the User Library, not the blueprint's files
@@ -297,20 +302,37 @@ def test_an_excerpt_with_glide_voices_a_stem_and_a_pad_by_name(empty_live, tmp_p
     assert tracks["REF drums"]["mute"]
     pad = tracks["Drums (by name)"]["devices"][0]["chains"]["38"][0]["devices"][0]
     assert pad["sample"] == "Snare Tight.wav"
+    assert pad["parameters"]["Fade In"] == "0.0 ms"  # the browser's pads start at 0 (Live 12.4.6)
     assert [(c["name"], c["time"]) for c in state["locators"]] == [("B (2)", 0)]
     assert state["browser"]["loaded"]
 
 
-def test_volumes_that_do_not_hold_go_again_as_text(empty_live):
+def test_volumes_that_do_not_hold_go_again_as_text(empty_live, monkeypatch):
     call = empty_live
-    data = fixture("short-beat")
-    for entry in data["files"].values():
-        entry["source"] = str(FIXTURES / entry["source"])
+    from MCP_Server import fake_live
+
+    original = fake_live.FakeParam.__setattr__
+
+    def coarse(self, name, value):  # a Volume that lands on 0.05 dB steps, whatever number it is sent
+        if name == "value" and self.name == "Volume" and isinstance(value, float):
+            value = round(value / 0.05) * 0.05
+        original(self, name, value)
+
+    monkeypatch.setattr(fake_live.FakeParam, "__setattr__", coarse)
+    data = absolute(fixture("short-beat"))
     data["tracks"][1]["instrument"]["drum_rack"]["38"]["settings"]["Volume"] = -6.63
     report = call("build_from_blueprint", blueprint=data)
     volumes = report["checks"]["volumes"]
     assert volumes["held"] == 2 and volumes["held_by_text"] == ["Drums (library) pad 38"]
     assert report["ok"] is True
+
+
+def test_a_volume_held_is_not_sent_again_for_its_display():
+    # Live shows one decimal below -10 dB: -12.34 held exactly reads "-12.3 dB"
+    assert bp.volume_held(-12.34, -12.34, "-12.3 dB")
+    assert bp.volume_held(-6.63, -6.63, "-6.63 dB") and not bp.volume_held(-6.63, -6.63, "-6.7 dB")
+    assert not bp.volume_held(-6.63, -6.65, "-6.65 dB")
+    assert bp.volume_held(-3.0, -3.0, None)
 
 
 def test_locators_live_moves_are_deleted_and_reported(empty_live, monkeypatch):
@@ -376,3 +398,137 @@ def test_a_failed_build_says_what_it_left(empty_live, monkeypatch):
     with pytest.raises(ToolError, match=r"build_tracks stopped: Could not insert 'No Such Synth'.* It left "
                                         r"'808 \(synth\)' \(Simpler\), '4-MIDI' \(no device\) in the set"):
         call("build_from_blueprint", blueprint=data)
+
+
+def test_a_scaled_copy_and_a_cut_stem_are_kept_across_a_second(tmp_path):
+    # libsndfile stamps the time into a float WAV's PEAK chunk: the bytes of
+    # two writes a second apart differ, their audio does not
+    import time
+
+    data = fixture("choke-and-scaled")
+    folder = tmp_path / "generated"
+    bp.put_files(data, FIXTURES, folder)
+    stem = tmp_path / "float stem.wav"
+    sf.write(str(stem), np.linspace(-0.5, 0.5, 8000, dtype=np.float32), 8000, subtype="FLOAT")
+    first = bp.trim(stem, tmp_path / "cut", (0.1, 0.5))
+    time.sleep(1.1)
+    _placed, rows = bp.put_files(data, FIXTURES, folder)
+    assert {r["action"] for r in rows} == {"kept"}
+    assert bp.trim(stem, tmp_path / "cut", (0.1, 0.5)) == first
+    assert len(list((tmp_path / "cut").iterdir())) == 1
+
+
+def test_the_validator_refuses_what_the_build_would_drop_or_fail_on():
+    def problems(change):
+        data = fixture("short-beat")
+        change(data)
+        return " | ".join(bp.validate(data))
+
+    def pitch(value):
+        return lambda d: d["tracks"][0]["clips"][0]["notes"][0].update(pitch=value)
+
+    assert "pitch 'zz' is not a note" in problems(pitch("zz"))
+    assert "pitch 'C9' is not a note" in problems(pitch("C9"))  # MIDI 132
+    assert problems(pitch("C1")) == ""
+    assert "takes the track's settings" in problems(
+        lambda d: d["tracks"][0]["instrument"].update(settings={"Transpose": 12}))
+    assert "settings go on its pads" in problems(lambda d: d["tracks"][1].update(settings={"Volume": -3}))
+    assert "a locator is at beat 4 already" in problems(
+        lambda d: d["locators"].append({"name": "Again", "beat": 4}))
+    assert "sidechain_from 'Kick' names no other track" in problems(
+        lambda d: d["tracks"][0].update(effects=[{"device": "Compressor", "sidechain_from": "Kick"}]))
+    assert problems(lambda d: d["tracks"][0].update(
+        effects=[{"device": "Compressor", "sidechain_from": "Drums (library)"}])) == ""
+    assert "keeps its file's format: name it .wav, not .aif" in problems(
+        lambda d: d["files"]["kick"].update(name="kick 820c5e7b.aif"))
+    assert problems(lambda d: d["files"]["kick"].update(name="kick 820c5e7b.WAV")) == ""
+
+
+def test_one_file_under_two_paths_is_one_copy():
+    data = fixture("short-beat")
+    data["files"]["kick2"] = {**data["files"]["kick"], "source": "elsewhere/kick.wav"}
+    assert bp.validate(data) == []
+    data["files"]["kick2"]["sha1"] = "00000000"
+    assert "names two different files" in " | ".join(bp.validate(data))
+    del data["files"]["kick2"]["sha1"]
+    assert "names two different files" in " | ".join(bp.validate(data))
+
+
+def test_a_blueprint_older_than_its_plan_is_refused(empty_live, tmp_path):
+    import hashlib
+    import shutil
+
+    folder = tmp_path / "song"
+    shutil.copytree(FIXTURES, folder)
+    plan = folder / "plan.json"
+    plan.write_text('{"tempo": 120}', encoding="utf-8")
+    data = fixture("short-beat")
+    data["meta"] = {"plan": "plan.json", "plan_sha1": hashlib.sha1(plan.read_bytes()).hexdigest()[:12]}
+    (folder / "blueprint.json").write_text(json.dumps(data), encoding="utf-8")
+    assert bp.plan_changed(data, folder) is None
+    plan.write_text('{"tempo": 121}', encoding="utf-8")
+    assert "plan.json changed after this blueprint" in bp.plan_changed(data, folder)
+    with pytest.raises(ToolError, match="plan.json changed after this blueprint"):
+        empty_live("build_from_blueprint", blueprint=str(folder))
+    assert bp.plan_changed(data, None) is None  # an object has no folder to compare with
+
+
+def test_tempo_and_audio_clips_are_read_back(empty_live, monkeypatch):
+    call = empty_live
+    song = call.simulator.song
+    original = type(song).__setattr__
+
+    def slow(self, name, value):  # a tempo Live does not take as sent
+        original(self, name, value - 1.0 if name == "tempo" else value)
+
+    monkeypatch.setattr(type(song), "__setattr__", slow)
+    report = call("build_from_blueprint", blueprint=str(FIXTURES / "short-beat.json"))
+    assert report["checks"]["tempo"] == {"want": 120.0, "live": 119.0, "same": False}
+    assert report["ok"] is False
+
+
+def test_an_audio_clip_live_leaves_warped_is_a_problem(empty_live, monkeypatch):
+    from MCP_Server import fake_live
+
+    call = empty_live
+    original = fake_live.FakeClip.__setattr__
+
+    def stays_warped(self, name, value):
+        if name == "warping" and getattr(self, "is_audio_clip", False):
+            value = True
+        original(self, name, value)
+
+    monkeypatch.setattr(fake_live.FakeClip, "__setattr__", stays_warped)
+    report = call("build_from_blueprint", blueprint=str(FIXTURES / "glide-and-stem.json"))
+    stem = next(t for t in report["tracks"] if t["track"] == "REF drums")
+    assert any("Live left it warped" in p for p in stem["problems"])
+    assert report["ok"] is False
+
+
+def test_a_missing_sample_path_is_found_before_the_build(tmp_path):
+    data = fixture("short-beat")
+    data["tracks"][0]["instrument"] = {"sample_path": str(tmp_path / "gone.wav"), "warping": False}
+    assert bp.validate(data) == []
+    assert any("no such file" in p and "gone.wav" in p for p in bp.check_sources(data, FIXTURES))
+
+
+def test_clips_that_start_inside_an_excerpt(tmp_path):
+    data = fixture("glide-and-stem")
+    rate = 8000
+    stem = tmp_path / "late.wav"
+    sf.write(str(stem), np.linspace(-0.5, 0.5, rate * 4, dtype=np.float32), rate, subtype="FLOAT")
+    bar, tempo = bp.bar_beats(data), float(data["tempo"])
+    data["length_beats"] = 4 * bar
+    data["tracks"].append({"name": "Late notes", "instrument": "Drift",
+                           "clips": [{"start": bar + 1, "length": 2, "notes": [
+                               {"pitch": 60, "start_time": 0.5, "duration": 4}]}]})
+    data["tracks"].append({"name": "REF late", "kind": "audio",
+                           "audio_clips": [{"file": str(stem), "start": bar + 1, "warping": False}]})
+    part = bp.excerpt(data, (2, 2), FIXTURES, tmp_path / "cut")
+    late = next(t for t in part["tracks"] if t["name"] == "Late notes")["clips"][0]
+    assert (late["start"], late["length"]) == (1, 2)  # the clip moves with the bar, notes stay in it
+    assert late["notes"] == [{"pitch": 60, "start_time": 0.5, "duration": 1.5}]
+    audio = next(t for t in part["tracks"] if t["name"] == "REF late")["audio_clips"][0]
+    assert audio["start"] == 1  # from the file's start, at the clip's place in the bar
+    frames = sf.info(audio["file"]).frames
+    assert frames == round((bar - 1) * 60 / tempo * rate)

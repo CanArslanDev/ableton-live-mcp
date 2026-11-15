@@ -185,9 +185,9 @@ def test_steps_run_part_of_the_chain_again(fake_refdissect):
     analyze = next(s for s in record["steps"] if s["name"] == "analyze")["argv"]
     assert analyze[-4:] == [str(work / "stems-htdemucs_ft"), "--work", str(work), "--slides"]
     again = call("dissect_reference", path=str(call.song), steps=["plan", "match"], model="htdemucs_ft")
-    assert again["steps"] == ["match", "plan"]
+    assert again["steps"] == ["match", "plan", "blueprint"]  # a new plan makes the old blueprint stale
     status = finish(call, again["job"])
-    assert status["state"] == "done" and set(status["seconds"]) == {"match", "plan"}
+    assert status["state"] == "done" and set(status["seconds"]) == {"match", "plan", "blueprint"}
 
 
 def test_what_a_dissection_needs_is_checked_before_it_starts(fake_refdissect):
@@ -348,8 +348,9 @@ def test_refdissect_runs_pinned_or_from_a_checkout(tmp_path, monkeypatch):
 
 def test_steps_and_progress():
     assert jobs.resolve_steps(None) == list(jobs.DISSECT_STEPS)
-    assert jobs.resolve_steps("plan, fit_808,match", melodic=False) == ["match", "fit-808", "plan"]
-    assert jobs.resolve_steps(["melodic", "plan"], melodic=False) == ["plan"]
+    assert jobs.resolve_steps("plan, fit_808,match", melodic=False) == ["match", "fit-808", "plan", "blueprint"]
+    assert jobs.resolve_steps(["match"]) == ["match"]
+    assert jobs.resolve_steps(["melodic", "plan"], melodic=False) == ["plan", "blueprint"]
     assert abs(sum(jobs.WEIGHTS.values()) - 1.0) < 1e-9
     record = {"steps": [{"name": n, "weight": jobs.WEIGHTS[n], "expected_s": jobs.TYPICAL_S[n]}
                         for n in jobs.DISSECT_STEPS]}
@@ -373,6 +374,10 @@ def test_doctor_names_the_refdissect_it_runs(tmp_path, monkeypatch):
     folder.mkdir(parents=True)
     (folder / "library.npz").write_bytes(b"x" * 3_000_000)
     assert "library index 3 MB" in doctor.check_reference_dissector()["detail"]
+    monkeypatch.setenv("ABLETON_MCP_PROFILE", "core")
+    assert "its tools are off: this server runs the core profile" in doctor.check_reference_dissector()["detail"]
+    monkeypatch.setenv("ABLETON_MCP_PROFILE", "full")
+    assert "its tools are off" not in doctor.check_reference_dissector()["detail"]
     monkeypatch.setenv("ABLETON_MCP_REFDISSECT", str(tmp_path / "nowhere"))
     check = doctor.check_reference_dissector()
     assert check["status"] == "warn" and "holds no pyproject.toml" in check["detail"]
@@ -511,3 +516,110 @@ def test_a_pid_another_process_took_is_not_the_job(fake_refdissect):
         stranger.kill()
         stranger.wait()
 
+
+
+@POSIX_ONLY
+def test_a_zombie_leader_alone_is_no_leftover(tmp_path):
+    import subprocess
+
+    # An unreaped runner: its group answers kill (Linux) or refuses it (macOS)
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    try:
+        wait_for(lambda: (jobs.process_line(process.pid) or "Z").startswith("Z"))
+        assert not jobs.group_alive(process.pid)
+        record = {"id": "dissect-20260101-000003", "pid": process.pid}
+        assert not jobs.is_runner(record) and not jobs.leftovers(record)
+    finally:
+        process.wait()
+    assert not jobs.group_alive(process.pid)
+
+
+@POSIX_ONLY
+def test_another_server_sees_a_running_job_and_cancels_it(fake_refdissect, monkeypatch):
+    call = fake_refdissect
+    library(call.tmp)
+    pidfile = call.tmp / "analyze.pid"
+    monkeypatch.setenv("FAKE_MODE", "slow")
+    monkeypatch.setenv("FAKE_PIDFILE", str(pidfile))
+    started = call("dissect_reference", path=str(call.song))
+    wait_for(pidfile.exists)
+    step_pid = int(pidfile.read_text())
+    runner = jobs._PROCESSES.pop(started["job"])  # as a server that did not start it sees it: ps only
+    try:
+        assert call("reference_job", job_id=started["job"], wait=0)["state"] == "running"
+        with pytest.raises(ToolError, match="is still running, and one job runs at a time"):
+            call("dissect_reference", path=str(call.song))
+        assert call("reference_job", job_id=started["job"], cancel=True)["state"] == "cancelled"
+        wait_for(lambda: not jobs.pid_alive(step_pid))
+        runner.wait(timeout=10)
+    finally:
+        if runner.poll() is None:
+            jobs._PROCESSES[started["job"]] = runner  # the fixture stops it
+
+
+@POSIX_ONLY
+def test_a_runner_deaf_to_sigterm_is_killed(fake_refdissect, monkeypatch):
+    import subprocess
+
+    call = fake_refdissect
+    job_id = "dissect-20260101-000004"
+    ready = call.tmp / "deaf.ready"
+    deaf = subprocess.Popen([sys.executable, "-c",
+                             "import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                             "pathlib.Path(sys.argv[3]).touch(); time.sleep(60)",
+                             jobs.RUNNER.name, f"{job_id}.json", str(ready)], start_new_session=True)
+    try:
+        now = time.time()
+        record = {"id": job_id, "kind": "dissect", "name": "Deaf", "work": str(call.tmp), "steps": [],
+                  "state": "running", "step": "analyze", "pid": deaf.pid, "created": now, "updated": now}
+        (call.tmp / "jobs").mkdir(exist_ok=True)
+        (call.tmp / "jobs" / f"{job_id}.json").write_text(json.dumps(record))
+        wait_for(ready.exists)  # SIGTERM ignored from here on
+        assert jobs.is_runner(record)
+        monkeypatch.setattr(jobs, "CANCEL_WAIT_S", 0.5)
+        assert call("reference_job", job_id=job_id, cancel=True)["state"] == "cancelled"
+        assert deaf.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        if deaf.poll() is None:
+            deaf.kill()
+            deaf.wait()
+
+
+def test_a_job_without_a_pid_is_starting_for_a_minute(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABLETON_MCP_JOBS_DIR", str(tmp_path / "jobs"))
+    (tmp_path / "jobs").mkdir()
+    for job_id, age in (("dissect-20260101-000005", 5), ("dissect-20260101-000006", jobs.STARTING_GRACE_S + 5)):
+        created = time.time() - age
+        (tmp_path / "jobs" / f"{job_id}.json").write_text(json.dumps(
+            {"id": job_id, "kind": "dissect", "work": str(tmp_path), "steps": [], "state": "starting",
+             "created": created, "updated": created}))
+    assert jobs.load("dissect-20260101-000005")["state"] == "starting"
+    assert jobs.load("dissect-20260101-000006")["state"] == "lost"
+
+
+def test_relative_paths_reach_refdissect_absolute(fake_refdissect, monkeypatch):
+    call = fake_refdissect
+    library(call.tmp)
+    monkeypatch.chdir(call.tmp)
+    started = call("dissect_reference", path="My Song.wav")
+    record = json.loads((call.tmp / "jobs" / f"{started['job']}.json").read_text())
+    assert record["steps"][0]["argv"][3] == str(call.song.resolve())
+    assert finish(call, started["job"])["state"] == "done"
+    (call.tmp / "Samples").mkdir()
+    indexed = call("index_sound_library", folders=["Samples"])
+    record = json.loads((call.tmp / "jobs" / f"{indexed['job']}.json").read_text())
+    assert str((call.tmp / "Samples").resolve()) in record["steps"][0]["argv"]
+    assert finish(call, indexed["job"])["state"] == "done"
+    monkeypatch.setenv("ABLETON_MCP_REFERENCE_DIR", "relative data")
+    assert jobs.data_dir() == (call.tmp / "relative data").resolve()
+
+
+def test_the_default_sound_folders(tmp_path, monkeypatch):
+    from MCP_Server import als
+
+    user, live = tmp_path / "User Library", tmp_path / "Live" / "Resources"
+    (live / "Core Library" / "Samples").mkdir(parents=True)
+    user.mkdir()
+    monkeypatch.setattr(als, "_user_libraries", lambda: [user, tmp_path / "gone"])
+    monkeypatch.setattr(als, "_live_resource_dirs", lambda: [live])
+    assert jobs.default_sound_folders() == [user, live / "Core Library" / "Samples"]

@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 2.4.0 — 2026-11-15
+
+The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
+The new tools are in the full profile: start the client with
+`ABLETON_MCP_PROFILE=full` in its environment (`ABLETON_MCP_PROFILE=full
+claude` in Claude Code; "full" under the extension's Tool set in Claude
+Desktop). `build_from_blueprint` was checked in Live 12.4.6 on 2026-11-14,
+through reference-dissector's `live-build`: an 8-bar excerpt and a whole
+song (10 tracks, 1,881 notes) built with clean read-backs and recorded equal,
+sample for sample, to its build through the browser. The jobs
+(`dissect_reference`, `index_sound_library`, `reference_job`) have run
+only with a stand-in for refdissect, not with the pinned one and its models.
 
 ### Added
 
@@ -25,10 +36,12 @@
     the files copied into the User Library (scaled to full scale where a
     file peaks over it), one `build_tracks` call, voices, locators, then
     read-backs of every Simpler's file, pad Volumes (sent again as text where
-    the number did not hold), choke groups, locators Live moved and the time
-    signature. `bars="9-16"` builds a short excerpt.
+    the number did not hold), choke groups, locators Live moved, the time
+    signature and the tempo. `bars="9-16"` builds a short excerpt. A
+    blueprint older than the plan beside it (`meta.plan_sha1`) is refused,
+    and a `plan` run again brings `blueprint` along.
 - refdissect is not a dependency: jobs run it in a uv environment of its own
-  (Python 3.12, pinned to reference-dissector 21d82d7;
+  (Python 3.12, pinned to reference-dissector 11a264c;
   `ABLETON_MCP_REFDISSECT=<checkout>` runs a local one), detached from the
   server in their own process group, with records in `~/.ableton-mcp/jobs/`
   (`ABLETON_MCP_JOBS_DIR`) and a `job.json` in the work folder. A job
@@ -38,21 +51,40 @@
   since is never taken for the job's. Data goes to `~/Music/Ableton
   MCP/Reference Dissector/` (`ABLETON_MCP_REFERENCE_DIR`), one folder per
   song named after its file (`(2)` for another file of the same name).
-  Measured on macOS with Apple Silicon only.
+  Paths reach refdissect absolute. Measured on macOS with Apple Silicon only.
 - **Blueprint v1** ([docs/blueprint-v1.md](docs/blueprint-v1.md)): a JSON
   format for a beat to build, with a JSON Schema
   (`MCP_Server/schemas/blueprint-v1.schema.json`), a validator
   (`MCP_Server.blueprint.validate`, `python -m MCP_Server.blueprint FILE`)
-  and three example blueprints in `tests/fixtures/blueprints/`.
+  and three example blueprints in `tests/fixtures/blueprints/`. Besides the
+  schema, the validator refuses what the build would ignore or fail on:
+  settings where `build_tracks` does not read them, a pitch outside MIDI's
+  0–127, two locators on one beat, a sidechain from no track of the
+  blueprint, a copy renamed to another format. File names take their
+  extension in any case; one file under two paths (same `sha1`) is one copy.
+  Scaled copies and cut stems are compared and named by their audio (a float
+  WAV's header carries the time it was written).
 - The `beat_like_reference` prompt (full profile) and a section of the
   compose-in-live skill chain the four tools with `render_and_analyze` and
   `compare_to_reference`.
 - `doctor` reports reference-dissector: the pinned commit or the local
-  checkout, uv, the library index's size and age, a job running.
+  checkout, uv, the library index's size and age, a job running, and that
+  its tools are off when the server runs the core profile.
 - The simulator's state shows each Drum Rack pad's chains (choke group,
   devices) and a Simpler's voices; the fake Simpler has the parameters the
   build sets (`Vol < Vel`, `Snap`, `F On`, `Ve Release`, `Glide Mode`,
-  `Glide Time`) and `voices`.
+  `Glide Time`, `Fade In`, `Fade Out`) and `voices`. As in Live 12.4.6, a
+  Simpler made with `insert_device` starts with a 0.1 ms Fade In and a pad
+  the browser loads at 0, playing at C3 (it played the pad's own note), so
+  a blueprint from reference-dissector (pads at `"Fade In": 0`) builds
+  cleanly in the simulator; before, the parameter was missing.
+
+### Changed
+
+- The setup skill, the README and Claude Desktop's Tool set option say that
+  the full profile also holds the reference-song tools, and how to turn it
+  on (`ABLETON_MCP_PROFILE=full claude` in Claude Code).
+- `jsonschema` is a dependency of its own (it came only through `mcp`).
 
 ### Tests
 
@@ -66,7 +98,13 @@
   too), a failed step, a refdissect without the `blueprint` command, lost
   jobs, a runner killed alone (its steps stopped by cancel), a pid another
   process took, songs of one name, the library index, a job built by its
-  id, doctor, the profile.
+  id, doctor, the profile; another server seeing a running job (through
+  `ps`) and cancelling it, a runner deaf to SIGTERM, an unreaped runner,
+  a job still starting, relative paths, the default folders.
+- `tests/test_blueprint.py` also: copies and stems kept across a second
+  (float WAV headers), a Volume that really refuses a number, the tempo and
+  an audio clip left warped read back, the validator's new refusals, a
+  blueprint older than its plan, clips that start inside an excerpt.
 - An eval case, `build-from-blueprint` (needs `ABLETON_MCP_PROFILE=full`):
   a finished job in the run's home, built into an empty simulated set.
 
@@ -76,6 +114,8 @@
   fresh environment resolves torch 2.15.0, whose stems on Apple GPUs (MPS)
   put the bass into "other" (measured by reference-dissector, which pins the
   same version).
+- `build_tracks` reports an audio clip Live left warped (asked unwarped) or
+  put at another beat, and the errors of setting it up, which it dropped.
 
 ## 2.3.0 — 2026-10-30
 
