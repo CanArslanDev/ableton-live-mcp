@@ -40,7 +40,7 @@ from typing import Any
 
 from .reference_runner import log_tail, write_json
 
-REFDISSECT_COMMIT = "f192456ce0834d5e50da014ed9842e49a92c3b84"
+REFDISSECT_COMMIT = "f907dd282249b2f6c9ba9d33a9130e9a52bbcac4"
 REFDISSECT_URL = ("https://github.com/CanArslanDev/reference-dissector/archive/"
                   f"{REFDISSECT_COMMIT}.zip")
 REFDISSECT_PYTHON = "3.12"  # refdissect needs 3.11+; the server runs on 3.10 too
@@ -49,7 +49,7 @@ RUNNER = Path(__file__).with_name("reference_runner.py")
 DISSECT_STEPS = ("separate", "analyze", "melodic", "match", "fit-808", "plan", "blueprint")
 # Each step's share of a job's progress, and its seconds on a 126 s song:
 # a dissect_reference job of PIRAMIT on an Apple M4 with the environments and
-# models already set up (2026-11-16, refdissect f192456), 224 s in all. The
+# models already set up (2026-11-16, refdissect f907dd2), 224 s in all. The
 # first run took 442 s: separate 111 (setup and model download), analyze 181,
 # melodic 68 (Basic Pitch's environment), the rest as here.
 WEIGHTS = {"separate": 0.06, "analyze": 0.53, "melodic": 0.05, "match": 0.14, "fit-808": 0.21,

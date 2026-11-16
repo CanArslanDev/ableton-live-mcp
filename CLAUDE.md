@@ -636,7 +636,7 @@ Not verified in Live (check each in a scratch set before claiming it):
   with `want`/`live`/`same`, `volumes.held_by_text`/`not_held`, `files`,
   `excerpt`, `ok`). These are an interface: change one only with
   refdissect, and say so in the CHANGELOG.
-- The jobs ran the pinned refdissect (f192456) for real on 2026-11-16, on
+- The jobs ran the pinned refdissect (f907dd2) for real on 2026-11-16, on
   an Apple M4: `index_sound_library` indexed 12,093 sounds in 33.8 s;
   `dissect_reference` took PIRAMIT (a 126 s mp3) apart in 442 s the first
   time (uv set up the environments, Demucs and Basic Pitch were fetched)
