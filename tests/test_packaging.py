@@ -171,3 +171,22 @@ def test_package_data_covers_every_non_python_file():
                and p.name != ".DS_Store"]
     missing = [f for f in shipped if not any(fnmatch.fnmatch(f, pattern) for pattern in patterns)]
     assert not missing, f"not in [tool.setuptools.package-data]: {missing}"
+
+
+def test_the_plugin_option_sets_the_profile_and_the_shell_still_wins(monkeypatch):
+    """The plugin passes its "profile" option as ABLETON_MCP_PROFILE_SAVED,
+    so a shell's ABLETON_MCP_PROFILE (the evals') still decides."""
+    from MCP_Server.tooling import active_profile
+
+    plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert plugin["mcpServers"]["ableton"]["env"] == {"ABLETON_MCP_PROFILE_SAVED": "${user_config.profile}"}
+    assert plugin["userConfig"]["profile"]["default"] == "core"
+    for shell, saved, expected in ((None, "full", "full"), ("core", "full", "core"), ("full", "core", "full"),
+                                   (None, None, "core"), ("", "full", "full"), (None, "${user_config.profile}", "core"),
+                                   (None, " FULL ", "full")):
+        for name, value in (("ABLETON_MCP_PROFILE", shell), ("ABLETON_MCP_PROFILE_SAVED", saved)):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        assert active_profile() == expected, (shell, saved)

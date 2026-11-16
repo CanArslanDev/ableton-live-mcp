@@ -31,6 +31,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          awk -v v="${GITHUB_REF_NAME#v}" 'index($0, "## " v) == 1 {f=1; next} /^## / && f {exit} f' CHANGELOG.md > notes.md
+          awk -v v="${GITHUB_REF_NAME#v}" '($0 == "## " v || index($0, "## " v " ") == 1) {f=1; next} /^## / && f {exit} f' CHANGELOG.md > notes.md
           if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
           gh release create "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz dist/*.mcpb --title "$GITHUB_REF_NAME" "${notes[@]}"

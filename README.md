@@ -138,13 +138,22 @@ one folder per song, named after its file), job records to `~/.ableton-mcp/jobs/
 [blueprint](docs/blueprint-v1.md), a JSON format anything can write.
 Measured on macOS with Apple Silicon only; 16 GB of RAM recommended (an
 analysis peaks at about 2 GB). Needs Live 12.4 to load samples by path
-(earlier versions go through the browser by file name). In Live 12.4.6 a
+(earlier versions go through the browser by file name). In Live 12.4.16 a
 whole song's blueprint (10 tracks, 1,881 notes) built in about 7 seconds
 and recorded the same, sample for sample, as reference-dissector's own build.
 
-To turn the full profile on in Claude Code, start it with the variable in its
-environment (`ABLETON_MCP_PROFILE=full claude`, or export it in your shell
-profile); in Claude Desktop, pick "full" under the extension's Tool set.
+To turn the full profile on:
+
+- Claude Code (the plugin): type `full` in the plugin's "Tool profile"
+  option (`/plugin`, Installed, ableton-live, Configure options) and start a
+  new session; or start Claude Code with the variable in its environment,
+  `ABLETON_MCP_PROFILE=full claude`, which wins over the option.
+- Claude Desktop (the extension): type `full` in the extension's "Tool set"
+  setting (the extension sets the variable itself; the shell's is not used).
+- An MCP client configured by hand: add `"env": {"ABLETON_MCP_PROFILE":
+  "full"}` to the server's entry, or `-e ABLETON_MCP_PROFILE=full` to
+  `claude mcp add`.
+
 `doctor` says when the server runs without these tools.
 
 ---

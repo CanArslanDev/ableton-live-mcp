@@ -13,7 +13,17 @@
   "mcpServers": {
     "ableton": {
       "command": "uv",
-      "args": ["run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--frozen", "--no-dev", "ableton-mcp"]
+      "args": ["run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--frozen", "--no-dev", "ableton-mcp"],
+      "env": {"ABLETON_MCP_PROFILE_SAVED": "${user_config.profile}"}
+    }
+  },
+  "userConfig": {
+    "profile": {
+      "type": "string",
+      "title": "Tool profile",
+      "description": "core: one tool per job (recommended). full: also the reference-song tools (make a beat like a song with reference-dissector) and the original tools newer ones replace. A shell's ABLETON_MCP_PROFILE overrides this.",
+      "default": "core",
+      "required": false
     }
   }
 }

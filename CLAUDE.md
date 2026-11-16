@@ -22,7 +22,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/server.py` | The shared connection and the original tools; registers `extended_tools` at the bottom. |
 | `MCP_Server/connection.py` | `AbletonConnection`: hello + token, line framing, reply ids, fallback to protocol 1 for scripts before 2.0. |
 | `MCP_Server/extended_tools.py` | All newer tools, written in terms of the generic commands (`lom_get/set/call`, `batch`, …). |
-| `MCP_Server/tooling.py` | `register_tool`: annotations, profiles (`ABLETON_MCP_PROFILE`), errors as MCP tool errors with their message, the MCP Apps panel a tool shows. |
+| `MCP_Server/tooling.py` | `register_tool`: annotations, profiles (`ABLETON_MCP_PROFILE`, else `ABLETON_MCP_PROFILE_SAVED`: the plugin's "Tool profile" option, so the shell's variable wins), errors as MCP tool errors with their message, the MCP Apps panel a tool shows. |
 | `MCP_Server/live_updates.py` | Pushes `ableton://events` / `ableton://session/overview` updates: `resources/subscribe` (2025-11-25) and `subscriptions/listen` (2026-07-28). Its long polls use a connection of their own (on the tools' one every command would queue behind them). |
 | `MCP_Server/ui/` | MCP Apps panels (`ui://` HTML resources) registered through the SDK's `Apps` extension. |
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
@@ -48,7 +48,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
-| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, `replace_sample`, Live's version: 12.4.6). Tests and the simulator use it. |
+| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, `replace_sample`, Live's version: 12.4.16). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
 | `evals/` | `claude plugin eval` suite: 33 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
@@ -450,7 +450,8 @@ the 808 with `capture_stems`:
   log), which the client sees as "Connection reset by peer". Each MCP
   server holds one, so eight sessions with the plugin fill it.
 
-Measured on 2026-11-14 (Live 12.4.6 Trial, 48 kHz device) by
+Measured on 2026-11-14 (Live 12.4.16 Trial, 48 kHz device; Live's own log:
+12.4.16 first ran that day at 16:02, 12.4.6 last on 2026-11-08) by
 reference-dissector's `live-build`, which builds a plan through
 `build_from_blueprint` (Simplers by path), against its `live-build
 --direct` (pads through the browser), each recorded with `capture_stems`:
@@ -616,7 +617,7 @@ Not verified in Live (check each in a scratch set before claiming it):
   client), calls `build_tracks` once, then reads back. Its steps follow
   refdissect's `live-build --direct` as measured in Live 12.4.6 (meter
   before locators, Volume as a number then as text, choke groups on the
-  chain, `voices` after the build). Checked in Live 12.4.6 on 2026-11-14
+  chain, `voices` after the build). Checked in Live 12.4.16 on 2026-11-14
   through refdissect's `live-build` (below, under replica mode).
 - refdissect's `live-build` (its `[live]` extra) imports `MCP_Server.server`
   after setting `ABLETON_MCP_PROFILE=full`, calls the tool in-process

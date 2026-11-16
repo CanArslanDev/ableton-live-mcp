@@ -13,8 +13,7 @@ jobs:
   test:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    # Windows has not been run yet; it reports without failing the build
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # Windows too (the jobs' process-group tests skip there: POSIX_ONLY)
     strategy:
       fail-fast: false
       matrix:

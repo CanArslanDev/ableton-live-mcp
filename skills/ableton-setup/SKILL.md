@@ -50,7 +50,10 @@ themselves and do not need export.
 `reference_job`, `index_sound_library`, `build_from_blueprint`) and the
 original upstream tools that newer tools replace (for prompts written against
 them). The default `core` profile has one tool per job. The server reads the
-variable from the client's environment: in Claude Code, start it as
-`ABLETON_MCP_PROFILE=full claude` (or export it in the shell profile); in
-Claude Desktop, pick "full" under the extension's Tool set. `doctor`'s
+variable from the client's environment: in Claude Code, type `full` in the
+plugin's "Tool profile" option (`/plugin`, Configure options, then a new
+session), or start it as `ABLETON_MCP_PROFILE=full claude`, which wins; in
+Claude Desktop, type `full` in the extension's "Tool set" setting (it
+overrides the environment there); a hand-written client config takes
+`"env": {"ABLETON_MCP_PROFILE": "full"}`. `doctor`'s
 reference-dissector line says when the server runs without them.

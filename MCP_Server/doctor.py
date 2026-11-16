@@ -291,9 +291,11 @@ def check_reference_dissector() -> dict:
                       "Point ABLETON_MCP_REFDISSECT at a reference-dissector checkout, or unset "
                       "it to run the pinned version.")
     parts = [source["describe"]]
+    no_uv = False
     try:
         uv_executable()
     except RuntimeError:
+        no_uv = True
         parts.append("uv not found (the reference tools set refdissect up with it)")
     library = jobs.library_dir()
     index = library / "library.npz"
@@ -310,9 +312,12 @@ def check_reference_dissector() -> dict:
     if not (sys.platform == "darwin" and platform.machine() == "arm64"):
         parts.append("measured on macOS with Apple Silicon only")
     if active_profile() != "full":
-        parts.append(f"its tools are off: this server runs the {active_profile()} profile "
-                     "(start the client with ABLETON_MCP_PROFILE=full in its environment)")
-    return _check("reference-dissector", "info", "; ".join(parts))
+        parts.append(f"its tools are off: this server runs the {active_profile()} profile (Claude Code: "
+                     "type full in the plugin's Tool profile option, or start it with "
+                     "ABLETON_MCP_PROFILE=full in its environment; Claude Desktop: type "
+                     "full in the extension's Tool set; a client config: env ABLETON_MCP_PROFILE=full)")
+    return _check("reference-dissector", "warn" if no_uv else "info", "; ".join(parts),
+                  "Install uv (https://docs.astral.sh/uv/) and restart the MCP client." if no_uv else None)
 
 
 def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
