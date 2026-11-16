@@ -74,7 +74,7 @@ run by `dissect_reference` as its last step); anything else may write one too.
 | `tempo` | required | BPM, 20–999 |
 | `time_signature` | required | `"N/D"`: N 1–99 over 1, 2, 4, 8 or 16 |
 | `length_beats` | optional | the song's length in quarter beats; `bars=` cuts within it (without it: the end of the last MIDI clip). Locators must fall before it |
-| `locators` | optional | `{"name", "beat"}`, beats from 0. Give whole beats: Live refused fractional ones (an excerpt of a meter in eighths can shift locators off whole beats; one Live does not place is reported under `locators_moved`) |
+| `locators` | optional | `{"name", "beat"}`, beats from 0, one per beat. Whole beats are safest: Live snaps a new cue to the Arrangement's grid, which follows the zoom, so the build zooms in first (in Live 12.4.16, about 30 steps in, an eighth of a beat landed exactly); one Live does not place is reported under `locators_moved` |
 | `files` | optional | the files to copy into the User Library, by a key the samplers name (below) |
 | `tracks` | required | at least one; names unique |
 | `checks` | optional | read-backs after the build, each on unless `false` |
@@ -157,7 +157,7 @@ one beat each (Live keeps one cue per beat).
 | `samples` | every sampler with `file` or `sample_path`: the file its Simpler holds, compared by content (SHA-1) with the copy (or the `sample_path`) |
 | `volumes` | every sampler whose `settings.Volume` is a number: the parameter's value within 0.001 dB, and its display the dB rounded to the digits it shows (two decimals from −10 dB up, one below). One that does not hold is sent again as display text (`"-6.6 dB"`), Live's way before, and counts as held by text within 0.06 dB (Live 12.4.6 held "-6.6 dB" as −6.605) |
 | `choke_groups` | every pad with a `choke_group`: its chain's group, set again once where it differs |
-| `locators` | a cue Live put at a beat nobody asked for (it snaps new cues to the Arrangement's grid, which depends on the zoom) is deleted and listed under `locators_moved`, with the beat asked and the beat Live chose |
+| `locators` | a cue Live put at a beat nobody asked for (it snaps new cues to the Arrangement's grid, which depends on the zoom) is deleted, still zoomed in, and listed under `locators_moved` with the beat asked and the beat Live chose; one whose playhead Live refused (past the song's end) is listed with `live` null |
 | `voices` | the Simpler's voices after setting them |
 
 ## What `build_from_blueprint` does
@@ -180,8 +180,12 @@ one beat each (Live keeps one cue per beat).
 5. Copies the files into the User Library.
 6. Calls `build_tracks` once with the spec (samplers pointed at their copies).
    If it stops, the error says where and which tracks it left in the set.
-7. Sets `voices`, places the locators, runs the checks, moves the playhead to
-   0 and shows the Arrangement. An audio clip Live left warped (when the
+7. Sets `voices` and places the locators: it shows the Arrangement, zooms it
+   in 30 `zoom_view` steps, then for each locator moves the playhead in a
+   call of its own, reads it back and toggles the cue in the next call;
+   afterwards it zooms out by as many steps, which restores the view only
+   roughly (Live's zoom stops at its limits). Then it runs the checks, moves
+   the playhead to 0 and shows the Arrangement. An audio clip Live left warped (when the
    blueprint says `"warping": false`) or put elsewhere is one of its track's
    `problems`.
 

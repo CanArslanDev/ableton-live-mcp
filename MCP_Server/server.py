@@ -962,7 +962,9 @@ def create_locator(
 
     If a locator already exists at that beat (within ~1e-3 tolerance) it is
     renamed instead of toggled off. Time is in beats from the start of the
-    arrangement (e.g. 0.0 = start, 16.0 = bar 5 in 4/4).
+    arrangement (e.g. 0.0 = start, 16.0 = bar 5 in 4/4). Shows the
+    Arrangement and zooms it in while placing (Live snaps cues to its grid),
+    then back out.
 
     Parameters:
     - name: The locator label (e.g. "Chorus", "Verse 1", "Drop")

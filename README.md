@@ -332,7 +332,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 
 ```bash
 uv sync
-uv run --with pytest pytest -q            # 449 tests, no Live or models required
+uv run --with pytest pytest -q            # 454 tests, no Live or models required
 (cd extension && npm ci && npm test)       # the Extensions SDK add-on
 uvx ruff check .
 uv run python packaging/build_mcpb.py     # dist/ableton-live-mcp-<version>.mcpb
