@@ -820,12 +820,38 @@ class FakeSong(FakeObj):
     def get_data(self, key, default):
         return vars(self).get("_data", {}).get(key, default)
 
+    # The Arrangement's horizontal zoom, in zoom_view steps from the default
+    # (positive: in). A model, not a measurement: Live 12.4 snapped cues at
+    # beats 9, 21 and 33 to 8, 20 and 32 in 4/4 and to 12, 24 and 36 in 3/4 at
+    # its default zoom, placed beat 9 of 3/4 exactly after 4 steps in and an
+    # eighth of a beat after ~30. Here the grid starts at the fewest bars
+    # (1, 2, 4, …) that span 4 beats, halves every two steps in down to
+    # 1/64 beat, and the zoom stops at ZOOM_STEPS either way.
+    ZOOM_STEPS = (-12, 40)
+
+    def arranger_zoom(self, steps):
+        low, high = self.ZOOM_STEPS
+        level = vars(self).get("_arranger_zoom", 0) + steps
+        object.__setattr__(self, "_arranger_zoom", max(low, min(high, level)))
+
+    def arranger_grid(self):
+        """The beats a new cue snaps to at the Arrangement's zoom."""
+        bar = vars(self).get("signature_numerator", 4) * 4.0 / vars(self).get("signature_denominator", 4)
+        grid = bar
+        while grid < 4.0:
+            grid *= 2
+        return max(grid / 2 ** (vars(self).get("_arranger_zoom", 0) // 2), 1.0 / 64)
+
     def set_or_delete_cue(self):
-        here = [c for c in self.cue_points if c.time == self.current_song_time]
+        """Toggles a cue at the playhead, snapped to the Arrangement's grid
+        (to the nearest line, a tie upwards)."""
+        grid = self.arranger_grid()
+        at = math.floor(self.current_song_time / grid + 0.5) * grid
+        here = [c for c in self.cue_points if c.time == at]
         if here:
             self.cue_points.remove(here[0])
         else:
-            self.cue_points.append(FakeObj(name="", time=self.current_song_time))
+            self.cue_points.append(FakeObj(name="", time=at))
 
     def create_midi_track(self, index):
         track = FakeTrack("%d-MIDI" % (len(self.tracks) + 1))
@@ -884,9 +910,11 @@ class FakeSong(FakeObj):
 
 
 class FakeAppView(FakeObj):
-    """Application.view: which views were shown or focused, in order."""
-    def __init__(self):
+    """Application.view: which views were shown or focused, in order, and the
+    Arrangement's zoom (on the song, whose cues snap to its grid)."""
+    def __init__(self, song=None):
         super(FakeAppView, self).__init__(shown=[])
+        object.__setattr__(self, "_song", song)
 
     def show_view(self, name):
         self.shown.append(name)
@@ -897,13 +925,20 @@ class FakeAppView(FakeObj):
     def is_view_visible(self, name):
         return name in self.shown
 
+    def zoom_view(self, direction, view_name, modifier_pressed):
+        # 3 zooms the Arranger in horizontally, 2 out (Live 12.4.16); 0 and 1
+        # change track heights only
+        if view_name == "Arranger" and direction in (2, 3) and self._song is not None:
+            self._song.arranger_zoom(1 if direction == 3 else -1)
+
 
 class FakeApplication(FakeObj):
     """Live's Application: its view, the browser and the version (12.4.6
     unless given)."""
 
     def __init__(self, browser, version=(12, 4, 6)):
-        super(FakeApplication, self).__init__(view=FakeAppView(), browser=browser)
+        view = FakeAppView(getattr(browser, "song", None))
+        super(FakeApplication, self).__init__(view=view, browser=browser)
         object.__setattr__(self, "_version", tuple(version))
 
     def get_major_version(self):

@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.4.1 — 2026-11-16
+
+The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
+
+### Fixed
+
+- **Locators land where they are asked.** Live snaps a new cue to the
+  Arrangement's grid, which follows its horizontal zoom: at the default zoom
+  beat 9 of a 3/4 song became 12. `create_locator`, `build_arrangement` and
+  `build_from_blueprint` now show the Arrangement and zoom it in 30
+  `zoom_view` steps before placing cues (in Live 12.4.16, about 30 steps in,
+  an eighth of a beat landed exactly), then zoom out by as many, which
+  restores the view only roughly. Each cue's playhead is read back before
+  the cue is toggled; one Live refuses (past the song's end) places nothing
+  and says where the playhead stayed. `build_from_blueprint` deletes the
+  locators Live still moved while zoomed in (`locators_moved`, unchanged).
+  Checked in Live 12.4.16: a 3/4 build placed locators on beats 0, 9, 21,
+  33 and 45 exactly, and `create_locator` with the Session view in front
+  placed 15 and 40.5.
+- The simulator's Live snaps cues to a grid that follows `zoom_view`
+  (a model of the measurements, not one of them).
+
 ## 2.4.0 — 2026-11-15
 
 The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.

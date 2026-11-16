@@ -335,26 +335,101 @@ def test_a_volume_held_is_not_sent_again_for_its_display():
     assert bp.volume_held(-3.0, -3.0, None)
 
 
-def test_locators_live_moves_are_deleted_and_reported(empty_live, monkeypatch):
+def test_locators_live_moves_are_deleted_and_reported(empty_live):
     call = empty_live
-    song = call.simulator.song
-    original = type(song).set_or_delete_cue
-
-    def on_the_bar_grid(self):  # Live snaps a new cue to the Arrangement's grid (zoomed out: bars)
-        position = self.current_song_time
-        self.current_song_time = 4.0 * round(position / 4.0)
-        original(self)
-        self.current_song_time = position
-
-    monkeypatch.setattr(type(song), "set_or_delete_cue", on_the_bar_grid)
     data = fixture("short-beat")
-    data["locators"].append({"name": "C (2.3)", "beat": 6.5})  # 6.5 snaps to 8
+    # a third of a beat is off even the finest grid (the fake's: 1/64 beat), so Live moves it
+    data["locators"].append({"name": "C (2.3)", "beat": 6 + 1 / 3})
     data["length_beats"] = 12
     data = absolute(data)
     report = call("build_from_blueprint", blueprint=data)
-    assert report["locators_moved"] == [{"name": "C (2.3)", "asked": 6.5, "live": 8.0, "deleted": True}]
+    assert report["locators_moved"] == [{"name": "C (2.3)", "asked": pytest.approx(6 + 1 / 3),
+                                         "live": 405 / 64, "deleted": True}]
     assert report["ok"] is False
     assert [c["time"] for c in call.simulator.state()["locators"]] == [0, 4]
+
+
+def test_the_fake_snaps_cues_to_the_grid_of_the_zoom():
+    from MCP_Server import fake_live
+
+    song = fake_live.FakeSong()
+    song.cue_points = []
+    app = fake_live.FakeApplication(fake_live.FakeBrowser(song))
+
+    def cue(at):
+        song.current_song_time = at
+        song.set_or_delete_cue()
+        return song.cue_points[-1].time
+
+    assert [cue(b) for b in (9.0, 21.0, 33.0)] == [8.0, 20.0, 32.0]   # 4/4, default zoom (Live 12.4.6)
+    song.cue_points = []
+    song.signature_numerator, song.signature_denominator = 3, 4
+    assert [cue(b) for b in (9.0, 21.0, 33.0)] == [12.0, 24.0, 36.0]
+    for _ in range(4):
+        app.view.zoom_view(3, "Arranger", False)
+    song.cue_points = []
+    assert cue(9.0) == 9.0                                             # 4 steps in
+    for _ in range(26):
+        app.view.zoom_view(3, "Arranger", False)
+    assert cue(10.125) == 10.125                                       # ~30: an eighth of a beat
+    app.view.zoom_view(0, "Arranger", False)                           # track heights only
+    for _ in range(30):
+        app.view.zoom_view(2, "Arranger", False)
+    assert song.arranger_grid() == 6.0
+
+
+def test_locators_land_exactly_zoomed_in_and_the_zoom_goes_back(empty_live):
+    call = empty_live
+    song = call.simulator.song
+    data = absolute(fixture("short-beat"))
+    data["time_signature"], data["length_beats"] = "3/4", 48
+    data["locators"] = [{"name": n, "beat": b} for n, b in
+                        (("A", 0), ("B", 9), ("C", 21), ("D", 33), ("E", 45))]
+    report = call("build_from_blueprint", blueprint=data)
+    assert report["locators"] == 5 and "locators_moved" not in report, report
+    assert [(c["name"], c["time"]) for c in call.simulator.state()["locators"]] == [
+        ("A", 0), ("B", 9), ("C", 21), ("D", 33), ("E", 45)]
+    assert vars(song).get("_arranger_zoom", 0) == 0
+    assert "Arranger" in call.simulator.surface.application().view.shown
+
+
+def test_without_the_zoom_live_would_move_them(empty_live):
+    call = empty_live
+    song = call.simulator.song
+    song.signature_numerator, song.signature_denominator = 3, 4
+    placed = extended_tools.place_locators([("B", 9.0)], zoom=False)
+    assert placed == [{"name": "B", "time": 9.0, "error": "Live did not create it"}]
+    assert [c.time for c in song.cue_points] == [12.0]
+
+
+def test_a_playhead_live_refuses_places_no_cue(empty_live, monkeypatch):
+    call = empty_live
+    song = call.simulator.song
+    prop = type(song).current_song_time
+
+    def refuse_past_the_end(self, value):  # Live keeps the playhead where it was
+        if value <= 40.0:
+            prop.fset(self, value)
+
+    monkeypatch.setattr(type(song), "current_song_time", property(prop.fget, refuse_past_the_end))
+    song.current_song_time = 2.0
+    placed = extended_tools.place_locators([("A", 8.0), ("End", 50.0)])
+    assert placed == [{"name": "A", "time": 8.0}, {
+        "name": "End", "time": 50.0,
+        "error": "Live kept the playhead at beat 8 (a time past the song's end is refused)"}]
+    assert [(c.name, c.time) for c in song.cue_points] == [("A", 8.0)]
+    assert song.current_song_time == 2.0
+
+
+def test_create_locator_off_the_bar_lands(empty_live):
+    call = empty_live
+    song = call.simulator.song
+    song.signature_numerator, song.signature_denominator = 3, 4
+    # create_locator is one of server.py's own tools; beat 9 is a bar line the default grid misses
+    result = asyncio.run(live_server.mcp.call_tool("create_locator", {"name": "Drop", "time": 9.0}))
+    assert "beat 9.0" in result.content[0].text, result.content[0].text
+    assert [(c.name, c.time) for c in song.cue_points] == [("Drop", 9.0)]
+    assert vars(song).get("_arranger_zoom", 0) == 0
 
 
 def test_a_relative_blueprint_path_gives_live_absolute_files(empty_live, monkeypatch):
