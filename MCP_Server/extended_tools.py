@@ -3123,8 +3123,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         stems, tempo grid, sections, drum hits matched to the user's samples,
         the 808, melodic notes, and a blueprint to build it with. Returns a job
         id at once: follow it with reference_job, then build_from_blueprint.
-        About 5 minutes for a 2-minute song on Apple Silicon (the first run
-        sets up ~2 GB); index_sound_library must have run once.
+        About 4 minutes for a 2-minute song on Apple Silicon (the first run
+        about 7, as it sets up ~2 GB); index_sound_library must have run once.
 
         - path: an audio file, or track + clip_index / arrangement_clip_index
         - model: Demucs model (htdemucs | htdemucs_ft | htdemucs_6s)
@@ -3156,8 +3156,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     async def index_sound_library(folders: list[str] | None = None) -> str:
         """Index the user's samples for dissect_reference to match drum sounds
         and 808s against, as a job (refdissect inventory, index-library and its
-        808 index): once, and again when the library changes. About a minute
-        per 9,000 sounds on Apple Silicon after the first run's setup. Returns
+        808 index): once, and again when the library changes. About 35 s for
+        12,000 sounds on Apple Silicon after the first run's setup. Returns
         a job id: follow it with reference_job.
 
         folders: default the User Library and Live's Core Library samples.

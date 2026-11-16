@@ -358,10 +358,11 @@ def test_steps_and_progress():
     assert abs(sum(jobs.WEIGHTS.values()) - 1.0) < 1e-9
     record = {"steps": [{"name": n, "weight": jobs.WEIGHTS[n], "expected_s": jobs.TYPICAL_S[n]}
                         for n in jobs.DISSECT_STEPS]}
-    estimates = [reference_runner.estimate(record, 1, t) for t in (0, 30, 158, 10_000)]
-    assert estimates == sorted(estimates) and estimates[0] == 0.05
-    assert estimates[-1] == round(0.05 + 0.5 * 0.95, 4)  # never a step's whole share before it ends
-    assert reference_runner.estimate(record, 2, 0) == 0.55
+    first, second = jobs.WEIGHTS["separate"], jobs.WEIGHTS["analyze"]
+    estimates = [reference_runner.estimate(record, 1, t) for t in (0, 30, 118, 10_000)]
+    assert estimates == sorted(estimates) and estimates[0] == first
+    assert estimates[-1] == round(first + second * 0.95, 4)  # never a step's whole share before it ends
+    assert reference_runner.estimate(record, 2, 0) == round(first + second, 4)
     assert reference_runner.estimate({"steps": [{"name": "blueprint", "weight": 0.0}]}, 1, 0) == 1.0
     assert jobs.folder_name('a/b: "c"?') == "a_b_ _c_" and jobs.folder_name("Library") == "Library (song)"
 

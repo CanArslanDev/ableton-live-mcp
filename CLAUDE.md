@@ -598,7 +598,7 @@ Not verified in Live (check each in a scratch set before claiming it):
   wiring and (with node) that every panel's script parses; check the look in
   a real or mock host (headless Chrome) after changing a panel.
 
-## Reference jobs and blueprints (`build_from_blueprint` checked in Live; the jobs not yet run with real refdissect)
+## Reference jobs and blueprints (run with the pinned refdissect and built in Live 12.4.16)
 
 - refdissect runs as `uv run --isolated --no-project --python 3.12 --with
   "reference-dissector @ <archive of REFDISSECT_COMMIT>" refdissect …`
@@ -636,10 +636,19 @@ Not verified in Live (check each in a scratch set before claiming it):
   with `want`/`live`/`same`, `volumes.held_by_text`/`not_held`, `files`,
   `excerpt`, `ok`). These are an interface: change one only with
   refdissect, and say so in the CHANGELOG.
-- The jobs themselves (`dissect_reference`, `index_sound_library`,
-  `reference_job`) have not yet run refdissect for real (uv, the pinned
-  archive, Demucs and the models); only the stand-in below. Paths go to
-  refdissect absolute (its steps run in the work or library folder).
+- The jobs ran the pinned refdissect (f192456) for real on 2026-11-16, on
+  an Apple M4: `index_sound_library` indexed 12,093 sounds in 33.8 s;
+  `dissect_reference` took PIRAMIT (a 126 s mp3) apart in 442 s the first
+  time (uv set up the environments, Demucs and Basic Pitch were fetched)
+  and in 224 s on a copy afterwards, with the same plan (565 drum notes on
+  11 pads, 95 808 notes, 553 and 499 melodic notes, 8 sections).
+  `TYPICAL_S` and `INDEX_TYPICAL_S` are those runs. Then
+  `build_from_blueprint(blueprint=<job id>)` built it in Live 12.4.16 in
+  under 5 s with every read-back clean (12 samples, 11 pad Volumes as
+  numbers, 8 locators exact, 4/4 and the tempo), and the four unwarped
+  reference stems still started at 0 once Live had written their .asd
+  files. Paths go to refdissect absolute (its steps run in the work or
+  library folder).
 - A rerun `plan` brings `blueprint` along; a blueprint file whose
   `meta.plan_sha1` no longer matches its `plan.json` is refused
   (`blueprint.plan_changed`).

@@ -47,20 +47,23 @@ REFDISSECT_PYTHON = "3.12"  # refdissect needs 3.11+; the server runs on 3.10 to
 RUNNER = Path(__file__).with_name("reference_runner.py")
 
 DISSECT_STEPS = ("separate", "analyze", "melodic", "match", "fit-808", "plan", "blueprint")
-# Each step's share of a job's progress, and its seconds on a 126 s song
-# (PIRAMIT on an Apple M4, warm): separate ~15 s, analyze 158 s, match 58 s,
-# fit-808 44 s (melodic and plan were not timed with them)
-WEIGHTS = {"separate": 0.05, "analyze": 0.50, "melodic": 0.10, "match": 0.20, "fit-808": 0.14,
+# Each step's share of a job's progress, and its seconds on a 126 s song:
+# a dissect_reference job of PIRAMIT on an Apple M4 with the environments and
+# models already set up (2026-11-16, refdissect f192456), 224 s in all. The
+# first run took 442 s: separate 111 (setup and model download), analyze 181,
+# melodic 68 (Basic Pitch's environment), the rest as here.
+WEIGHTS = {"separate": 0.06, "analyze": 0.53, "melodic": 0.05, "match": 0.14, "fit-808": 0.21,
            "plan": 0.01, "blueprint": 0.0}
-TYPICAL_S = {"separate": 15, "analyze": 158, "melodic": 30, "match": 58, "fit-808": 44, "plan": 3,
+TYPICAL_S = {"separate": 14, "analyze": 118, "melodic": 10, "match": 32, "fit-808": 46, "plan": 3,
              "blueprint": 2}
 TYPICAL_SONG_S = 126.0
 # refdissect commands a job may meet missing in an older refdissect: skipped, not failed
 OPTIONAL_STEPS = {"blueprint"}
 INDEX_STEPS = ("inventory", "index", "index-808")
-# index-library took 52 s for 8,853 sounds (reference-dissector docs/12); the others are guesses
-INDEX_WEIGHTS = {"inventory": 0.10, "index": 0.75, "index-808": 0.15}
-INDEX_TYPICAL_S = {"inventory": 20, "index": 52, "index-808": 15}
+# An index_sound_library job over 12,093 sounds (User Library and Core Library,
+# Apple M4, 2026-11-16): inventory 9.2 s, index-library 20.4 s, its 808 index 4.1 s
+INDEX_WEIGHTS = {"inventory": 0.27, "index": 0.61, "index-808": 0.12}
+INDEX_TYPICAL_S = {"inventory": 9, "index": 20, "index-808": 4}
 # What each step writes in the work folder, and what it needs there first
 OUTPUTS = {"analyze": "analysis.json", "melodic": "melodic.json", "match": "matches.json",
            "fit-808": "synth808.json", "plan": "plan.json", "blueprint": "blueprint.json"}

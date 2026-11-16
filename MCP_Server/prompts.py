@@ -176,7 +176,8 @@ on this computer and were measured on macOS with Apple Silicon only.
 2. dissect_reference(path="{reference_path}") starts the analysis and returns a job
    id. If it says there is no sound library index, run index_sound_library() first
    (once; minutes) and follow that job to the end. Tell the user the analysis takes
-   about 5 minutes for a 2-minute song, and that the first run downloads ~2 GB.
+   about 4 minutes for a 2-minute song, and that the first run downloads ~2 GB
+   (about 7 minutes then).
 3. reference_job(job_id=<id>, wait=20) until the state is done; one line per step.
    If it failed or was lost, show the error and the log lines, and offer to run it
    again (steps= picks up from the files already written).
