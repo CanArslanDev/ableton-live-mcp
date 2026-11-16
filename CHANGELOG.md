@@ -4,7 +4,7 @@
 
 ### Changed
 
-- **The reference jobs ran with the real refdissect** (the pinned f192456,
+- **The reference jobs ran with the real refdissect** (the pinned f907dd2,
   Apple M4, 2026-11-16): `index_sound_library` over 12,093 sounds took
   33.8 s; `dissect_reference` of a 126 s song 442 s the first time (setup
   and model downloads included) and 224 s once set up, with the same
@@ -13,6 +13,13 @@
   `dissect_reference` and `index_sound_library` give now follow those
   runs: about 4 minutes for a 2-minute song (5 before), about 35 s for
   12,000 sounds (a minute per 9,000 before).
+- **The jobs run reference-dissector f907dd2** (was f192456). Its history
+  was rewritten on 2026-11-16 to drop the Co-Authored-By and Claude-Session
+  lines from its commit messages; every commit kept its files, author and
+  date, so f907dd2 holds exactly f192456's files and the jobs install the
+  same code. The old ids are on no branch any more. Those named in this
+  changelog are now: f192456 → f907dd2, 11a264c → 76ce377, 2245889 →
+  ca048c4, 21d82d7 → f8eff5a.
 
 ## 2.4.2 — 2026-11-16
 
