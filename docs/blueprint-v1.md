@@ -157,7 +157,7 @@ one beat each (Live keeps one cue per beat).
 | `samples` | every sampler with `file` or `sample_path`: the file its Simpler holds, compared by content (SHA-1) with the copy (or the `sample_path`) |
 | `volumes` | every sampler whose `settings.Volume` is a number: the parameter's value within 0.001 dB, and its display the dB rounded to the digits it shows (two decimals from −10 dB up, one below). One that does not hold is sent again as display text (`"-6.6 dB"`), Live's way before, and counts as held by text within 0.06 dB (Live 12.4.6 held "-6.6 dB" as −6.605) |
 | `choke_groups` | every pad with a `choke_group`: its chain's group, set again once where it differs |
-| `locators` | a cue Live put at a beat nobody asked for (it snaps new cues to the Arrangement's grid, which depends on the zoom) is deleted, still zoomed in, and listed under `locators_moved` with the beat asked and the beat Live chose; one whose playhead Live refused (past the song's end) is listed with `live` null |
+| `locators` | a cue Live put at a beat nobody asked for (it snaps new cues to the Arrangement's grid, which depends on the zoom) is deleted, still zoomed in, and listed under `locators_moved` with the beat asked and the beat Live chose (the playhead moved there and read back first: one Live keeps elsewhere leaves the cue, with `playhead` where it stayed and `deleted` false); one whose playhead Live refused (past the song's end) is listed with `live` null. `zoom_errors` says when zooming in failed |
 | `voices` | the Simpler's voices after setting them |
 
 ## What `build_from_blueprint` does
@@ -174,7 +174,8 @@ one beat each (Live keeps one cue per beat).
    blueprint, each named by its audio (a file that ends before the excerpt
    is left out). A warped audio clip cannot be cut at the tempo alone, so
    `bars` refuses a blueprint that has one.
-3. Refuses a set that is not empty (a track with a device or a clip).
+3. Refuses a set that is not empty (a track with a device or a clip, or a
+   locator: one at a beat the blueprint asks for would be renamed).
 4. Sets the tempo and the time signature (before any locator: Live snaps
    cues to the meter's grid).
 5. Copies the files into the User Library.

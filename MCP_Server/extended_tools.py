@@ -758,16 +758,73 @@ def arrangement_zoomed_in(steps: int = ARRANGER_ZOOM_STEPS):
     horizontal zoom: at the default zoom beat 9 of a 3/4 song became 12, and
     ~30 `zoom_view` steps in (Live 12.4.16) an eighth of a beat landed
     exactly. The zoom goes out by as many steps afterwards, which restores
-    the view only roughly: Live's zoom stops at its limits.
+    the view only roughly: Live's zoom stops at its limits. Yields the
+    errors of showing and zooming (none where it worked): cues placed after
+    a zoom that failed may snap, which delete_strays then finds.
     """
     def zoom(direction: int) -> list[dict]:  # 3 in, 2 out
         return [op_call("live_app view", "zoom_view", direction, "Arranger", False)] * steps
 
-    batch([op_call("live_app view", "show_view", VIEWS["arrangement"])] + zoom(3), stop_on_error=False)
+    done = batch([op_call("live_app view", "show_view", VIEWS["arrangement"])] + zoom(3), stop_on_error=False)
+    errors = sorted({str(step.get("message") or step.get("error") or "failed")
+                     for step in (done or {}).get("results", []) if step.get("status") == "error"})
     try:
-        yield
+        yield errors
     finally:
         batch(zoom(2), stop_on_error=False)
+
+
+def _playhead() -> float:
+    return float(lom_get("live_set", ["current_song_time"])["current_song_time"])
+
+
+def _move_playhead(at: float) -> float | None:
+    """Move the playhead in a call of its own and read it back (it is not in
+    effect within the call that sets it; Live refuses a time past the
+    song's end): None once it is there, else where Live kept it."""
+    send("lom_set", {"path": "live_set", "property": "current_song_time", "value": at})
+    now = at
+    for _ in range(3):
+        time.sleep(0.05)
+        now = _playhead()
+        if abs(now - at) < 1e-3:
+            return None
+    return now
+
+
+def delete_strays(placed: list[dict], before: list[float]) -> list[dict]:
+    """The locators Live did not make where asked: a cue at a beat neither
+    asked for nor in the set before (Live snapped it to the Arrangement's
+    grid, which depends on the zoom) is deleted, by moving the playhead
+    there (read back) and toggling it in the next call, and listed with the
+    beat asked (the nearest failed one) and Live's. A stray whose playhead
+    Live keeps elsewhere is left where it is: a toggle at the kept playhead
+    would delete another cue or make one. The playhead goes back."""
+    asked = [p["time"] for p in placed]
+    cues = lom_get("live_set cue_points", ["name", "time"])["items"]
+    stray = [c for c in cues if all(abs(c["time"] - t) > 1e-3 for t in asked + list(before))]
+    failed = [p for p in placed if p.get("error")]
+    out = []
+    original = _playhead() if stray else None
+    for cue in stray:
+        near = min(failed, key=lambda p: abs(p["time"] - cue["time"]), default=None)
+        if near is not None:
+            failed.remove(near)
+        row = {"name": near["name"] if near else cue["name"], "asked": near["time"] if near else None,
+               "live": cue["time"]}
+        kept = _move_playhead(float(cue["time"]))
+        if kept is None:
+            send("lom_call", {"path": "live_set", "method": "set_or_delete_cue"})
+        else:
+            row["playhead"] = kept
+        out.append(row)
+    out += [{"name": p["name"], "asked": p["time"], "live": None} for p in failed]
+    left = lom_get("live_set cue_points", ["name", "time"])["items"] if stray else cues
+    for row in out:
+        row["deleted"] = row["live"] is not None and all(abs(c["time"] - row["live"]) > 1e-3 for c in left)
+    if original is not None:
+        send("lom_set", {"path": "live_set", "property": "current_song_time", "value": original})
+    return out
 
 
 def place_locators(cues: list[tuple[str, float]], zoom: bool = True) -> list[dict]:
@@ -777,33 +834,39 @@ def place_locators(cues: list[tuple[str, float]], zoom: bool = True) -> list[dic
     moved in the same call is not in effect yet (Live 12.4), so each cue
     takes two calls: move (read back: Live refuses a time past the song's
     end), then toggle. With zoom, the Arrangement is zoomed in meanwhile
-    (arrangement_zoomed_in); without, the caller has done it. Existing cues
-    are only renamed, and the playhead goes back where it was.
+    (arrangement_zoomed_in) and a cue Live still put at another beat is
+    deleted (delete_strays), its row's error saying where it went; without,
+    the caller does both. Existing cues are only renamed, and the playhead
+    goes back where it was.
     """
     if zoom:
-        with arrangement_zoomed_in():
-            return place_locators(cues, zoom=False)
+        before = [float(c["time"]) for c in lom_get("live_set cue_points", ["time"])["items"]]
+        with arrangement_zoomed_in() as zoom_errors:
+            result = place_locators(cues, zoom=False)
+            moved = delete_strays(result, before) if any("error" in r for r in result) else []
+        for row in result:
+            if "error" not in row:
+                continue
+            went = next((m for m in moved if m["asked"] == row["time"] and m["live"] is not None), None)
+            if went is not None:
+                row["error"] += (f"; Live put it at beat {went['live']:g}"
+                                 + (", deleted" if went["deleted"] else ", left there"))
+            if zoom_errors:
+                row["error"] += f" (zooming the Arrangement in failed: {zoom_errors[0]})"
+        return result
 
     def current() -> list[dict]:
         return lom_get("live_set cue_points", ["name", "time"])["items"]
 
-    def playhead() -> float:
-        return float(lom_get("live_set", ["current_song_time"])["current_song_time"])
-
-    original = playhead()
+    original = _playhead()
     have = [c["time"] for c in current()]
     kept: dict[float, float] = {}  # beat asked: where Live kept the playhead instead
     for _name, at in cues:
         if any(abs(t - at) < 1e-3 for t in have):
             continue
-        send("lom_set", {"path": "live_set", "property": "current_song_time", "value": at})
-        for _ in range(3):
-            time.sleep(0.05)
-            now = playhead()
-            if abs(now - at) < 1e-3:
-                break
-        else:
-            kept[at] = now
+        stayed = _move_playhead(at)
+        if stayed is not None:
+            kept[at] = stayed
             continue
         send("lom_call", {"path": "live_set", "method": "set_or_delete_cue"})
         have.append(at)
@@ -3151,33 +3214,6 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 raise ValueError(f"{file}: {stale}")
         return data, file.parent, str(file)
 
-    def moved_cues(placed: list[dict], before: list[float]) -> list[dict]:
-        """The locators Live did not make where asked: a cue at a beat neither
-        asked for nor in the set before (Live snapped it to the Arrangement's
-        grid, which depends on the zoom) is deleted, by moving the playhead
-        there and toggling it in the next call, and listed."""
-        asked = [p["time"] for p in placed]
-        cues = lom_get("live_set cue_points", ["name", "time"])["items"]
-        stray = [c for c in cues if all(abs(c["time"] - t) > 1e-3 for t in asked + before)]
-        failed = [p for p in placed if p.get("error")]
-        out = []
-        for cue in stray:
-            near = min(failed, key=lambda p: abs(p["time"] - cue["time"]), default=None)
-            if near is not None:
-                failed.remove(near)
-            send("lom_set", {"path": "live_set", "property": "current_song_time",
-                             "value": float(cue["time"])})
-            time.sleep(0.05)
-            send("lom_call", {"path": "live_set", "method": "set_or_delete_cue"})
-            out.append({"name": near["name"] if near else cue["name"],
-                        "asked": near["time"] if near else None, "live": cue["time"]})
-        out += [{"name": p["name"], "asked": p["time"], "live": None} for p in failed]
-        left = lom_get("live_set cue_points", ["name", "time"])["items"] if stray else cues
-        for row in out:
-            row["deleted"] = row["live"] is not None and all(abs(c["time"] - row["live"]) > 1e-3
-                                                             for c in left)
-        return out
-
     def read_back(blueprint: dict, base: Path | None, placed: dict[str, Path],
                   tracks: dict[str, int], checks: dict[str, bool]) -> dict:
         """What Live holds after the build, against the blueprint: the time
@@ -3291,10 +3327,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         overview = send("get_session_overview")
         busy = [t["name"] for t in overview["tracks"]
                 if t.get("devices") or t.get("session_clips") or t.get("arrangement_clip_count")]
+        # a locator too: the build would rename one at a beat it asks for
+        busy += [f"locator {c.get('name') or '(unnamed)'!r} at beat {float(c['time']):g}"
+                 for c in overview.get("cue_points") or []]
         if busy:
             raise RuntimeError(f"The set is not empty ({', '.join(busy)}): open a new Live set first")
         before = len(overview["tracks"])
-        cues_before = [float(c["time"]) for c in overview.get("cue_points") or []]
         numerator, denominator = bp.signature(data["time_signature"])
         # the meter before any locator: Live snaps a new cue to the Arrangement's grid
         batch([op_set("live_set", "tempo", float(data["tempo"])),
@@ -3343,15 +3381,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if data.get("locators"):
             # zoomed in until the strays are deleted too: on the default grid a
             # toggle at a stray's beat could snap elsewhere and make a new cue
-            with arrangement_zoomed_in():
+            with arrangement_zoomed_in() as zoom_errors:
                 placed_cues = place_locators([(c["name"], float(c["beat"])) for c in data["locators"]],
                                              zoom=False)
-                moved = moved_cues(placed_cues, cues_before) if checks["locators"] else [
+                moved = delete_strays(placed_cues, []) if checks["locators"] else [
                     {"name": p["name"], "asked": p["time"], "live": None} for p in placed_cues
                     if p.get("error")]
             report["locators"] = sum("error" not in p for p in placed_cues)
             if moved:
                 report["locators_moved"] = moved
+            if zoom_errors:
+                report["zoom_errors"] = zoom_errors
         report["checks"] = read_back(data, base, placed, tracks, checks)
         if voices:
             report["checks"]["voices"] = voices
