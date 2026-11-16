@@ -14,6 +14,9 @@
   the cue is toggled; one Live refuses (past the song's end) places nothing
   and says where the playhead stayed. `build_from_blueprint` deletes the
   locators Live still moved while zoomed in (`locators_moved`, unchanged).
+  Checked in Live 12.4.16: a 3/4 build placed locators on beats 0, 9, 21,
+  33 and 45 exactly, and `create_locator` with the Session view in front
+  placed 15 and 40.5.
 - The simulator's Live snaps cues to a grid that follows `zoom_view`
   (a model of the measurements, not one of them).
 
