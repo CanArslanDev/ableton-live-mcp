@@ -16,6 +16,18 @@
 - `build_from_blueprint` refuses a set that holds a locator, which it
   would otherwise rename where the blueprint asks for one.
 
+### Tests
+
+- `tests/test_blueprint_readback.py`: `build_from_blueprint` against a
+  simulator made to refuse a file by path (the browser's item of that name
+  holding another), a choke group, a Volume as a number and as text, and
+  voices; each is reported and makes `ok` false, and a check turned off is
+  not run. A blueprint passed as an object cuts an excerpt's stems into the
+  data folder. Before, only the clean read-backs were tested.
+- Jobs: the runner's heartbeat while a step runs, a runner alive but silent
+  for `STALE_S` (lost, holding the machine), and "invalid choice" skipping
+  only an optional step.
+
 ## 2.4.1 — 2026-11-16
 
 The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.

@@ -70,7 +70,8 @@ def _broken(change):
     (lambda d: d["tracks"][1].update(name="808 (synth)"), "used twice"),
     (lambda d: d["tracks"][1]["instrument"]["drum_rack"]["36"].update(choke_group=17),
      "choke_group: 17 is greater than the maximum of 16"),
-    (lambda d: d["tracks"][1]["instrument"]["drum_rack"].update({"128": {"file": "kick"}}), "128"),
+    (lambda d: d["tracks"][1]["instrument"]["drum_rack"].update({"128": {"file": "kick"}}),
+     "drum_rack: '128' does not match"),
     (lambda d: d["files"]["kick"].update(gain_db=2.0), "gain_db: 2.0 is greater than the maximum"),
     (lambda d: d["files"]["kick"].update(gain_db=-1.0, name="kick.aif"), "name it .wav"),
     (lambda d: d["files"]["kick"].update(name="sub/kick.wav"), "blueprint.files.kick.name"),
@@ -389,7 +390,7 @@ def test_locators_land_exactly_zoomed_in_and_the_zoom_goes_back(empty_live):
     assert report["locators"] == 5 and "locators_moved" not in report, report
     assert [(c["name"], c["time"]) for c in call.simulator.state()["locators"]] == [
         ("A", 0), ("B", 9), ("C", 21), ("D", 33), ("E", 45)]
-    assert vars(song).get("_arranger_zoom", 0) == 0
+    assert song.arranger_grid() == 6.0  # zoomed back out: 3/4's default grid
     assert "Arranger" in call.simulator.surface.application().view.shown
 
 
@@ -429,7 +430,7 @@ def test_create_locator_off_the_bar_lands(empty_live):
     result = asyncio.run(live_server.mcp.call_tool("create_locator", {"name": "Drop", "time": 9.0}))
     assert "beat 9.0" in result.content[0].text, result.content[0].text
     assert [(c.name, c.time) for c in song.cue_points] == [("Drop", 9.0)]
-    assert vars(song).get("_arranger_zoom", 0) == 0
+    assert song.arranger_grid() == 6.0  # zoomed back out: 3/4's default grid
 
 
 def test_a_relative_blueprint_path_gives_live_absolute_files(empty_live, monkeypatch):
