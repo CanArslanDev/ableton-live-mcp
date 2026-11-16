@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 2.4.2 — 2026-11-16
+
+The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
+The Claude Code plugin's new "Tool profile" option needs a new session.
 
 ### Fixed
 
