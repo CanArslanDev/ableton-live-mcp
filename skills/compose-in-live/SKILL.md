@@ -93,7 +93,7 @@ macOS with Apple Silicon only; the first run downloads ~2 GB):
 2. `dissect_reference(path="/path/to/song.mp3")` (or `track=`, `clip_index=`)
    starts the analysis and returns a job id at once: stems, tempo grid,
    sections, drum hits matched to samples, the 808, melodic notes and a
-   blueprint. About 5 minutes for a 2-minute song.
+   blueprint. About 4 minutes for a 2-minute song (7 the first time).
 3. `reference_job(job_id=..., wait=20)` until it is done; it sends progress
    while it waits. The summary gives tempo, meter, sections, each pad's file
    with its match verdict ("same sample", "same sample (likely)", "candidate:

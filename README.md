@@ -114,9 +114,10 @@ exact samples from your own library and a synthesized 808. With
 `ABLETON_MCP_PROFILE=full`, an assistant runs it end to end from here:
 
 1. `index_sound_library()` once: a job that indexes the User Library and the
-   Core Library's samples (about a minute per 9,000 sounds).
+   Core Library's samples (about 35 seconds for 12,000 sounds).
 2. `dissect_reference(path=...)` (or an audio clip) starts the analysis as a
-   job and returns its id at once; about 5 minutes for a 2-minute song.
+   job and returns its id at once; about 4 minutes for a 2-minute song
+   (7 the first time).
 3. `reference_job(job_id=..., wait=20)` waits for the next step with progress
    notifications, and once done gives tempo, meter, sections, each pad's
    sample with its match verdict, the 808's notes and the files written.
@@ -141,6 +142,10 @@ analysis peaks at about 2 GB). Needs Live 12.4 to load samples by path
 (earlier versions go through the browser by file name). In Live 12.4.16 a
 whole song's blueprint (10 tracks, 1,881 notes) built in about 7 seconds
 and recorded the same, sample for sample, as reference-dissector's own build.
+The jobs ran the pinned refdissect for real on 2026-11-16: the library index
+took 34 seconds for 12,093 sounds; a 2-minute song took 7.4 minutes the first
+time (setup included) and 3.7 the next, and its blueprint built in Live
+12.4.16 in under 5 seconds with clean read-backs.
 
 To turn the full profile on:
 

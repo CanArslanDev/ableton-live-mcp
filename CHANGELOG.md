@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The reference jobs ran with the real refdissect** (the pinned f192456,
+  Apple M4, 2026-11-16): `index_sound_library` over 12,093 sounds took
+  33.8 s; `dissect_reference` of a 126 s song 442 s the first time (setup
+  and model downloads included) and 224 s once set up, with the same
+  result; `build_from_blueprint` of the finished job built it in Live
+  12.4.16 in under 5 s with clean read-backs. Progress and the estimate
+  `dissect_reference` and `index_sound_library` give now follow those
+  runs: about 4 minutes for a 2-minute song (5 before), about 35 s for
+  12,000 sounds (a minute per 9,000 before).
+
 ## 2.4.2 — 2026-11-16
 
 The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
