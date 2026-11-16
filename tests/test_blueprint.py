@@ -670,3 +670,17 @@ def test_create_locator_deletes_a_cue_live_moved_and_says_so(empty_live, monkeyp
     assert placed == [{"name": "Drop", "time": 9.0, "error": "Live did not create it; Live put it at beat 12, "
                        "deleted (zooming the Arrangement in failed: no zoom here)"}]
     assert song.cue_points == []
+
+
+def test_the_original_create_audio_clip_plays_the_file_from_its_start(empty_live):
+    """server.py's create_audio_clip: Live's warp analysis moves a new clip's
+    start to the file's first transient; the tool puts it back."""
+    call = empty_live
+    song = call.simulator.song
+    song.create_audio_track(-1)
+    index = len(song.tracks) - 1
+    result = asyncio.run(live_server.mcp.call_tool("create_audio_clip", {
+        "track_index": index, "clip_index": 0, "path": str(FIXTURES / "samples" / "kick.wav")}))
+    assert "Created audio clip" in result.content[0].text, result.content[0].text
+    clip = song.tracks[index].clip_slots[0].clip
+    assert (clip.loop_start, clip.start_marker) == (0.0, 0.0)

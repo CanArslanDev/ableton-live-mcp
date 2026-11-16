@@ -149,6 +149,16 @@ def op_set(path: str, prop: str, value: Any) -> dict:
     return {"type": "lom_set", "params": {"path": path, "property": prop, "value": value}}
 
 
+def from_its_start(clip: str, start: float = 0.0, loop_start: float | None = None) -> list[dict]:
+    """The steps that put a new audio clip's start where it is to play from
+    (start: the file's start, or a source clip's start marker). Live's warp
+    analysis moves a new clip's start to the file's first transient (21 ms
+    to 3.6 s in, Live 12.4) and keeps it there with warping off; loop_start
+    goes first, as it carries start_marker."""
+    return [op_set(clip, "loop_start", float(start if loop_start is None else loop_start)),
+            op_set(clip, "start_marker", float(start))]
+
+
 def op_call(path: str, method: str, *args: Any) -> dict:
     return {"type": "lom_call", "params": {"path": path, "method": method, "args": list(args)}}
 
@@ -210,6 +220,23 @@ def selector(value: int | str) -> str:
     return shlex.quote(str(value))
 
 
+def named(items: str, value: int | str) -> str:
+    """The path token of an item of the list at `items` by name or index:
+    selector's, but text made only of digits that an item has as its exact
+    name (a track called "808", a Simpler renamed so, the routing type of
+    such a track) is that item's index: a LOM path takes every number for an
+    index. An integer is always an index; digits no item is named are one."""
+    if isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+        try:
+            rows = lom_get(items, ["name", "display_name"])["items"]
+        except Exception:  # no Live to ask: as before, an index
+            rows = []
+        for index, row in enumerate(rows):
+            if value.strip() in (row.get("name"), row.get("display_name")):
+                return str(index)
+    return selector(value)
+
+
 def track_path(track: int | str) -> str:
     if isinstance(track, int):
         return f"live_set tracks {track}"
@@ -223,12 +250,13 @@ def track_path(track: int | str) -> str:
         index = int(token) if token.isdigit() else ord(token) - ord("a")
         return f"live_set return_tracks {index}"
     if low.startswith("return:"):
-        return f"live_set return_tracks {selector(text[7:].strip())}"
-    return f"live_set tracks {selector(text)}"
+        return f"live_set return_tracks {named('live_set return_tracks', text[7:].strip())}"
+    return f"live_set tracks {named('live_set tracks', text)}"
 
 
 def device_path(track: int | str, device: int | str) -> str:
-    return f"{track_path(track)} devices {selector(device)}"
+    tp = track_path(track)
+    return f"{tp} devices {named(f'{tp} devices', device)}"
 
 
 def clip_path(track: int | str, clip_index: int | None = None,
@@ -1338,7 +1366,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                             ("output_routing_type", output_type),
                             ("output_routing_channel", output_channel)):
             if value is not None:
-                ops.append(op_set(tp, prop, ref(f"{tp} available_{prop}s {shlex.quote(value)}")))
+                ops.append(op_set(tp, prop, ref(f"{tp} available_{prop}s {named(f'{tp} available_{prop}s', value)}")))
         return to_json(batch_summary(batch(ops)))
 
     # ── Scenes ───────────────────────────────────────────────────────────────
@@ -2289,13 +2317,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         cp = clip_path(track, clip_index, arrangement_clip_index)
         info = await asend("lom_get", {"path": cp, "properties": [
             "is_audio_clip", "file_path", "name", "warping", "warp_mode", "start_time",
-            "start_marker", "looping", "sample_rate"]})
+            "start_marker", "loop_start", "looping", "sample_rate"]})
         if not info.get("is_audio_clip"):
             raise ValueError("That is a MIDI clip; these tools work on audio")
         source = {"file": info["file_path"], "name": info.get("name") or Path(info["file_path"]).stem,
                   "track": track, "warping": info.get("warping"), "warp_mode": info.get("warp_mode"),
                   "clip": f"id {info['$id']}", "start_marker": info.get("start_marker"),
-                  "looping": info.get("looping"), "sample_rate": info.get("sample_rate")}
+                  "loop_start": info.get("loop_start"), "looping": info.get("looping"),
+                  "sample_rate": info.get("sample_rate")}
         if arrangement_clip_index is not None:
             source["start_time"] = info.get("start_time")
         else:
@@ -2376,10 +2405,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                                 "method": "create_audio_clip", "args": [file]})
                 where = {"clip_index": row}
             clip_ref = clip.get("result") or {}
-            if source.get("warping") is False and clip_ref.get("$id"):
-                # The source plays the file at its own speed; so must its stems
-                await asend("lom_set", {"path": f"id {clip_ref['$id']}", "property": "warping",
-                                        "value": False})
+            if clip_ref.get("$id"):
+                cid, steps = f"id {clip_ref['$id']}", []
+                if source.get("warping") is False:
+                    # The source plays the file at its own speed; so must its stems
+                    steps.append(op_set(cid, "warping", False))
+                if source.get("warping") is not True:
+                    # From where the source plays (seconds, unwarped), or the file's start, not
+                    # where Live's warp analysis put it. A warped source's beats are its own.
+                    steps += from_its_start(cid, float(source.get("start_marker") or 0.0),
+                                            source.get("loop_start"))
+                await asend("batch", {"commands": steps, "stop_on_error": False})
             placed.append({"track": label, **where})
         return placed
 
@@ -2753,7 +2789,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             source = lom_get(track_path(sidechain_from), ["name"])["name"]
             compressor = f"id {ids[0]}"
             ops.append(op_set(compressor, "input_routing_type", ref(
-                f"{compressor} available_input_routing_types {shlex.quote(source)}")))
+                f"{compressor} available_input_routing_types "
+                f"{named(f'{compressor} available_input_routing_types', source)}")))
         applied = batch_summary(batch(ops, stop_on_error=False))
         return to_json({"chain": chain, "description": spec["description"],
                         "devices": [name for name, _settings in spec["devices"]],
@@ -3065,7 +3102,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             device = f"id {device_id}"
             try:
                 send("lom_set", {"path": device, "property": "input_routing_type", "value": ref(
-                    f"{device} available_input_routing_types {shlex.quote(source)}")})
+                    f"{device} available_input_routing_types "
+                    f"{named(f'{device} available_input_routing_types', source)}")})
             except Exception as e:  # Gate and most devices have no sidechain input here
                 next(r for r in report if r["track"] == owner)["problems"].append(
                     f"sidechain from {source}: {e}")
@@ -4113,14 +4151,20 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                                       arrangement_time, drum_pad)
         return to_json(payload)
 
+    async def from_the_files_start(made: dict) -> None:
+        clip_id = ((made or {}).get("result") or {}).get("$id")
+        if clip_id:
+            await asend("batch", {"commands": from_its_start(f"id {clip_id}"), "stop_on_error": False})
+
     async def place_generated(track: int | str, file: str, clip_index: int | None,
                               arrangement_time: float | None, drum_pad: int | str | None) -> dict:
         tp = track_path(track)
         info = await asend("lom_get", {"path": tp, "properties": ["name", "has_audio_input"]})
         if info.get("has_audio_input"):
             if arrangement_time is not None:
-                await asend("lom_call", {"path": tp, "method": "create_audio_clip",
-                                         "args": [file, float(arrangement_time)]})
+                made = await asend("lom_call", {"path": tp, "method": "create_audio_clip",
+                                                "args": [file, float(arrangement_time)]})
+                await from_the_files_start(made)
                 return {"track": info["name"], "arrangement_time": arrangement_time}
             slots = (await asend("lom_get", {"path": f"{tp} clip_slots",
                                              "properties": ["has_clip"]}))["items"]
@@ -4131,8 +4175,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                  "arrangement_time")
             if slots[row].get("has_clip"):
                 raise ValueError(f"Slot {row} already holds a clip")
-            await asend("lom_call", {"path": f"{tp} clip_slots {int(row)}",
-                                     "method": "create_audio_clip", "args": [file]})
+            made = await asend("lom_call", {"path": f"{tp} clip_slots {int(row)}",
+                                            "method": "create_audio_clip", "args": [file]})
+            await from_the_files_start(made)
             return {"track": info["name"], "clip_index": row}
         # A MIDI track: through Live's browser, which lists the file after a moment
         name = Path(file).stem
@@ -4810,7 +4855,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     track = f"id {temp[label]}"
                     ops += [op_set(track, "input_routing_type", ref(
                                 f"{track} available_input_routing_types "
-                                f"{shlex.quote(input_name)}")),
+                                f"{named(f'{track} available_input_routing_types', input_name)}")),
                             op_set(track, "name", f"MCP Rec {label}"[:48]),
                             op_set(track, "current_monitoring_state", MONITORING["off"])]
                     if input_name != "Resampling":

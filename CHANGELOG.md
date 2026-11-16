@@ -15,6 +15,18 @@
   reports its errors (`zoom_errors` in `build_from_blueprint`'s report).
 - `build_from_blueprint` refuses a set that holds a locator, which it
   would otherwise rename where the blueprint asks for one.
+- **A track named only with digits** ("808") is that track, not track
+  808: as a tool's `track`, a device's name, an input routing, and a
+  sidechain source (`set_track_routing`, `apply_device_chain`,
+  `build_tracks`' `sidechain_from`, `capture_stems`). An integer, or digits
+  no track has as its name, are still an index.
+- **New audio clips play from the file's start** in every path, not from
+  where Live's warp analysis put the start (the file's first transient,
+  up to seconds in): stems placed by `separate_stems(to_tracks=True)` play
+  from where their (unwarped) source clip does, and `generate_audio`'s
+  clips and the original `create_audio_clip` from the file's start, as
+  `build_tracks`' already did. The simulator's Live now moves a new clip's
+  start, so a path that leaves it is caught.
 
 ### Tests
 
