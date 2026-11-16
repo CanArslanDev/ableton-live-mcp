@@ -277,10 +277,12 @@ class FakeClipSlot(FakeObj):
         return clip
 
 
-# Where Live's warp analysis puts a new audio clip's start: the file's first
-# transient (21 ms to 3.6 s in, measured by reference-dissector's first live
-# build in Live 12.4, 2026-10-11), kept with warping off. Here a fixed quarter
-# beat, so a tool that leaves it there is caught.
+# Where Live puts a new audio clip's start: at the file's first transient
+# (21 ms to 3.6 s in, reference-dissector's first live build, 2026-10-11)
+# once warping goes off after its warp analysis (Live 12.4.16 moved it 0 to
+# 0.53 then; warped, or reset in the same batch, it stays at 0). Here at
+# once and always, a fixed quarter beat: a stricter Live, so a tool that
+# leaves it there is caught.
 FIRST_TRANSIENT = 0.25
 
 
