@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.4.3 — 2026-11-16
+
+The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
+2.4.2's jobs pin a reference-dissector commit that is on no branch any
+more: update to keep `dissect_reference` and `index_sound_library` working.
 
 ### Changed
 
