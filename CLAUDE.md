@@ -445,6 +445,11 @@ the 808 with `capture_stems`:
   placed 15 and 40.5 exactly. A cue placed afterwards without zooming
   (beat 39, a bar line) landed too, so the zoom left behind was not
   measured. Nothing in the LOM reads the zoom.
+- **Names made only of digits** (Live 12.4.16, 2026-11-16, script 2.1.0
+  with 2.4.2's server): `set_track_mixer(track="808")` muted the track
+  named "808" and no other, and `set_track_routing(input_type="808")` set
+  an audio track's input to the audio track "808" (a MIDI track without an
+  instrument is not among the input types).
 - **Eight clients at most.** The script serves `MAX_CLIENTS` (8)
   connections; a ninth is closed at once ("Refusing a connection" in Live's
   log), which the client sees as "Connection reset by peer". Each MCP
@@ -476,11 +481,9 @@ reference-dissector's `live-build`, which builds a plan through
 
 Not verified in Live (check each in a scratch set before claiming it):
 
-- The start put back on stems (`separate_stems(to_tracks=True)`: the
-  source's start marker, unwarped sources only), generated audio and the
-  original `create_audio_clip`; `build_tracks`' reset is the one Live ran.
-- Names made only of digits looked up by name (`named()`): the LOM side
-  is the routing types' `display_name`, as for any other name.
+- The start put back on stems by `separate_stems(to_tracks=True)` (the
+  source's start marker, unwarped sources only) with real stems; the reset
+  itself was checked on synthetic files in Live 12.4.16 (above).
 - The rack rebuilt by name when `insert_chain`, `in_note` or
   `Chain.insert_device` fails (the rack is deleted with
   `Track.delete_device` and a new one gets every pad from the browser: no
@@ -567,11 +570,15 @@ Not verified in Live (check each in a scratch set before claiming it):
   A LOM path takes every number for an index, so text made only of digits
   that an item is named ("808") goes through `named()`, which looks the name
   up first (one round trip); an integer is always an index.
-- A new audio clip's start: Live moves it to the file's first transient
-  (21 ms to 3.6 s in, measured 2026-10-11) and keeps it with warping off.
+- A new audio clip's start: Live moved it to the file's first transient
+  (21 ms to 3.6 s in, 2026-10-11) where warping went off. In Live 12.4.16
+  (2026-11-16) a new clip starts at 0 while warped, also once its warp
+  analysis is done (the .asd written, ~12 s for a 150 s file); warping
+  turned off after that analysis moved the start (0 to 0.53), turned off
+  with the start reset in the same batch it stayed at 0 after the analysis.
   Every path that creates one puts it back (`from_its_start`: loop_start,
-  then start_marker); the fake moves it (`FIRST_TRANSIENT`) so a path that
-  forgets is caught.
+  then start_marker, after warping); the fake moves it at once
+  (`FIRST_TRANSIENT`), a stricter Live, so a path that forgets is caught.
 - Tools that wait (recording, long-polling) are `async` and use `asend()` so
   they don't block the event loop.
 - Put pure logic in `music.py` / `audio_analysis.py` with unit tests; keep tools

@@ -22,10 +22,12 @@ The Claude Code plugin's new "Tool profile" option needs a new session.
   808: as a tool's `track`, a device's name, an input routing, and a
   sidechain source (`set_track_routing`, `apply_device_chain`,
   `build_tracks`' `sidechain_from`, `capture_stems`). An integer, or digits
-  no track has as its name, are still an index.
+  no track has as its name, are still an index. Checked in Live 12.4.16
+  (the mixer and an input routing by "808").
 - **New audio clips play from the file's start** in every path, not from
-  where Live's warp analysis put the start (the file's first transient,
-  up to seconds in): stems placed by `separate_stems(to_tracks=True)` play
+  where Live puts the start when warping goes off after its warp analysis
+  (the file's first transient, up to seconds in; in Live 12.4.16 a 150 s
+  file's went from 0 to 0.53, and the reset in the same batch held): stems placed by `separate_stems(to_tracks=True)` play
   from where their (unwarped) source clip does, and `generate_audio`'s
   clips and the original `create_audio_clip` from the file's start, as
   `build_tracks`' already did. The simulator's Live now moves a new clip's
