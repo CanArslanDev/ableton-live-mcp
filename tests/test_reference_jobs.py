@@ -26,6 +26,7 @@ POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="Unix process groups and
 
 # refdissect's commands as far as a job uses them: each writes what the real
 # one writes for the next step. FAKE_MODE: "slow" (analyze waits a minute),
+# "no-match" (no match command: a step that is not optional),
 # "fail" (analyze fails), "old" (no blueprint command, as before refdissect had one)
 FAKE_REFDISSECT = r'''
 import json, os, sys, time
@@ -44,6 +45,9 @@ print("refdissect", command, *rest, flush=True)
 if command == "analyze" and mode == "slow":
     Path(os.environ["FAKE_PIDFILE"]).write_text(str(os.getpid()))
     time.sleep(60)
+if command == "match" and mode == "no-match":  # a step that is not optional, missing
+    print("refdissect: error: argument command: invalid choice: 'match' (choose from 'plan')", file=sys.stderr)
+    sys.exit(2)
 if command == "analyze" and mode == "fail":
     print("Traceback (most recent call last):\nValueError: no beat found", flush=True)
     sys.exit(1)
@@ -623,3 +627,58 @@ def test_the_default_sound_folders(tmp_path, monkeypatch):
     monkeypatch.setattr(als, "_user_libraries", lambda: [user, tmp_path / "gone"])
     monkeypatch.setattr(als, "_live_resource_dirs", lambda: [live])
     assert jobs.default_sound_folders() == [user, live / "Core Library" / "Samples"]
+
+
+def test_only_an_optional_step_is_skipped_when_refdissect_lacks_it(fake_refdissect, monkeypatch):
+    """"invalid choice" skips blueprint (optional); match, missing too, fails the job."""
+    call = fake_refdissect
+    library(call.tmp)
+    monkeypatch.setenv("FAKE_MODE", "no-match")
+    status = finish(call, call("dissect_reference", path=str(call.song))["job"])
+    assert status["state"] == "failed" and status["step"] == "match"
+    assert status["error"].startswith("match stopped with exit code 2") and "skipped" not in status
+
+
+def test_the_runner_writes_a_heartbeat_while_a_step_runs(fake_refdissect, monkeypatch):
+    """The record is written every couple of seconds while a step runs: a
+    record silent for STALE_S reads as lost."""
+    call = fake_refdissect
+    library(call.tmp)
+    pidfile = call.tmp / "analyze.pid"
+    monkeypatch.setenv("FAKE_MODE", "slow")
+    monkeypatch.setenv("FAKE_PIDFILE", str(pidfile))
+    started = call("dissect_reference", path=str(call.song))
+    wait_for(pidfile.exists)
+    record = jobs.record_path(started["job"])
+    first = json.loads(record.read_text())["updated"]
+    wait_for(lambda: json.loads(record.read_text())["updated"] > first, limit=reference_runner.WRITE_S * 3)
+    assert json.loads(record.read_text())["state"] == "running"
+    call("reference_job", job_id=started["job"], cancel=True)
+
+
+@POSIX_ONLY
+def test_a_runner_alive_but_silent_is_lost_and_holds_the_machine(tmp_path, monkeypatch):
+    """A record whose runner still runs but has not written for STALE_S (the
+    computer slept through it, a disk that refuses the heartbeat) reads as
+    lost, with leftovers: a new job waits until cancel stops it."""
+    import subprocess
+
+    monkeypatch.setenv("ABLETON_MCP_JOBS_DIR", str(tmp_path / "jobs"))
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        now = time.time()
+        record = {"id": "dissect-silent", "kind": "dissect", "name": "Song", "work": str(tmp_path),
+                  "steps": [], "state": "running", "step": "analyze", "pid": sleeper.pid,
+                  "created": now - jobs.STALE_S - 60, "updated": now - jobs.STALE_S - 1}
+        reference_runner.write_json(jobs.record_path(record["id"]), record)
+        monkeypatch.setattr(jobs, "process_line", lambda pid: (
+            f"S python -I {jobs.RUNNER} {jobs.record_path(record['id'])}" if pid == sleeper.pid else ""))
+        loaded = jobs.load(record["id"])
+        assert loaded["state"] == "lost" and loaded["leftover"] is True
+        assert jobs.running()["id"] == record["id"]
+        record["updated"] = time.time()  # it writes again: running, as before
+        reference_runner.write_json(jobs.record_path(record["id"]), record)
+        assert jobs.load(record["id"])["state"] == "running"
+    finally:
+        sleeper.kill()
+        sleeper.wait()
