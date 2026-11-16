@@ -607,3 +607,65 @@ def test_clips_that_start_inside_an_excerpt(tmp_path):
     assert audio["start"] == 1  # from the file's start, at the clip's place in the bar
     frames = sf.info(audio["file"]).frames
     assert frames == round((bar - 1) * 60 / tempo * rate)
+
+
+def _no_zoom(call, monkeypatch, refuse_past=None):
+    """Live's zoom_view failing, and (refuse_past) the playhead refused past
+    that beat, as Live refuses a time past the song's end."""
+    song = call.simulator.song
+    view = call.simulator.surface.application().view
+
+    def broken(self, *args):
+        raise RuntimeError("no zoom here")
+
+    monkeypatch.setattr(type(view), "zoom_view", broken)
+    if refuse_past is not None:
+        prop = type(song).current_song_time
+
+        def refuse(self, value):
+            if value <= refuse_past:
+                prop.fset(self, value)
+
+        monkeypatch.setattr(type(song), "current_song_time", property(prop.fget, refuse))
+    return song
+
+
+def test_a_stray_live_keeps_the_playhead_from_is_left_and_a_good_locator_stays(empty_live, monkeypatch):
+    """No zoom: 45 of a 3/4 song snaps to 48, past where Live takes the
+    playhead. Deleting that stray would toggle at the playhead left behind
+    (0, where locator A is): it is left in place and reported, A stays."""
+    call = empty_live
+    _no_zoom(call, monkeypatch, refuse_past=46.0)
+    data = absolute(fixture("short-beat"))
+    data["time_signature"], data["length_beats"] = "3/4", 48
+    data["locators"] = [{"name": "A", "beat": 0}, {"name": "E", "beat": 45}]
+    report = call("build_from_blueprint", blueprint=data)
+    cues = [(c["name"], c["time"]) for c in call.simulator.state()["locators"]]
+    assert ("A", 0) in cues and report["locators"] == 1
+    assert report["locators_moved"] == [{"name": "E", "asked": 45.0, "live": 48.0, "playhead": 0.0,
+                                         "deleted": False}]
+    assert report["zoom_errors"] and "no zoom here" in report["zoom_errors"][0]
+    assert report["ok"] is False
+
+
+def test_a_set_with_a_locator_is_not_empty(empty_live):
+    call = empty_live
+    song = call.simulator.song
+    song.current_song_time = 0.0
+    song.set_or_delete_cue()
+    song.cue_points[-1].name = "my marker"
+    with pytest.raises(ToolError, match=r"The set is not empty \(locator 'my marker' at beat 0\)"):
+        call("build_from_blueprint", blueprint=absolute(fixture("short-beat")))
+    assert [c.name for c in song.cue_points] == ["my marker"] and len(song.tracks) == 2
+
+
+def test_create_locator_deletes_a_cue_live_moved_and_says_so(empty_live, monkeypatch):
+    """create_locator with the zoom failing: Live snaps beat 9 of 3/4 to 12;
+    that cue is deleted and the error says where Live put it and why."""
+    call = empty_live
+    song = _no_zoom(call, monkeypatch)
+    song.signature_numerator, song.signature_denominator = 3, 4
+    placed = extended_tools.place_locators([("Drop", 9.0)])
+    assert placed == [{"name": "Drop", "time": 9.0, "error": "Live did not create it; Live put it at beat 12, "
+                       "deleted (zooming the Arrangement in failed: no zoom here)"}]
+    assert song.cue_points == []

@@ -964,7 +964,8 @@ def create_locator(
     renamed instead of toggled off. Time is in beats from the start of the
     arrangement (e.g. 0.0 = start, 16.0 = bar 5 in 4/4). Shows the
     Arrangement and zooms it in while placing (Live snaps cues to its grid),
-    then back out.
+    then back out; a cue Live still puts elsewhere is deleted and the error
+    says where it went.
 
     Parameters:
     - name: The locator label (e.g. "Chorus", "Verse 1", "Drop")

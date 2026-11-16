@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A cue Live moved is deleted only where the playhead got to.**
+  `build_from_blueprint` used to move the playhead to such a cue and toggle
+  without reading it back: where Live kept the playhead (past the song's
+  end) the toggle hit the cue there instead, and a locator placed right
+  could go. The playhead is now read back first; a cue it cannot reach is
+  left and reported (`playhead`, `deleted: false`).
+- `create_locator` and `build_arrangement` delete a cue Live put at
+  another beat too, and say where it went; zooming the Arrangement in
+  reports its errors (`zoom_errors` in `build_from_blueprint`'s report).
+- `build_from_blueprint` refuses a set that holds a locator, which it
+  would otherwise rename where the blueprint asks for one.
+
 ## 2.4.1 — 2026-11-16
 
 The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.

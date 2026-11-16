@@ -436,7 +436,9 @@ the 808 with `capture_stems`:
   `place_locators` reported them as failed; after four `zoom_view` steps
   in, beat 9 was placed exactly. `place_locators` therefore shows the
   Arrangement and sends 30 `zoom_view(3, "Arranger", False)` (2 zooms out)
-  before it places cues, then zooms out as many. Checked in Live 12.4.16
+  before it places cues, then zooms out as many; a cue Live still puts
+  elsewhere is deleted (`delete_strays`, the playhead read back before
+  each toggle). Checked in Live 12.4.16
   on 2026-11-16 in an empty set: a 3/4 `build_from_blueprint` (0.9 s)
   placed locators on 0, 9, 21, 33 and 45 exactly (`ok`, no
   `locators_moved`), and `create_locator` with the Session view in front
