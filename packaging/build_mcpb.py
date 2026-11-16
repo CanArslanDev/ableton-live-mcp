@@ -57,7 +57,7 @@ def _summary(description: str | None, limit: int = 200) -> str:
 
 def tool_entries() -> list[dict]:
     """The tools of the default profile, as the manifest lists them."""
-    os.environ.setdefault("ABLETON_MCP_PROFILE", "core")
+    os.environ["ABLETON_MCP_PROFILE"] = "core"  # the manifest lists core's tools, whatever the shell says
     os.environ.setdefault("ABLETON_MCP_DISABLE_TELEMETRY", "true")
     sys.path.insert(0, str(ROOT))
     from MCP_Server.server import mcp

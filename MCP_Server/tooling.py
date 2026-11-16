@@ -50,7 +50,11 @@ _EXPECTED = (ValueError, LookupError, RuntimeError, OSError)
 
 
 def active_profile() -> str:
-    value = os.environ.get("ABLETON_MCP_PROFILE", "core").strip().lower()
+    """ABLETON_MCP_PROFILE, else ABLETON_MCP_PROFILE_SAVED (the Claude Code
+    plugin's "profile" option, under a name of its own so that a shell's
+    ABLETON_MCP_PROFILE still wins), else core. Unknown values are core."""
+    value = (os.environ.get("ABLETON_MCP_PROFILE", "").strip()
+             or os.environ.get("ABLETON_MCP_PROFILE_SAVED", "").strip() or "core").lower()
     return value if value in PROFILES else "core"
 
 

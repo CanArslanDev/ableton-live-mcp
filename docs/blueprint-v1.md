@@ -6,7 +6,7 @@ tracks with their instruments, settings and notes, the sample files to copy
 into the User Library, and which read-backs to run once Live has built it.
 `build_from_blueprint` (full profile) builds one in the open, empty set over
 the server's own connection and reports what Live did and did not take.
-Checked in Live 12.4.6 (2026-11-14) with refdissect's blueprints: clean
+Checked in Live 12.4.16 (2026-11-14) with refdissect's blueprints: clean
 read-backs, and recordings equal sample for sample to refdissect's own
 build through the browser.
 
@@ -218,7 +218,7 @@ What `refdissect blueprint WORK [--out FILE]` writes, field by field, from
 | Blueprint | From |
 |---|---|
 | `name` | the song's name: the folder holding the stems' folder (the name the plan already gives the 808 one-shot), else the work folder's |
-| `made_by` | `"refdissect <version> <commit>"` (the commit only from a git checkout) |
+| `made_by` | `"refdissect <version> <commit>"`: the commit of a git checkout (`+` when its files differ), else the one the install names (`direct_url.json`: a git install's, or the archive's, as the jobs install it) |
 | `tempo`, `length_beats` | `plan.tempo`, `plan.length_beats` |
 | `time_signature` | `meter_of(plan)` |
 | `locators` | `[{"name": n, "beat": float(round(b))} for n, b in plan.locators]` |

@@ -450,10 +450,10 @@ class FakeSimpler(FakeDevice):
     "Vol < Vel" a raw 0..1, Live's default for a Simpler made with
     insert_device) and voices, a property of the device. "Fade In" and
     "Fade Out" start at 0.1 ms, as on a Simpler made with insert_device in
-    Live 12.4.6 (2026-11-14); a pad the browser loads starts its Fade In at 0
+    Live 12.4.16 (2026-11-14); a pad the browser loads starts its Fade In at 0
     (FakeBrowser.load_item). Their ranges were not measured."""
 
-    def __init__(self, name, sample=None, fade_in=0.1):
+    def __init__(self, name, sample=None, fade_in=0.1, voices=6):
         super(FakeSimpler, self).__init__(name, "OriginalSimpler", [
             _percent("S Start", 0.0),
             FakeParam("Transpose", 0.0, -48.0, 48.0, display=lambda v: "%d st" % round(v)),
@@ -467,7 +467,7 @@ class FakeSimpler(FakeDevice):
             FakeParam("Glide Time", 50.0, 0.0, 5000.0, display=_release_display),
             FakeParam("Fade In", fade_in, 0.0, 2000.0, display=_release_display),
             FakeParam("Fade Out", 0.1, 0.0, 2000.0, display=_release_display)],
-            sample=sample, playback_mode=0, reversed=False, voices=6)
+            sample=sample, playback_mode=0, reversed=False, voices=voices)
 
     def reverse(self):
         self.reversed = not self.reversed
@@ -947,10 +947,10 @@ class FakeAppView(FakeObj):
 
 
 class FakeApplication(FakeObj):
-    """Live's Application: its view, the browser and the version (12.4.6
-    unless given)."""
+    """Live's Application: its view, the browser and the version (12.4.16,
+    where the latest measurements were made, unless given)."""
 
-    def __init__(self, browser, version=(12, 4, 6)):
+    def __init__(self, browser, version=(12, 4, 16)):
         view = FakeAppView(getattr(browser, "song", None))
         super(FakeApplication, self).__init__(view=view, browser=browser)
         object.__setattr__(self, "_version", tuple(version))
@@ -1003,9 +1003,9 @@ class FakeBrowser(FakeObj):
         stem = item.name.rsplit(".", 1)[0]
         if pad is not None:
             # as in Live: the pad's chain holds a Simpler with the sample, its
-            # Fade In at 0, and plays it at C3 (Live 12.4.6, 2026-11-14)
+            # Fade In at 0, 3 voices, and plays it at C3 (Live 12.4.16, 2026-11-14)
             pad.chains = [FakeObj(name=stem, choke_group=0, out_note=60, devices=[
-                FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5), fade_in=0.0)])]
+                FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5), fade_in=0.0, voices=3)])]
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:

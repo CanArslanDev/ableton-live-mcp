@@ -27,6 +27,37 @@
   clips and the original `create_audio_clip` from the file's start, as
   `build_tracks`' already did. The simulator's Live now moves a new clip's
   start, so a path that leaves it is caught.
+- `doctor` says how to turn the full profile on in each client (in Claude
+  Desktop the extension's Tool set, which overrides the environment), and
+  warns when uv is missing.
+
+### Added
+
+- **A "Tool profile" option in the Claude Code plugin** (`/plugin`,
+  Configure options): `full` turns the reference-song tools on without a
+  shell variable. The plugin passes it as `ABLETON_MCP_PROFILE_SAVED`, so
+  `ABLETON_MCP_PROFILE` in Claude Code's environment (the evals') still
+  wins.
+
+### Changed
+
+- The fake Live, and so the simulator, reports Live 12.4.16, where the
+  latest measurements were made, and a pad the browser loads has 3 voices
+  (a Simpler made by path 6), as Live 12.4.16 did on 2026-11-14.
+- CI fails on Windows too (it has passed there; the jobs' process-group
+  tests skip). The .mcpb's tool list is always the core profile's, whatever
+  the shell that builds it says; the release notes take only their own
+  version's CHANGELOG section (`2.4.1`, never `2.4.10`).
+
+### Docs
+
+- The checks of 2026-11-14 (`build_from_blueprint` in Live, a Simpler's
+  0.1 ms Fade In, 13 of 13 Volumes, the recordings equal to the browser's
+  build) ran on Live 12.4.16, not 12.4.6: Live's own log has 12.4.16 first
+  started that day at 16:02 and 12.4.6 last on 2026-11-08. Corrected in the
+  2.4.0 notes, README, CLAUDE.md and docs/blueprint-v1.md.
+- How to turn the full profile on, per client (README, the setup skill);
+  `made_by` in docs/blueprint-v1.md (an install names its commit too).
 
 ### Tests
 
@@ -68,7 +99,7 @@ The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.
 The new tools are in the full profile: start the client with
 `ABLETON_MCP_PROFILE=full` in its environment (`ABLETON_MCP_PROFILE=full
 claude` in Claude Code; "full" under the extension's Tool set in Claude
-Desktop). `build_from_blueprint` was checked in Live 12.4.6 on 2026-11-14,
+Desktop). `build_from_blueprint` was checked in Live 12.4.16 on 2026-11-14,
 through reference-dissector's `live-build`: an 8-bar excerpt and a whole
 song (10 tracks, 1,881 notes) built with clean read-backs and recorded equal,
 sample for sample, to its build through the browser. The jobs
@@ -135,7 +166,7 @@ only with a stand-in for refdissect, not with the pinned one and its models.
 - The simulator's state shows each Drum Rack pad's chains (choke group,
   devices) and a Simpler's voices; the fake Simpler has the parameters the
   build sets (`Vol < Vel`, `Snap`, `F On`, `Ve Release`, `Glide Mode`,
-  `Glide Time`, `Fade In`, `Fade Out`) and `voices`. As in Live 12.4.6, a
+  `Glide Time`, `Fade In`, `Fade Out`) and `voices`. As in Live 12.4.16, a
   Simpler made with `insert_device` starts with a 0.1 ms Fade In and a pad
   the browser loads at 0, playing at C3 (it played the pad's own note), so
   a blueprint from reference-dissector (pads at `"Fade In": 0`) builds

@@ -255,7 +255,7 @@ def test_a_blueprint_is_built_and_read_back(empty_live):
     assert hat["sample"].startswith("hat-closed ") and hat["parameters"]["Volume"] == "-9.5 dB"
     assert hat["parameters"]["Transpose"] == "2 st"
     # reference-dissector's pad settings (its PAD_OFF): filter off, Fade In 0 where a
-    # Simpler made by path starts at 0.1 ms (Live 12.4.6); the 808 keeps its own
+    # Simpler made by path starts at 0.1 ms (Live 12.4.16); the 808 keeps its own
     assert (hat["parameters"]["F On"], hat["parameters"]["Fade In"]) == ("Off", "0.0 ms")
     assert shown["Fade In"] == "0.1 ms" and hat["parameters"]["Fade Out"] == "0.1 ms"
     clip = tracks["Drums (library)"]["arrangement_clips"][0]
@@ -303,7 +303,7 @@ def test_an_excerpt_with_glide_voices_a_stem_and_a_pad_by_name(empty_live, tmp_p
     assert tracks["REF drums"]["mute"]
     pad = tracks["Drums (by name)"]["devices"][0]["chains"]["38"][0]["devices"][0]
     assert pad["sample"] == "Snare Tight.wav"
-    assert pad["parameters"]["Fade In"] == "0.0 ms"  # the browser's pads start at 0 (Live 12.4.6)
+    assert pad["parameters"]["Fade In"] == "0.0 ms"  # the browser's pads start at 0 (Live 12.4.16)
     assert [(c["name"], c["time"]) for c in state["locators"]] == [("B (2)", 0)]
     assert state["browser"]["loaded"]
 
