@@ -457,6 +457,10 @@ def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str
             "clip_index": clip_index,
             "path": path
         })
+        # Live moves a new clip's start to the file's first transient: back to the file's start
+        from .extended_tools import from_its_start
+        ableton.send_command("batch", {"commands": from_its_start(
+            f"live_set tracks {int(track_index)} clip_slots {int(clip_index)} clip"), "stop_on_error": False})
         return f"Created audio clip '{result.get('name', 'clip')}' at track {track_index}, slot {clip_index} (length {result.get('length', '?')} beats)"
     except Exception as e:
         logger.error(f"Error creating audio clip: {str(e)}")

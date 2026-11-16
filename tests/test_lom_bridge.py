@@ -663,6 +663,8 @@ def test_separate_stems_from_a_clip_onto_new_tracks(live_server, tmp_path, monke
     clip = fake_live.FakeClip(name="Song", length=8.0, midi=False)
     object.__setattr__(clip, "file_path", str(source))
     object.__setattr__(clip, "warping", False)
+    object.__setattr__(clip, "start_marker", 1.5)  # seconds into the file, unwarped
+    object.__setattr__(clip, "loop_start", 1.5)
     vox = song.tracks[2]
     vox.clip_slots[1].clip, vox.clip_slots[1].has_clip = clip, True
 
@@ -676,6 +678,8 @@ def test_separate_stems_from_a_clip_onto_new_tracks(live_server, tmp_path, monke
     assert names[3:7] == ["Song drums", "Song bass", "Song other", "Song vocals"]
     placed = song.tracks[3].clip_slots[1].clip
     assert placed.file_path == result["stems"]["drums"]["file"] and placed.warping is False
+    # each stem plays from where the source does, not where Live's warp analysis put its start
+    assert (placed.start_marker, placed.loop_start) == (1.5, 1.5) != (fake_live.FIRST_TRANSIENT,) * 2
     assert result["tracks"][0] == {"track": "Song drums", "clip_index": 1}
 
 
@@ -1902,12 +1906,14 @@ def test_generated_audio_lands_on_a_track_a_pad_or_a_simpler(live_server, fake_m
     assert "Samples/AbletonMCP Generated" in Path(job["out_dir"]).as_posix()
     assert result["placed"] == {"track": "Vox", "clip_index": 0}
     assert song.tracks[2].clip_slots[0].clip.file_path == result["files"][0]
+    assert song.tracks[2].clip_slots[0].clip.start_marker == 0.0  # the file's start, not its transient
     assert "non-commercial" in result["license"]
     # In the Arrangement
     call("generate_audio", prompt="vinyl crackle", seconds=2, track="Vox", arrangement_time=8,
          follow_set=False)
     assert fake_musicgen[1]["prompt"] == "vinyl crackle"
     assert song.tracks[2].arrangement_clips[-1].start_time == 8.0
+    assert song.tracks[2].arrangement_clips[-1].loop_start == 0.0
     # On a Drum Rack pad, and in a Simpler on a MIDI track without a rack
     call("manage_track", action="create_midi", name="Gen Kit")
     call("add_device", track="Gen Kit", device="Drum Rack")
@@ -2013,3 +2019,36 @@ def test_original_tools_against_the_script(live_server, monkeypatch):
         assert song.current_song_time == 8.0
     finally:
         connection.disconnect()
+
+
+def test_a_track_named_with_digits_is_found_by_its_name(live_server, monkeypatch):
+    """A track called "808" (as producers name one): its name, not track 808,
+    as an argument, an input routing and a sidechain source. An integer, or
+    digits no track is named, stay an index."""
+    from MCP_Server import extended_tools
+
+    script, call = live_server
+    song = script._song
+    song.tracks[0].name = "808"
+    assert extended_tools.track_path("808") == "live_set tracks 0"
+    assert extended_tools.track_path(808) == "live_set tracks 808"
+    assert extended_tools.track_path("2") == "live_set tracks 2"
+    call("set_track_mixer", track="808", mute=True)
+    assert song.tracks[0].mute is True
+    bass = song.tracks[1]
+    bass.available_input_routing_types = list(bass.available_input_routing_types) + [
+        fake_live.FakeObj(display_name="808")]
+    call("set_track_routing", track="Bass", input_type="808")
+    assert bass.input_routing_type.display_name == "808"
+    compressor = fake_live.INSERTABLE["Compressor"]
+
+    def keyed_by_808():
+        device = compressor()
+        device.available_input_routing_types = list(device.available_input_routing_types) + [
+            fake_live.FakeObj(display_name="808")]
+        return device
+
+    monkeypatch.setitem(fake_live.INSERTABLE, "Compressor", keyed_by_808)
+    result = call("apply_device_chain", track="Bass", chain="sidechain_duck", sidechain_from="808")
+    assert result["ok"], result
+    assert bass.devices[-1].input_routing_type.display_name == "808"

@@ -475,6 +475,11 @@ reference-dissector's `live-build`, which builds a plan through
 
 Not verified in Live (check each in a scratch set before claiming it):
 
+- The start put back on stems (`separate_stems(to_tracks=True)`: the
+  source's start marker, unwarped sources only), generated audio and the
+  original `create_audio_clip`; `build_tracks`' reset is the one Live ran.
+- Names made only of digits looked up by name (`named()`): the LOM side
+  is the routing types' `display_name`, as for any other name.
 - The rack rebuilt by name when `insert_chain`, `in_note` or
   `Chain.insert_device` fails (the rack is deleted with
   `Track.delete_device` and a new one gets every pad from the browser: no
@@ -558,6 +563,14 @@ Not verified in Live (check each in a scratch set before claiming it):
   call over several round-trips; return `batch_summary(...)`.
 - Address tracks with `track_path()` (index, name, `master`, `return A`), devices
   with `device_path()`, clips with `clip_path()`; quote names via `selector()`.
+  A LOM path takes every number for an index, so text made only of digits
+  that an item is named ("808") goes through `named()`, which looks the name
+  up first (one round trip); an integer is always an index.
+- A new audio clip's start: Live moves it to the file's first transient
+  (21 ms to 3.6 s in, measured 2026-10-11) and keeps it with warping off.
+  Every path that creates one puts it back (`from_its_start`: loop_start,
+  then start_marker); the fake moves it (`FIRST_TRANSIENT`) so a path that
+  forgets is caught.
 - Tools that wait (recording, long-polling) are `async` and use `asend()` so
   they don't block the event loop.
 - Put pure logic in `music.py` / `audio_analysis.py` with unit tests; keep tools

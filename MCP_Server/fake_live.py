@@ -271,9 +271,22 @@ class FakeClipSlot(FakeObj):
         object.__setattr__(clip, "file_path", path)
         object.__setattr__(clip, "warping", True)
         object.__setattr__(clip, "sample_rate", 44100.0)
+        _at_first_transient(clip)
         self.clip = clip
         self.has_clip = True
         return clip
+
+
+# Where Live's warp analysis puts a new audio clip's start: the file's first
+# transient (21 ms to 3.6 s in, measured by reference-dissector's first live
+# build in Live 12.4, 2026-10-11), kept with warping off. Here a fixed quarter
+# beat, so a tool that leaves it there is caught.
+FIRST_TRANSIENT = 0.25
+
+
+def _at_first_transient(clip):
+    object.__setattr__(clip, "loop_start", FIRST_TRANSIENT)
+    object.__setattr__(clip, "start_marker", FIRST_TRANSIENT)
 
 
 class FakeSample(FakeObj):
@@ -571,6 +584,7 @@ class FakeTrack(FakeObj):
         for key, value in (("file_path", path), ("warping", True), ("start_time", float(position)),
                            ("end_time", float(position) + 8.0), ("sample_rate", 44100.0)):
             object.__setattr__(clip, key, value)
+        _at_first_transient(clip)
         self.arrangement_clips.append(clip)
         return clip
 
