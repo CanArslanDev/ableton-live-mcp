@@ -41,6 +41,12 @@
 
 ### Changed
 
+- The jobs run reference-dissector f192456 (was 11a264c). For the jobs
+  only its `blueprint` step changed: a locator that rounds to the plan's
+  end is left out and logged, where it used to fail the job's last step.
+  Everything else they run writes the same files (`plan --live-sr` and
+  `candidates`' per-bar rule are off the jobs' path; the same plan made a
+  byte-identical blueprint at both commits).
 - The fake Live, and so the simulator, reports Live 12.4.16, where the
   latest measurements were made, and a pad the browser loads has 3 voices
   (a Simpler made by path 6), as Live 12.4.16 did on 2026-11-14.

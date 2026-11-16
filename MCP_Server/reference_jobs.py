@@ -40,7 +40,7 @@ from typing import Any
 
 from .reference_runner import log_tail, write_json
 
-REFDISSECT_COMMIT = "11a264c29a0297859bfa5efc47477aa8ae1fe751"
+REFDISSECT_COMMIT = "f192456ce0834d5e50da014ed9842e49a92c3b84"
 REFDISSECT_URL = ("https://github.com/CanArslanDev/reference-dissector/archive/"
                   f"{REFDISSECT_COMMIT}.zip")
 REFDISSECT_PYTHON = "3.12"  # refdissect needs 3.11+; the server runs on 3.10 too
