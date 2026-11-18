@@ -3388,7 +3388,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                  for t in made) or "no track"
             except Exception as again:  # Live is gone too
                 left = f"unknown tracks ({again})"
-            raise RuntimeError(f"build_tracks stopped: {e}. It left {left} in the set: delete "
+            why = str(e).rstrip().rstrip(".")  # Live's own messages end in a period
+            raise RuntimeError(f"build_tracks stopped: {why}. It left {left} in the set: delete "
                                "them, or open a new set, before building again") from e
         tracks = {t["name"]: t["index"] for t in send("get_session_overview")["tracks"][before:]}
         checks = bp.checks_on(data)

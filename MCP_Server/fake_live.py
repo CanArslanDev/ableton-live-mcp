@@ -322,7 +322,7 @@ def _compressor():
 def _insert_device(devices, name, index=-1):
     """Track/Chain.insert_device (Live 12.3+): a native device by browser name."""
     if name not in INSERTABLE:
-        raise RuntimeError("Unknown device name: %s" % name)
+        raise RuntimeError("Device %s not found." % name)  # Live 12.4.16's text, its period included
     device = INSERTABLE[name]()
     if index == -1:
         devices.append(device)
