@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A stopped `build_from_blueprint` no longer doubles a period.** Live's
+  own messages end in one ("Device NoSuchSynth not found."), and the
+  build's "build_tracks stopped: … It left … in the set" put a second
+  after it (seen in Live 12.4.16, 2026-11-18). The fake's unknown-device
+  error now reads as Live's does.
+
 ## 2.4.3 — 2026-11-16
 
 The Remote Script is unchanged (2.1.0): no reinstall or Live restart needed.

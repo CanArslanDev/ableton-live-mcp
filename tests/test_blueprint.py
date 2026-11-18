@@ -472,8 +472,9 @@ def test_a_failed_build_says_what_it_left(empty_live, monkeypatch):
     data["tracks"][1]["instrument"] = "No Such Synth"
     # the track that failed is not named yet: build_tracks names it with its settings
     with pytest.raises(ToolError, match=r"build_tracks stopped: Could not insert 'No Such Synth'.* It left "
-                                        r"'808 \(synth\)' \(Simpler\), '4-MIDI' \(no device\) in the set"):
+                                        r"'808 \(synth\)' \(Simpler\), '4-MIDI' \(no device\) in the set") as stopped:
         call("build_from_blueprint", blueprint=data)
+    assert ".." not in str(stopped.value)  # Live's message ends in a period of its own (Live 12.4.16, 2026-11-18)
 
 
 def test_a_scaled_copy_and_a_cut_stem_are_kept_across_a_second(tmp_path):
