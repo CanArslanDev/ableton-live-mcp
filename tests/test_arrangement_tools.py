@@ -148,11 +148,22 @@ def test_transitions_into_bar_five(sim):
                                                                      "at_bar": 5}))
 
 
-def test_recorded_automation_on_the_main_track(sim):
+def test_recorded_automation_on_the_main_track(sim, monkeypatch):
     sim.song.tempo = 960.0  # sixteen beats a second: the pass takes about half a second
     sim.song.tracks[2].arm = True
+    # Push's auto-arm: an implicitly armed track records too (Live 12.4.16)
+    sim.song.tracks[1].implicit_arm = True
+    armed_while_recording = []
+    update = fake_live.FakeSong._update_recording
+
+    def spy(song):
+        if vars(song).get("record_mode") and vars(song).get("is_playing"):
+            armed_while_recording.extend(t.name for t in song.tracks if t.arm or t.implicit_arm)
+        update(song)
+    monkeypatch.setattr(fake_live.FakeSong, "_update_recording", spy)
     result = call("record_automation", track="master", parameter="volume", start_bar=2,
                   bars=1, shape="ramp_down", low=0.2, high=0.9)
+    assert armed_while_recording == [] and sim.song.tracks[1].implicit_arm is True
     assert result["points"] >= 3
     state = sim.state()
     lane = state["master"]["automation"]["mixer/Track Volume"]
@@ -182,3 +193,21 @@ def test_undo_brings_covered_clips_back_alive(sim):
     assert [c["name"] for c in bass["arrangement_clips"]] == ["Bassline"]
     assert played(bass, 0, 16) == before
     assert sim.song.tracks[1].arrangement_clips[0].end_time == 16.0
+
+
+def test_recorded_automation_refuses_while_a_track_stays_armed(sim, monkeypatch):
+    """The arms are read back before anything plays: a track Live leaves
+    armed (here the disarm is skipped) stops the pass."""
+    sim.song.tempo = 960.0
+    sim.song.tracks[2].arm = True
+    plays = []
+    start = fake_live.FakeSong.start_playing
+    monkeypatch.setattr(fake_live.FakeSong, "start_playing",
+                        lambda song: (plays.append(1), start(song)))
+    monkeypatch.setattr(extended_tools, "disarm_ops", lambda armed, implicit, on=False: [])
+    with pytest.raises(Exception, match="Vox stayed armed"):
+        asyncio.run(live_server.mcp.call_tool("record_automation", {
+            "track": "master", "parameter": "volume", "start_bar": 2, "bars": 1,
+            "shape": "ramp_down"}))
+    assert plays == [] and not sim.song.is_playing and not sim.song.record_mode
+    assert "automation" not in sim.state()["master"]

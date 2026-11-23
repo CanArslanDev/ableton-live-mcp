@@ -323,3 +323,67 @@ def test_minimum_frequency_never_goes_under_basic_pitchs_lowest_note():
     assert ml_worker.frequency_floor(25.0) == 27.5
     assert ml_worker.frequency_floor(41.2) == 41.2
     assert ml_worker.frequency_floor(None) is None
+
+
+def test_jobs_run_one_at_a_time():
+    """Four find_similar_sounds at once starved Live: a second job waits."""
+    said = []
+
+    async def report(fraction, message):
+        said.append(message)
+
+    async def both():
+        return await asyncio.gather(ml.run("echo", {"clock": 1, "sleep": 0.4}),
+                                    ml.run("echo", {"clock": 1, "sleep": 0.4}, report))
+
+    first, second = asyncio.run(both())
+    assert second["started"] >= first["ended"]
+    assert any("Waiting for the echo job" in m for m in said)
+
+
+@pytest.mark.skipif(not hasattr(os, "nice"), reason="no nice() here")
+def test_jobs_run_below_lives_priority():
+    assert asyncio.run(ml.run("echo", {"niceness": 1}))["niceness"] >= 10
+
+
+def test_stems_of_two_sources_never_share_a_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    out = tmp_path / "out"
+    assert ml.stem_folder(str(out), "Mix", "/a/Mix.wav") == out    # empty: fine
+    out.mkdir()
+    (out / "drums.wav").write_bytes(b"x")
+    ml.mark_stems(out, "/a/Mix.wav")
+    assert ml.stem_folder(str(out), "Mix", "/a/Mix.wav") == out    # same source again
+    with pytest.raises(FileExistsError, match="already holds stems .drums.wav. of /a/Mix.wav"):
+        ml.stem_folder(str(out), "Mix", "/b/Mix.wav")
+    assert ml.stem_folder(str(out), "Mix", "/b/Mix.wav", overwrite=True) == out
+    (out / ml.STEMS_MARK).unlink()                                 # stems of unknown origin
+    with pytest.raises(FileExistsError, match="not recorded.*overwrite=true"):
+        ml.stem_folder(str(out), "Mix", "/a/Mix.wav")
+    assert ml.stem_folder(str(out), "Mix", "/a/Mix.wav", overwrite=True) == out
+    # The default folder moves on to "<name> 2" for another file of that name
+    base = tmp_path / "Music" / "Ableton MCP" / "Stems"
+    (base / "Mix").mkdir(parents=True)
+    (base / "Mix" / "vocals.wav").write_bytes(b"x")
+    ml.mark_stems(base / "Mix", "/a/Mix.wav")
+    assert ml.stem_folder(None, "Mix", "/a/Mix.wav") == base / "Mix"
+    assert ml.stem_folder(None, "Mix", "/b/Mix.wav") == base / "Mix 2"
+
+
+def test_a_queued_job_prepares_once_its_turn_comes():
+    """Two separate_stems queued at once must not pick the same default
+    folder: the folder is chosen in prepare, under the lock."""
+    import time
+
+    prepared = {}
+
+    def prepare(job):
+        prepared[job["n"]] = time.time()
+
+    async def both():
+        return await asyncio.gather(
+            ml.run("echo", {"n": 1, "sleep": 0.2, "clock": 1}, prepare=prepare),
+            ml.run("echo", {"n": 2, "clock": 1}, prepare=prepare))
+
+    first, second = asyncio.run(both())
+    assert prepared[2] >= first["ended"] and second["started"] >= first["ended"]

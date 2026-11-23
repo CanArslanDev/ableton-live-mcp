@@ -1,5 +1,5 @@
 """Diagnose the setup: versions, installed script copies, the connection,
-blocking dialogs in Live, and AbletonMCP errors in Live's log.
+blocking dialogs in Live, AbletonMCP errors and the audio device in Live's log.
 
 Used by the `doctor` tool and the `ableton-mcp-doctor` command. Read-only:
 it never changes the set or any file.
@@ -232,11 +232,7 @@ def check_live_log(log: Path | None = None) -> dict:
     if log is None:
         return _check("live_log", "info", "Live's Log.txt not found")
     try:
-        with log.open("rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            handle.seek(max(0, size - _LOG_TAIL_BYTES))
-            text = handle.read().decode("utf-8", errors="replace")
+        text = _log_tail(log)
     except OSError as e:
         return _check("live_log", "info", f"Could not read {log}: {e}")
     lines = text.splitlines()
@@ -253,6 +249,51 @@ def check_live_log(log: Path | None = None) -> dict:
                       f"{len(errors)} AbletonMCP error line(s) since the script last "
                       f"started; latest: " + " | ".join(e[-200:] for e in errors[-3:]))
     return _check("live_log", "ok", f"No AbletonMCP errors since the script last started ({log})")
+
+
+def _log_tail(log: Path) -> str:
+    with log.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - _LOG_TAIL_BYTES))
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def audio_devices(log: Path | None = None) -> dict | None:
+    """Live's audio devices as its Log.txt last named them: {"output",
+    "input", "line"} (the "Output Device" line), None without a log or a
+    line. Live 12.4 writes an "Audio In Out:" block at start and on every
+    change, sometimes several in a row; the last one holds."""
+    log = log or newest_log()
+    if log is None:
+        return None
+    try:
+        lines = _log_tail(log).splitlines()
+    except OSError:
+        return None
+    found: dict = {}
+    for line in reversed(lines):
+        for key, label in (("output", "Output Device: "), ("input", "Input Device: ")):
+            if key not in found and f"Audio In Out: {label}" in line:
+                found[key] = line.split(label, 1)[1].strip()
+                if key == "output":
+                    found["line"] = line.strip()
+        if "output" in found and "input" in found:
+            break
+    return found if "output" in found else None
+
+
+def check_audio_device(log: Path | None = None) -> dict:
+    devices = audio_devices(log)
+    if devices is None:
+        return _check("audio_device", "info", "Live's audio device not found in its Log.txt")
+    if devices["output"].lower() == "no device":
+        return _check("audio_device", "warn",
+                      "Live's audio output device is \"No Device\": the audio engine is off, "
+                      "so renders and captures record nothing (Log.txt: "
+                      f"{devices['line']})",
+                      "Choose an output device in Live's Settings › Audio.")
+    return _check("audio_device", "ok", f"Live's audio output: {devices['output']}")
 
 
 def check_companion() -> dict:
@@ -329,6 +370,7 @@ def run(host: str = "127.0.0.1", port: int = 9877) -> dict:
     connection, _state = check_connection(host, port)
     checks += connection
     checks.append(check_live_log())
+    checks.append(check_audio_device())
     checks.append(check_companion())
     checks.append(check_reference_dissector())
     problems = [c for c in checks if c["status"] in ("fail", "warn")]

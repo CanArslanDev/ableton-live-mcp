@@ -60,7 +60,22 @@ audible at once, and each tool call is one step in Live's undo history.
 - `mix_doctor()` records every track at once and finds masking and level
   problems (see the mix-and-master skill).
 - These play the set in real time, so tell the user before starting a long
-  section, and keep sections short (8–16 bars) while iterating.
+  section, and keep sections short (8–16 bars) while iterating. Check
+  `render.mode`/`played` says what you meant to hear. Other tracks are
+  disarmed for the take and put back. "Live recorded no audio" means Live's
+  audio output device is off (`doctor()`); don't retry until it's set.
+- The recordings stay in the project's Samples/Recorded (paths in the
+  result); `manage_track(action="delete_recording_tracks")` removes tracks
+  kept with `keep_track=True`.
+- A tempo with low `tempo_confidence` may be one of
+  `tempo_alternatives_bpm`; a `weak` key is a guess.
+
+## Saving
+
+Live's API cannot save the set. Ask the user to save (Cmd+S with Live in
+front; on macOS, File › Save Live Set). A keystroke or menu click sent
+while another app is in front does nothing, silently: after saving, check
+that the .als file's modification time changed.
 
 ## "This part", "the selection"
 

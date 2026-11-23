@@ -210,3 +210,106 @@ def test_level_report_peaks_time_weighted_averages_and_notes():
     text = " ".join(report["observations"])
     assert "no headroom" in text and "No signal on: Keys" in text
     assert report["levels"][0]["track"] == "Master"
+
+
+def groove(bpm, events, bars=16, rate=44100):
+    """events: (beat in the bar, sound) repeated every 4/4 bar."""
+    y = np.zeros(int(rate * 60 / bpm * 4 * bars) + rate)
+    for bar in range(bars):
+        for beat, sound in events:
+            start = int(round((bar * 4 + beat) * 60 / bpm * rate))
+            y[start:start + len(sound)] += sound[:len(y) - start]
+    return y
+
+
+def _hit(freq, decay, amp, rate=44100):
+    n = np.arange(int(0.15 * rate))
+    return amp * np.exp(-n / (decay * rate)) * np.sin(2 * np.pi * freq * n / rate)
+
+
+def _noise(decay, amp, seed, rate=44100):
+    n = np.arange(int(0.08 * rate))
+    return amp * np.exp(-n / (decay * rate)) * np.random.default_rng(seed).normal(0, 1, len(n))
+
+
+KICK, SNARE, HAT = _hit(55, 0.08, 0.8), _noise(0.05, 0.4, 0), _noise(0.01, 0.08, 1)
+
+
+def test_tempo_picks_the_beat_among_its_relations():
+    """The strongest autocorrelation peak alone read a house groove at 124
+    BPM as 82.7 (2:3) and four on the floor at 145 as 72.5; the pulse over
+    the period's multiples and the preference around 120 BPM pick the beat."""
+    import tempo_bench as tb
+
+    house = tb.case_audio("house", 124, 4)
+    assert audio_analysis.estimate_tempo(house, tb.RATE) == pytest.approx(124, abs=0.1)
+    floor = [(i, KICK) for i in range(4)] + [(i + 0.5, HAT) for i in range(4)]
+    assert audio_analysis.estimate_tempo(groove(145, floor), 44100) == pytest.approx(145, abs=0.1)
+
+
+def test_an_uncertain_tempo_names_its_alternatives(tmp_path):
+    """A 102 BPM trap beat with 16th hats reads 136 (4:3, like the remake
+    session's 136 BPM song read as 102): too close to call, so it says so."""
+    trap = [(0, KICK), (2.75, KICK), (2, SNARE)] + [(i / 4, HAT) for i in range(16)]
+    sf.write(tmp_path / "trap.wav", groove(102, trap), 44100)
+    result = audio_analysis.analyze(tmp_path / "trap.wav")
+    assert result["tempo_confidence"] < audio_analysis.TEMPO_UNSURE
+    assert 102 in [round(a) for a in result["tempo_alternatives_bpm"] + [result["tempo_estimate_bpm"]]]
+    assert any(o.startswith("Tempo uncertain") for o in result["observations"])
+
+
+def test_a_weak_key_is_flagged(tmp_path):
+    noise = np.random.default_rng(0).normal(0, 0.1, RATE * 4)
+    result = audio_analysis.analyze(write(tmp_path, "noise.wav", noise))
+    assert result["key_estimate"]["weak"] is True and "or" in result["key_estimate"]
+    assert any(o.startswith("Key estimate weak") for o in result["observations"])
+    # A triad alone is C major or E minor; a scale is C major
+    triad = audio_analysis.estimate_key(sum(sine(f, 4, 0.1) for f in (261.63, 329.63, 392.0)), RATE)
+    assert triad["weak"] and triad["or"] == "E minor"
+    scale = [261.63, 293.66, 329.63, 349.23, 392.0, 440.0, 493.88, 523.25, 392.0, 261.63]
+    clear = audio_analysis.estimate_key(np.concatenate([sine(f, 0.5, 0.1) for f in scale]), RATE)
+    assert clear["key"] == "C major" and "weak" not in clear
+
+
+def test_tempo_benchmark_never_loses_what_the_peak_got_right(monkeypatch):
+    """tests/tempo_bench.py: click tracks, four on the floor, house, trap,
+    drill, boom bap, half-time, drum and bass, reggaeton, waltzes and the
+    remake session's 136 BPM song with accents every 4/3 beat. The
+    strongest autocorrelation peak alone (the old pick) got 10 of 19; the
+    relations must never turn one of those wrong."""
+    import tempo_bench as tb
+
+    def run(switch):
+        monkeypatch.setattr(audio_analysis, "TEMPO_SWITCH", switch)
+        return [audio_analysis.tempo_estimate(tb.case_audio(*case), tb.RATE)
+                for case in tb.CASES]
+
+    switch = audio_analysis.TEMPO_SWITCH
+    peak, picked = run(1e9), run(switch)
+    right = [abs(p["bpm"] - bpm) <= 1 for p, (_s, bpm, _m) in zip(picked, tb.CASES)]
+    for was, now, ok, (style, bpm, _m) in zip(peak, picked, right, tb.CASES):
+        assert ok or abs(was["bpm"] - bpm) > 1, f"{style} at {bpm}: {now['bpm']}"
+    assert sum(right) >= 11
+    # Right picks are rarely called uncertain
+    assert sum(ok and p["confidence"] < audio_analysis.TEMPO_UNSURE
+               for p, ok in zip(picked, right)) <= 2
+    # The remake song: the peak says 102, and 136 is offered
+    song = picked[[c[0] for c in tb.CASES].index("triplet accents")]
+    assert round(song["bpm"]) == 102 and 136 in [round(a) for a in song["alternatives"]]
+
+
+def test_a_close_four_to_three_tempo_is_named(tmp_path):
+    """The remake song reads 102 BPM, its 4:3 (136) scoring 0.78 of that:
+    the observations name it. Click tracks and four on the floor stay quiet."""
+    import tempo_bench as tb
+
+    def notes(style, bpm):
+        sf.write(tmp_path / "x.wav", tb.case_audio(style, bpm, 4), tb.RATE)
+        return [o for o in audio_analysis.analyze(tmp_path / "x.wav")["observations"]
+                if o.startswith("Tempo")]
+
+    assert notes("triplet accents", 136) == [
+        "Tempo 101.96 BPM; could be 135.9 (4:3): check by ear."]
+    for style, bpm in (("click", 128), ("click", 90), ("four on the floor", 120),
+                       ("house", 124)):
+        assert notes(style, bpm) == [], (style, bpm)

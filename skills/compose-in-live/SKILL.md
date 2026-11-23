@@ -61,7 +61,10 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
 - Live's own devices without the browser: `add_device(track=..., device="Drift")`.
 - By description or example: `find_similar_sounds(text="dusty vinyl kick")` or
   `find_similar_sounds(like="/path/to/sound.wav")`; the first search in a
-  folder indexes it, so warn that it takes a minute or two.
+  folder indexes it, so warn that it takes a minute or two. One search at a
+  time (they queue). The default folders hold one-shots: for leads or pads
+  give a `folder` of such sounds and `min_seconds`; a `warning` about weak
+  matches means none fits.
 - When nothing in the library fits, make it: `generate_audio(prompt="metallic
   snare hit", seconds=1.5, track="Drums", drum_pad="snare")` or a loop onto an
   audio track (MusicGen, on this computer; the set's tempo and key go into

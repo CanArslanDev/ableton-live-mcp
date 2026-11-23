@@ -154,6 +154,65 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   Arrangement time, and `generate_audio` / `separate_stems` placing audio
   in the Arrangement.
 
+- **Only the recording tracks record.** `render_and_analyze`,
+  `capture_stems`, `mix_doctor` and `compare_to_reference` stopped the
+  transport and put arms back in one batch, arms first, so re-armed tracks
+  recorded and split their clips (Crank). The transport now stops and
+  record mode goes off first; arms come back in a later command. Tracks
+  with `implicit_arm` (Push's auto-arm, which records in Live 12.4.16) are
+  disarmed for the take too, every arm is read back before anything plays
+  (a track that stays armed stops the render), and the result names the
+  tracks it disarmed (`disarmed_for_take`). `record_automation` turns
+  implicit arms off as well, by track id, and reads the arms back before
+  it plays.
+- **The selection comes back after a recording**; Live had moved it to a
+  neighbour of the deleted temporary track. A scene render stops the clips
+  it launched and puts Back to Arrangement back (Live 12.4.16 left them
+  playing on the stopped transport, overriding the Arrangement).
+- **An empty recording is an error that names Live's audio device.** With
+  "No Device" as Live's output, Live wrote 92-byte WAVs (2 frames) and the
+  render analysed them or said "no audio file was found" (Nerdeysen). A
+  recording must now hold the section: almost no frames is an error that
+  quotes Live's Log.txt about the output device; a take Live cut short
+  (its clip under the section's beats), playback stopping before the end
+  and a take that never reaches it (formerly a silent return at the
+  deadline; it waits as long as a slower scene tempo and 8 bars of the
+  meter need) are errors
+  too. The clip's beats, not the set's tempo, measure
+  a take, so a scene with its own tempo or tempo automation renders.
+  Files are read once their size has held for a second.
+- **Analyses cover the section only**: Live records on until the stop
+  reaches it, so the recording's tail is left out (by the clip's span),
+  and at most 600 s are read (the length reported is the real one). A
+  kept track is disarmed also when the setup stops early.
+- **A scene's tempo no longer stays.** A scene with a tempo of its own
+  changed the set's for good; the set's tempo is put back
+  (`tempo_put_back`). The metronome comes back also when a render stops
+  before playing, and a render whose arms cannot be read back does not
+  record.
+- **No more "Post Mixer" errors in Live's log.** Setting the input
+  channel in the batch that set the inputs failed on all but the first
+  new track (Live still listed Ext. In's channels); Live had set Post
+  Mixer with the input anyway. The channel is now read in a later command
+  and set only where it is not Post Mixer.
+- **`separate_stems` no longer overwrites another file's stems.** An
+  `out_dir` holding stems of another (or an unrecorded) source is refused
+  unless `overwrite=true`; the default folder moves on to "<name> 2" for a
+  second file of the same name, chosen when the job's turn comes (two
+  queued calls cannot pick the same one).
+- **`read_live_set` finds the samples of a moved project.** Live 12.4
+  saves project samples as `RelativePathType` 3, relative to the project;
+  they were looked up only at their old absolute path and reported missing.
+- **Tempo estimates weigh double, half and 3:4 tempos** (a 136 BPM song
+  read as 102): the peak's relations are scored by how well a pulse at
+  that period fits, with a preference around 120 BPM, and replace the
+  peak's tempo only by a clear margin. On 206 synthetic grooves: 140 right
+  against the peak's 119, none lost; the remake song's pattern still reads
+  102, with 136 among the alternatives.
+- **Machine-learning jobs run one at a time**, below Live's priority:
+  four `find_similar_sounds` at once never finished and starved Live
+  until its connection timed out. A queued call says what it waits for.
+
 ### Added
 
 - **`set_device_parameter_by_name(pad=…)`** reaches a Drum Rack pad's
@@ -190,6 +249,26 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   track's clips around the gap (`clips`: `arrangement_clip_index`, start,
   end), so they need not be read again.
 
+- **`manage_track(action="delete_recording_tracks")`** deletes the
+  "MCP Rec …" tracks `render_and_analyze(keep_track=True)` left; their
+  files stay in Samples/Recorded. It deletes by track id and is refused
+  while one of them is armed or in a take (a render running in this or
+  another session). `render_and_analyze` returns the recording's path
+  (`file`, with `render.played` saying what played), `mix_doctor` its
+  `files`.
+- **Tempo and key confidence**: `analyze_audio_file` and the renders add
+  `tempo_confidence` and `tempo_alternatives_bpm`; `key_estimate` gets
+  `weak` and `or` (the runner-up) when the key is a guess. `observations`
+  note a weak key, an uncertain tempo (confidence under 0.1) and a 4:3 or
+  3:4 tempo scoring 0.75 of the pick's or more ("Tempo 102 BPM; could be
+  136 (4:3): check by ear."; on the benchmark it named one for 7 of 73
+  right picks, none of them click tracks or four on the floor).
+- **`find_similar_sounds(min_score=…, min_seconds=…, max_seconds=…)`**
+  filters weak matches and sustained sounds from one-shots, and the
+  result warns when the best match is weak.
+- **`doctor` checks Live's audio output device** in its Log.txt and warns
+  on "No Device".
+
 ### Docs
 
 - The ableton-live skill: read the track's devices before retrying an
@@ -203,6 +282,14 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   CLAUDE.md: how Live 12.4.16 sizes copies into the Arrangement, warps and
   unwarps new audio clips, trims and deletes Arrangement clips, moves the
   playhead, and names audio tracks after their first clip.
+
+- README Limitations and the ableton-live skill: Live's API cannot save
+  the set; ask the user to save (on macOS, File › Save Live Set with Live
+  in front; a keystroke sent while another app is in front is lost) and
+  check the .als modification time. Recordings stay in the project's
+  Samples/Recorded. CLAUDE.md: implicit arm, recording files, Live's
+  audio device in Log.txt, RelativePathType values in Live 12.4 sets, and
+  CLAP scores, as measured on 2026-11-23.
 
 ### Tests
 
@@ -221,6 +308,15 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   clips they cover (a covered or deleted clip can no longer be read or
   changed, until undo brings it back), and the playhead following new
   Arrangement clips.
+- `tests/test_render.py` answers recording like Live 12.4.16 (arm and
+  implicit arm, the selection, tracks recording while Live plays with
+  record mode on) and checks each recording fix above; a moved project
+  for `read_live_set`; a tempo benchmark (`tests/tempo_bench.py`: click
+  tracks, house, trap, drill, boom bap, half-time, drum and bass,
+  reggaeton, waltzes, the remake song's pattern) that must never lose a
+  tempo the peak alone got right; two ML jobs at once; stems of two
+  sources in one folder.
+  `fake_live` tracks have `implicit_arm`.
 
 ## 2.4.3 — 2026-11-16
 

@@ -26,7 +26,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/live_updates.py` | Pushes `ableton://events` / `ableton://session/overview` updates: `resources/subscribe` (2025-11-25) and `subscriptions/listen` (2026-07-28). Its long polls use a connection of their own (on the tools' one every command would queue behind them). |
 | `MCP_Server/ui/` | MCP Apps panels (`ui://` HTML resources) registered through the SDK's `Apps` extension. |
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
-| `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
+| `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`; Live's audio device from its Log.txt (`audio_devices`). |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
 | `MCP_Server/companion.py` | Client for the Extensions SDK add-on: finds its session file, sends one command. |
 | `extension/` | AbletonMCP Companion, the Extensions SDK add-on (TypeScript): share selection, confirm dialog, pre-FX render. |
@@ -373,6 +373,15 @@ Measured on Live 12.3.8:
   pitch the onset head read a median 0.29 at the true onset and peaked at
   0.37, 81 ms later; 0.3 % of the 336 notes reached 0.6 and 7 % 0.5, and
   onset thresholds from 0.2 to 0.6 all gave F1 ≤ 0.17 on those stems.
+- CLAP scores (cosine) on 1,500 Core Library one-shots (2026-11-23): text
+  queries for sounds the folder holds topped at 0.40–0.77 ("808 bass"
+  0.77, "closed hi-hat" 0.40), for sounds it lacks ("sustained synth
+  lead", "warm pad", "long string ensemble") at 0.23–0.31, all drums; a
+  sound's nearest others at 0.75–0.95. `ml.WEAK_SCORE` warns below 0.35
+  (text) and 0.6 (example). Embedding 10 texts took 10.9 s, mostly start-up.
+- `ml.run` runs one job at a time per server (a lock per event loop; a
+  queued call reports what it waits for) and the worker lowers its own
+  priority (`os.nice(10)`).
 - Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
   `ABLETON_MCP_ML_TESTS=1` adds two runs with the real Basic Pitch model (an
   A4 and its bends; a driven 808 line the default preset must find).
@@ -578,6 +587,52 @@ at 48 kHz) for the Arrangement and audio clip tools:
   Setting the name to "" gives Live's naming back. Address such tracks by
   index or id.
 
+Measured on 2026-11-23 (Live 12.4.16 Trial, empty unsaved set, 44.1 kHz
+output) for the recording tools:
+
+- **Implicit arm records.** `Track.implicit_arm` (Push's auto-arm of the
+  selected track) stayed False on every track here, selected or not, with
+  or without an instrument (no Push attached); it can be set through the
+  LOM, leaves no undo step, and a MIDI track with it set recorded a MIDI
+  clip during an Arrangement render like an armed one. Selecting another
+  track did not clear it. `record_section` and `record_automation` turn
+  arm and implicit arm off for the take (`REC_ARMS`, read back before
+  playing) and back on after the transport stopped, in a later command.
+- **Recording files** follow the audio device's rate: at 44.1 kHz here
+  (94,720 frames for 4.30 beats at 120 BPM), 48 kHz on the earlier
+  device. An unsaved set records into `~/Music/Ableton/Live
+  Recordings/<date time> Temp Project/Samples/Recorded/` (a saved one into
+  its project's `Samples/Recorded`), named "<track> 0001 [<date time>].wav".
+  The Arrangement clip's `file_path` reads empty while recording; the file
+  was complete (size and frames final) 30 ms after `stop_playing`, its
+  frames matching the clip's span, which runs past the asked end by the
+  time the stop takes (4 beats asked, 4.30 recorded). A Session take
+  (`fire(length)`) also pre-creates the next take's file ("… 0002", deleted
+  with the track), and an armed audio track re-armed after a Session take
+  got an empty (0-byte) take file that went when it was disarmed; no clip.
+- **A scene render left the scene's clips playing** on the stopped
+  transport (`playing_slot_index` 0, `back_to_arranger` True);
+  `stop_all_clips(False)` stopped them and `back_to_arranger` set to False
+  read back from the next command. A render leaves the selection on a
+  neighbour of its deleted track; `record_section` sets it back.
+- **Input channels**: setting a new track's `input_routing_type` to a
+  track or return sets its channel to "Post Mixer" with it. In the batch
+  that set three tracks' inputs, the later tracks still listed Ext. In's
+  channels (1/2, 1, 2), so setting "Post Mixer" there failed (logged by
+  the script) though the channel already was; the next command read Post
+  Mixer on all three. `record_section` reads it then (`post_mixer`).
+- **A scene with a tempo** (scene 1 at 160 BPM, `tempo_enabled`) changed
+  the set's tempo for good when a render fired it; its 4 beats lasted
+  1.5 s. `record_section` puts the tempo back and measures takes by the
+  clip's beats.
+- **Live without an audio device** (the user's sessions of 2026-11-22/23):
+  Log.txt has "Audio In Out: Output Device: No Device", and its renders
+  were 92-byte WAVs: a JUNK chunk, 24-bit stereo at 44.1 kHz, 2 frames.
+  Live writes an "Audio In Out:" block at start and on each change of
+  device, several in a row while switching (a transient "No Device" before
+  the device): the last "Output Device" line is the current one
+  (`doctor.audio_devices`).
+
 Not verified in Live (check each in a scratch set before claiming it):
 
 - The start put back on stems by `separate_stems(to_tracks=True)` (the
@@ -596,7 +651,6 @@ Not verified in Live (check each in a scratch set before claiming it):
   minus `start_marker` (beats) as the note's beat in the new clip; on an
   unwarped clip `start_marker` in seconds; `Clip.sample_rate`, else the
   file's rate.
-- A 44.1 kHz audio device: every recording ran at 48 kHz.
 - `fit_audio_clip` on a clip Live warped with inner markers (the remake
   sessions saw 17 on a padded file): it removes them with
   `remove_warp_marker` before moving the last; only three-marker clips
@@ -617,9 +671,15 @@ Not verified in Live (check each in a scratch set before claiming it):
 - A clip plays `Loop/LoopStart..LoopEnd` whether the loop is on or off (with
   it off they are the start and end markers); arrangement clips sit at
   `CurrentStart..CurrentEnd`. Drum pad note = 128 − `ReceivingNote`.
-- Sample paths: `RelativePathType` 1 = project folder, 5 = a Live Pack
-  (`LivePackName`, e.g. the Core Library in the app bundle), 6 = Library,
-  7 = Live's Builtin folder; `Path` is absolute on the machine that saved it.
+- Sample paths (`FileRef`): `RelativePathType` 3 = relative to the Live
+  Project (the folder holding "Ableton Project Info"): every project sample
+  in the user's five Live 12.4.16 sets, "Samples/Imported/…"; 5 = a Live
+  Pack (`LivePackName`, e.g. "Core Library" in the app bundle); 7 = Live's
+  Builtin folder (IRs, MPE Control); 1 = relative to the set's own folder
+  with ".." steps (seen on presets' refs, from the machine that made them);
+  6 = Library (not seen there); 0 = none. `Path` is absolute on the
+  machine that saved it: a moved project ("Dreyko Lead Project" → "Dreyko
+  Lead", 2026-11-23) keeps the old one, so type 3 tries the project first.
 - No writer on purpose: it would be the way around the Trial's disabled
   saving, and a damaged set is worse than none.
 

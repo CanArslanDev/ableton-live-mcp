@@ -325,8 +325,16 @@ def echo(job: dict) -> dict:
     """For tests: the protocol without any library."""
     import time
 
+    import os
+
     progress(0.5, "echo")
+    if job.get("niceness"):
+        job["niceness"] = os.nice(0) if hasattr(os, "nice") else None
+    if job.get("clock"):
+        job["started"] = time.time()
     time.sleep(float(job.get("sleep", 0)))
+    if job.get("clock"):
+        job["ended"] = time.time()
     if job.get("fail"):
         raise ValueError(job["fail"])
     return job
@@ -336,8 +344,19 @@ TASKS = {"separate": separate, "transcribe": transcribe, "embed": embed, "genera
          "echo": echo}
 
 
+def lower_priority() -> None:
+    """Below Live: a job that takes every core must not starve Live's
+    audio and its Remote Script (torch's threads inherit this)."""
+    try:
+        import os
+        os.nice(10)
+    except (AttributeError, OSError):  # Windows has no nice
+        pass
+
+
 def main() -> int:
     task = sys.argv[1] if len(sys.argv) > 1 else ""
+    lower_priority()
     if task not in TASKS:
         emit(error=f"Unknown task {task!r}; known: {', '.join(TASKS)}")
         return 2

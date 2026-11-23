@@ -677,8 +677,31 @@ def _question(ctx: Context | None, describe: Callable[[], str]) -> Elicit[_Confi
     return Elicit(message, _Confirm)
 
 
+def recording_tracks() -> list[tuple[int, str]]:
+    """(id, name) of the tracks record_section made and left ("MCP Rec …").
+    Refused while one is armed: a take is running (here or in another
+    session; RECORDING only knows this server's)."""
+    rows = [t for t in lom_get("live_set tracks", ["name", "arm"])["items"]
+            if str(t.get("name", "")).startswith("MCP Rec ")]
+    busy = [t["name"] for t in rows if t.get("arm") is True or t.get("$id") in RECORDING]
+    if busy:
+        raise RuntimeError(f"A recording is running ({', '.join(busy)} armed or in a take); "
+                           "delete the recording tracks once it has finished.")
+    return [(t["$id"], t["name"]) for t in rows]
+
+
 def ask_track_delete(action: str, ctx: Context, track: int | str | None = None
                      ) -> Elicit[_Confirm] | _Confirm:
+    if action.lower() == "delete_recording_tracks":
+        def listing() -> str:
+            names = [name for _i, name in recording_tracks()]
+            return (f"Delete {len(names)} recording track(s) ({', '.join(names)})? Their "
+                    "files stay in Samples/Recorded; Live can undo it.")
+        try:
+            found = recording_tracks()
+        except Exception:  # a take is running: the tool says so
+            return PROCEED
+        return _question(ctx, listing) if found else PROCEED
     if action.lower() != "delete" or track is None:
         return PROCEED
 
@@ -1057,6 +1080,91 @@ def insert_devices(track: str, inserts: list[list[Any]]) -> tuple[list[int], str
             raise RuntimeError(f"Could not insert {args[0]!r}: {message}")
         ids.append(step["result"]["result"]["$id"])
     return ids, name
+
+
+# ── Recording: what may record, and what came out ───────────────────────────
+
+# Every track's arm and implicit arm. Live 12.4.16 (2026-11-23): a track
+# with implicit_arm (Push's auto-arm of the selected track; settable
+# through the LOM, no undo step) records in the Arrangement like an armed
+# one, so both are turned off for a take and put back after it.
+REC_ARMS = {"type": "lom_get", "params": {"path": "live_set tracks",
+                                          "properties": ["name", "arm", "implicit_arm"]}}
+# Grace past a section's end before a take counts as stuck, and how long a
+# recording's size must stay put before it is read (Live 12.4.16 had the
+# file complete 30 ms after stop_playing)
+RECORD_GRACE_S = 30.0
+SETTLE_S = 1.0
+ANALYSIS_MAX_S = 600.0
+# Ids of the temporary tracks of takes running in this server
+# (delete_recording_tracks leaves them alone)
+RECORDING: set[int] = set()
+
+
+def rows_of(step: dict) -> list[dict]:
+    if step.get("status") == "error":
+        return []
+    return (step.get("result") or {}).get("items", [])
+
+
+def arming(rows: list[dict]) -> tuple[list[int], list[int]]:
+    """(armed track ids, implicitly armed track ids)."""
+    return ([r["$id"] for r in rows if r.get("arm") is True],
+            [r["$id"] for r in rows if r.get("implicit_arm") is True])
+
+
+def disarm_ops(armed: list[int], implicit: list[int], on: bool = False) -> list[dict]:
+    """Turn those arms off (on=False) or back on."""
+    return ([op_set(f"id {t}", "arm", on) for t in armed]
+            + [op_set(f"id {t}", "implicit_arm", on) for t in implicit])
+
+
+def audio_device_note() -> str:
+    """What Live's log says about its audio output, for a recording that
+    came back empty or never ran."""
+    from .doctor import audio_devices
+    try:
+        devices = audio_devices()
+    except Exception as e:
+        logger.debug("No audio device read: %s", e)
+        devices = None
+    if devices is None:
+        return ("Check Live's audio output device (Settings › Audio): without one Live "
+                "records nothing.")
+    if devices["output"].strip().lower() == "no device":
+        return (f"Live's audio output device is \"No Device\" (Log.txt: {devices['line']}), "
+                "so its audio engine is off and records nothing. Choose an output device in "
+                "Live's Settings › Audio, then record again.")
+    return (f"Live's audio output device is {devices['output']} (Log.txt); check that "
+            "Live's audio engine runs (Settings › Audio).")
+
+
+def check_recording(label: str, path: str, beats: float | None,
+                    length_beats: float) -> float:
+    """The seconds of the file that hold the section, once it does. An
+    error for a file with (almost) no audio frames (Live without an audio
+    device writes a 92-byte WAV of 2 frames), naming Live's audio device,
+    and for a take Live cut short (its clip under the section's beats).
+    The clip's beats, not the set's tempo, measure the take: a scene or
+    tempo automation may change the tempo. Live records on past the end
+    until the stop reaches it; those frames are left out."""
+    import soundfile as sf
+
+    try:
+        info = sf.info(path)
+        got = info.frames / float(info.samplerate)
+    except Exception as e:
+        raise RuntimeError(f"Could not read the recording of {label} ({path}): {e}") from e
+    if got < 0.1:
+        raise RuntimeError(f"Live recorded no audio for {label}: {path} holds {got:.2f} s. "
+                           + audio_device_note())
+    if beats is not None and beats < length_beats - 0.05:
+        raise RuntimeError(f"The recording of {label} stopped after {beats:.2f} of "
+                           f"{length_beats:g} beats (playback stopped or Live cut the take); "
+                           "nothing was analysed.")
+    if beats is not None and beats > length_beats:
+        return got * length_beats / beats
+    return got
 
 
 def inserted_device_ids(track: str, inserts: list[list[Any]]) -> list[int]:
@@ -2216,7 +2324,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     @tool(destructive=True)
     def manage_track(action: Literal["create_midi", "create_audio", "create_return", "delete",
-                                     "duplicate", "rename", "set_color", "fold", "unfold"],
+                                     "duplicate", "rename", "set_color", "fold", "unfold",
+                                     "delete_recording_tracks"],
                      track: int | str | None = None, name: str | None = None,
                      color: str | int | None = None, index: int = -1,
                      go_ahead: Annotated[ElicitationResult[_Confirm],
@@ -2225,8 +2334,21 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         - index: insert position for create_* (-1 = end)
         - color: hex "#RRGGBB" or a Live color index (0-69)
+        - delete_recording_tracks: every "MCP Rec …" track renders kept
+          (refused while one records)
         """
         require_go_ahead(go_ahead)
+        if action == "delete_recording_tracks":
+            deleted = []
+            for track_id, name in recording_tracks():
+                # by id: each index is looked up right before its delete
+                ids = [t.get("$id") for t in lom_get("live_set tracks", ["name"])["items"]]
+                if track_id in ids:
+                    send("lom_call", {"path": "live_set", "method": "delete_track",
+                                      "args": [ids.index(track_id)]})
+                    deleted.append(name)
+            return to_json({"deleted": deleted,
+                            "note": "Their recordings stay in the project's Samples/Recorded."})
         if action in ("create_midi", "create_audio", "create_return"):
             ops = []
             if action == "create_return":
@@ -3287,13 +3409,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              arrangement_clip_index: int | None = None,
                              two_stems: str | None = None, model: str = "htdemucs",
                              out_dir: str | None = None, to_tracks: bool = False,
+                             overwrite: bool = False,
                              ctx: Context | None = None) -> str:
         """Split a mix into drums, bass, vocals and other with Demucs (htdemucs_6s adds
         guitar and piano), from an audio file or the file behind an audio clip.
 
         - two_stems: "vocals" (or drums, bass, other) gives that stem plus the rest
         - model: htdemucs | htdemucs_ft (cleaner, ~4× slower) | htdemucs_6s
-        - out_dir: default ~/Music/Ableton MCP/Stems/<name>
+        - out_dir: default ~/Music/Ableton MCP/Stems/<name> ("<name> 2" when
+          another file's stems are there); one holding another file's (or
+          unknown) stems is refused unless overwrite
         - to_tracks: one audio track per stem in the set, placed where the source clip is
         Uses the GPU if there is one; the first use downloads ~500 MB.
         """
@@ -3302,12 +3427,20 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         source = await audio_source(path, track, clip_index, arrangement_clip_index)
         stem = re.sub(r'[\\/:*?"<>|]+', "_", source["name"]).strip() or "stems"
-        target = (Path(out_dir).expanduser() if out_dir
-                  else Path.home() / "Music" / "Ableton MCP" / "Stems" / stem)
-        job = {"path": source["file"], "out_dir": str(target), "model": model}
+        # Validated now, chosen when this job's turn comes (a queued call
+        # must not pick the folder a running one is about to fill)
+        ml.stem_folder(out_dir, stem, source["file"], overwrite)
+
+        def claim(job: dict) -> None:
+            target = ml.stem_folder(out_dir, stem, source["file"], overwrite)
+            target.mkdir(parents=True, exist_ok=True)
+            ml.mark_stems(target, source["file"])
+            job["out_dir"] = str(target)
+
+        job = {"path": source["file"], "model": model}
         if two_stems:
             job["two_stems"] = two_stems
-        result = await ml.run("separate", job, ml_progress(ctx))
+        result = await ml.run("separate", job, ml_progress(ctx), prepare=claim)
 
         def loudness(file: str) -> dict:
             info = analyze(file, max_seconds=600)
@@ -3558,6 +3691,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(read_only=True)
     async def find_similar_sounds(text: str | None = None, like: str | None = None,
                                   folder: str | None = None, top: int = 10,
+                                  min_score: float = 0.0, min_seconds: float | None = None,
+                                  max_seconds: float | None = None,
                                   ctx: Context | None = None) -> str:
         """Find sounds by description or by example with CLAP (LAION's
         audio-text model): text="dusty vinyl kick", "airy female vocal
@@ -3567,9 +3702,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         folder: where to look (default: the Core Library's one-shots and the
         User Library's Samples folder). The first search in a folder indexes
         its files (about 10 a second, at most 1,500 per call; later calls go
-        on) and keeps the index in ~/.ableton-mcp/sound-index. Put a result
-        on a track with browser_load(item=<file name>) or on a pad with
-        build_drum_kit(sounds={"kick": <file name>}).
+        on) and keeps the index in ~/.ableton-mcp/sound-index. The defaults
+        are one-shots: for sustained sounds give a folder of them and
+        min_seconds (max_seconds for one-shots); min_score drops weak
+        matches. Put a result on a track with browser_load(item=<file name>)
+        or on a pad with build_drum_kit(sounds={"kick": <file name>}).
         """
         import numpy as np
 
@@ -3613,8 +3750,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if text_vector is not None:
             parts.append(text_vector)
         query = np.mean(parts, axis=0)
-        results = index.search(query, files, max(1, min(int(top), 50)),
-                               exclude=str(example) if example else None)
+        top = max(1, min(int(top), 50))
+        filtered = min_seconds is not None or max_seconds is not None
+        ranked = index.search(query, files, len(files) if filtered else top,
+                              exclude=str(example) if example else None)
+        results = await asyncio.to_thread(ml.keep_results, ranked, top, float(min_score),
+                                          min_seconds, max_seconds)
         payload: dict[str, Any] = {"query": {"text": text, "like": like}, "results": results,
                                    "folders": [str(f) for f in folders],
                                    "indexed": len(files) - (len(stale) - len(batch)),
@@ -3625,6 +3766,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                "more, or give a smaller folder.")
         if run.get("failed"):
             payload["unreadable"] = len(run["failed"])
+        weak = ml.WEAK_SCORE["both" if text and like else "text" if text else "like"]
+        best = ranked[0]["score"] if ranked else None
+        if best is None or best < weak:
+            payload["warning"] = (
+                (f"Weak matches: the best scores {best:.2f} (good ones score {weak:g} or more)"
+                 if best is not None else "Nothing indexed matched")
+                + "; these folders may hold no such sound. Try another folder, or "
+                "min_seconds for sustained sounds.")
+        elif not results:
+            payload["warning"] = "No sound passed min_score / min_seconds / max_seconds."
         return to_json(payload)
 
     # ── Devices & racks ──────────────────────────────────────────────────────
@@ -5408,8 +5559,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         song = await asend("lom_get", {"path": "live_set", "properties": keys})
         if song["is_playing"]:
             raise ValueError("Stop playback first: recording plays the stretch from its start")
-        armed = [i for i, t in enumerate((await asend("lom_get", {
-            "path": "live_set tracks", "properties": ["arm"]}))["items"]) if t.get("arm")]
+        # Armed and implicitly armed tracks would record too (by id: the
+        # user may add tracks meanwhile)
+        armed, implicit = arming((await asend("lom_get", {
+            "path": "live_set tracks", "properties": ["arm", "implicit_arm"]}))["items"])
         seconds = (e - s + 1) * 60.0 / float(song["tempo"])
         set_song = lambda prop, value: asend("lom_set", {  # noqa: E731
             "path": "live_set", "property": prop, "value": value})
@@ -5424,12 +5577,22 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         reported = 0.0
         with journal.not_recorded():
             try:
-                await asend("batch", {"commands": [
+                ready = await asend("batch", {"commands": [
                     op_set("live_set", "loop", False), op_set("live_set", "punch_in", False),
                     op_set("live_set", "punch_out", False),
                     op_set("live_set", "session_automation_record", True)]
-                    + [op_set(f"live_set tracks {i}", "arm", False) for i in armed],
+                    + disarm_ops(armed, implicit) + [REC_ARMS],
                     "stop_on_error": False})
+                # Nothing may record notes or audio over the stretch: read back
+                arms_read = ready["results"][-1]
+                if arms_read.get("status") == "error":
+                    raise RuntimeError("Not recording: the tracks' arms could not be read back ("
+                                       + arms_read.get("message", "") + ")")
+                strays = [r.get("name") or f"id {r['$id']}" for r in rows_of(arms_read)
+                          if r.get("arm") is True or r.get("implicit_arm") is True]
+                if strays:
+                    raise RuntimeError("Not recording: " + ", ".join(map(str, strays))
+                                       + " stayed armed and would record too.")
                 await asend("lom_call", {"path": "live_set", "method": "start_playing"})
                 await set_song("current_song_time", max(0.0, s - 1.0))
                 deadline = time.monotonic() + seconds + 10
@@ -5471,7 +5634,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     op_set("live_set", key, song[key]) for key in
                     ("loop", "punch_in", "punch_out", "session_automation_record",
                      "current_song_time")]
-                    + [op_set(f"live_set tracks {i}", "arm", True) for i in armed],
+                    + disarm_ops(armed, implicit, on=True),
                     "stop_on_error": False})
         journal.add_steps(steps)
         return to_json({"parameter": info["name"], "from_beat": s, "to_beat": e,
@@ -5841,8 +6004,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """Diagnose the setup when Live does not respond or tools fail: server
         and Remote Script versions, installed script copies (including an old
         copy inside the Live application that shadows the new one), the
-        connection, dialogs open in Live, CPU load, and AbletonMCP errors in
-        Live's log. Each problem comes with a fix. Changes nothing.
+        connection, dialogs open in Live, CPU load, AbletonMCP errors in
+        Live's log and Live's audio output device. Each problem comes with a
+        fix. Changes nothing.
         """
         import os
 
@@ -5976,32 +6140,52 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         What plays: with `scene`, that Session scene is launched and recorded
         into fixed-length Session clips; without scene or start_beat, the
         Session clips already playing are recorded the same way; otherwise the
-        Arrangement from start_beat (default: the loop start). Arm states and
-        the metronome are restored (and loop, record mode and the playhead in
-        the Arrangement); the temporary tracks are deleted unless keep_tracks.
+        Arrangement from start_beat (default: the loop start).
+
+        Only the temporary tracks may record: every other track's arm and
+        implicit arm go off for the take (read back before it starts) and
+        come back after the transport stopped and record mode is off, in a
+        later command, with the selected track. The metronome is restored
+        (and loop, record mode and the playhead in the Arrangement); the
+        temporary tracks are deleted unless keep_tracks. Each file must hold
+        the section (check_recording); the take must reach its end.
         """
         song = await asend("lom_get", {"path": "live_set", "properties": [
             "tempo", "loop", "loop_start", "metronome", "record_mode", "is_playing",
-            "current_song_time", "start_time"]})
+            "current_song_time", "start_time", "back_to_arranger",
+            "signature_numerator", "signature_denominator"]})
         tracks = (await asend("lom_get", {"path": "live_set tracks", "properties": [
-            "name", "can_be_armed", "arm", "playing_slot_index"]}))["items"]
+            "name", "can_be_armed", "arm", "implicit_arm", "playing_slot_index"]}))["items"]
+        view = await asend("lom_get", {"path": "live_set view", "properties": ["selected_track"]})
+        selected = (view.get("selected_track") or {}).get("$id") \
+            if isinstance(view.get("selected_track"), dict) else None
         session_playing = song["is_playing"] and any(
             isinstance(t.get("playing_slot_index"), int) and t["playing_slot_index"] >= 0
             for t in tracks)
         session = scene is not None or (start_beat is None and session_playing)
         scene_index = (await asyncio.to_thread(index_in, "live_set scenes", scene)
                        if scene is not None else None)
+        # The take's pace: a scene with a tempo of its own sets the set's
+        slowest = float(song["tempo"])
+        if scene_index is not None:
+            own = await asend("lom_get", {"path": f"live_set scenes {scene_index}",
+                                          "properties": ["tempo", "tempo_enabled"]})
+            if own.get("tempo_enabled") is True and isinstance(own.get("tempo"), (int, float)) \
+                    and own["tempo"] > 0:
+                slowest = min(slowest, float(own["tempo"]))
         if song["is_playing"] and not session:
             await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
         start = float(start_beat if start_beat is not None else song["loop_start"])
         # Tracks are addressed by id from here on: the user may add or remove
         # tracks while the section plays, which would shift every index.
-        armed = [t["$id"] for t in tracks if t.get("can_be_armed") and t.get("arm") is True]
+        armed, implicit = arming(tracks)
+        names = {t["$id"]: t.get("name") for t in tracks}
         # In the Session, record into the launched scene's row: a scene launch
         # may itself start recording on armed tracks' empty slots there
         slot = scene_index or 0
         new = "live_set tracks -1"
         temp: dict[str, int] = {}
+        tempo_back = False
         try:
             created = await asend("batch", {"commands": [
                 step for _source in sources for step in (
@@ -6013,6 +6197,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 got = steps[2 * k + 1] if len(steps) > 2 * k + 1 else {}
                 if got.get("status") == "success":
                     temp[label] = got["result"]["$id"]
+            RECORDING.update(temp.values())
             if len(temp) < len(sources):
                 raise RuntimeError("Render setup failed: could not create a track for "
                                    + ", ".join(lab for lab, _ in sources if lab not in temp))
@@ -6032,10 +6217,6 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                 f"{named(f'{track} available_input_routing_types', input_name)}")),
                             op_set(track, "name", f"MCP Rec {label}"[:48]),
                             op_set(track, "current_monitoring_state", MONITORING["off"])]
-                    if input_name != "Resampling":
-                        # What the source sends on: after its devices, fader and pan
-                        ops.append(op_set(track, "input_routing_channel", ref(
-                            f'{track} available_input_routing_channels "Post Mixer"')))
                 result = await asend("batch", {"commands": ops, "stop_on_error": False})
                 steps = result.get("results", [])
                 position, failed, problems = 0, [], []
@@ -6045,15 +6226,35 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         failed.append((label, input_name))
                         problems.append(f"{label} ({input_name}): "
                                         f"{step.get('message', 'not run')}")
-                    position += 3 if input_name == "Resampling" else 4
+                    position += 3
                 pending = failed
                 if not pending:
                     break
             if problems:
                 raise RuntimeError("Render setup failed: " + "; ".join(problems))
-            begin = [op_set(f"id {i}", "arm", False) for i in armed]
-            begin += [op_set(f"id {i}", "arm", True) for i in temp.values()]
-            begin.append(op_set("live_set", "metronome", False))
+            await post_mixer([temp[label] for label, input_name in sources
+                              if input_name != "Resampling"])
+            # Only the temporary tracks may record: the others' arms and
+            # implicit arms go off, read back before anything plays
+            ready = await asend("batch", {"commands": disarm_ops(armed, implicit)
+                                          + [op_set(f"id {i}", "arm", True)
+                                             for i in temp.values()]
+                                          + [op_set("live_set", "metronome", False), REC_ARMS],
+                                          "stop_on_error": False})
+            if ready["results"][-1].get("status") == "error":
+                raise RuntimeError("Not recording: the tracks' arms could not be read back ("
+                                   + ready["results"][-1].get("message", "") + ")")
+            rows = rows_of(ready["results"][-1])
+            now_armed, now_implicit = arming(rows)
+            mine = set(temp.values())
+            strays = [names.get(t) or r.get("name") or f"id {t}" for r in rows
+                      for t in [r["$id"]] if t not in mine and (t in now_armed or t in now_implicit)]
+            if strays:
+                raise RuntimeError("Not recording: " + ", ".join(map(str, strays))
+                                   + " stayed armed and would record too.")
+            if not mine <= set(now_armed):
+                raise RuntimeError("Render setup failed: Live did not arm the recording track")
+            begin: list[dict] = []
             if session:
                 if scene_index is not None:
                     begin.append(op_call(f"live_set scenes {scene_index}", "fire"))
@@ -6070,67 +6271,155 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                           op_set("live_set", "start_time", start),
                           op_set("live_set", "record_mode", True),
                           op_call("live_set", "start_playing")]
-            seconds = length_beats * 60.0 / float(song["tempo"])
             try:
                 started = await asend("batch", {"commands": begin})
                 if started.get("failed"):
                     raise RuntimeError("Could not start recording: "
                                        + to_json(batch_summary(started)))
-                # Session recordings wait for the next launch boundary (≤ 8 bars)
-                began = time.monotonic()
-                deadline = began + seconds + (32 * 60.0 / float(song["tempo"])
-                                              if session else 0) + 30.0
-                label = f"Recording {len(sources)} part{'s' if len(sources) > 1 else ''}"
-                while time.monotonic() < deadline:
-                    await asyncio.sleep(0.2)
-                    elapsed = time.monotonic() - began
-                    await report_progress(ctx, min(elapsed, seconds), seconds,
-                                          f"{label}: {elapsed:.0f} of {seconds:.0f} s")
-                    if session:
-                        polled = await asend("batch", {"commands": [
-                            {"type": "lom_get", "params": {
-                                "path": f"id {i} clip_slots {slot} clip",
-                                "properties": ["is_recording"]}} for i in temp.values()],
-                            "stop_on_error": False})
-                        if all(s.get("status") == "success"
-                               and s["result"].get("is_recording") is False
-                               for s in polled["results"]):
-                            break
-                    else:
-                        now = await asend("lom_get", {"path": "live_set",
-                                                      "properties": ["current_song_time"]})
-                        if now["current_song_time"] >= start + length_beats:
-                            break
+                # Session takes start on the next launch boundary: 8 bars at most
+                bar = (float(song.get("signature_numerator") or 4) * 4.0
+                       / float(song.get("signature_denominator") or 4))
+                await take(session, temp, slot, start, length_beats, slowest,
+                           len(sources), ctx, launch_beats=8 * bar)
             finally:
-                restore = [op_set(f"id {i}", "arm", False) for i in temp.values()]
-                restore += [op_set(f"id {i}", "arm", True) for i in armed]
-                restore.append(op_set("live_set", "metronome", song["metronome"]))
+                # The transport stops and record mode goes off first; arms come
+                # back in a later command (Crank: arms restored in the same
+                # batch as the stop recorded on those tracks and split clips)
+                stop = [op_set(f"id {i}", "arm", False) for i in temp.values()]
                 if not session or not song["is_playing"]:
-                    restore.append(op_call("live_set", "stop_playing"))
+                    stop.insert(0, op_call("live_set", "stop_playing"))
                 if not session:
-                    restore += [op_set("live_set", "record_mode", song["record_mode"]),
-                                op_set("live_set", "loop", song["loop"])]
-                if not session:
-                    restore.append(op_set("live_set", "start_time",
-                                          float(song.get("start_time", 0.0))))
+                    stop.insert(1, op_set("live_set", "record_mode", song["record_mode"]))
+                    stop += [op_set("live_set", "loop", song["loop"]),
+                             op_set("live_set", "start_time", float(song.get("start_time", 0.0)))]
+                if session and not song["is_playing"]:
+                    # Live 12.4.16 left the launched clips playing on a stopped
+                    # transport, overriding the Arrangement (Back to Arrangement lit)
+                    stop.append(op_call("live_set", "stop_all_clips", False))
+                    if isinstance(song.get("back_to_arranger"), bool):
+                        stop.append(op_set("live_set", "back_to_arranger",
+                                           song["back_to_arranger"]))
                 if not session or not song["is_playing"]:
-                    restore.append(op_set("live_set", "current_song_time",
-                                          float(song["current_song_time"])))
-                await asend("batch", {"commands": restore, "stop_on_error": False})
-            files = {label: await recorded_file(f"id {track_id}",
-                                                slot if session else None)
-                     for label, track_id in temp.items()}
+                    stop.append(op_set("live_set", "current_song_time",
+                                       float(song["current_song_time"])))
+                # A scene with a tempo of its own changes the set's
+                stop.append({"type": "lom_get", "params": {"path": "live_set",
+                                                           "properties": ["tempo"]}})
+                stopped = await asend("batch", {"commands": stop, "stop_on_error": False})
+                after = (stopped.get("results") or [{}])[-1].get("result") or {}
+                if scene_index is not None and isinstance(after.get("tempo"), (int, float)) \
+                        and abs(after["tempo"] - float(song["tempo"])) > 1e-6:
+                    tempo_back = True
+            recorded = await recorded_files(temp, slot if session else None, length_beats)
         finally:
-            if not keep_tracks:
-                for track_id in temp.values():
-                    await delete_track_by_id(track_id)
+            try:
+                if not keep_tracks:
+                    for track_id in temp.values():
+                        await delete_track_by_id(track_id)
+            finally:
+                RECORDING.difference_update(temp.values())
+                # Live selects each new track and a neighbour of a deleted one
+                # kept temporary tracks too: a setup that stopped early left them armed
+                back = [op_set(f"id {i}", "arm", False) for i in temp.values()
+                        if keep_tracks] + disarm_ops(armed, implicit, on=True)
+                back.append(op_set("live_set", "metronome", song["metronome"]))
+                if tempo_back:
+                    back.append(op_set("live_set", "tempo", float(song["tempo"])))
+                if selected is not None:
+                    back.append(op_set("live_set view", "selected_track", ref(f"id {selected}")))
+                await asend("batch", {"commands": back, "stop_on_error": False})
+        files = {label: path for label, (path, _s) in recorded.items()}
+        played = {label: s for label, (_p, s) in recorded.items()}
+        # Analyses read the section, at most ANALYSIS_MAX_S of it (as before)
+        reads = {label: min(ANALYSIS_MAX_S, s) for label, s in played.items()}
         section: dict[str, Any] = {"mode": "session" if session else "arrangement",
-                                   "length_beats": length_beats, "seconds": round(seconds, 2)}
+                                   "length_beats": length_beats,
+                                   "seconds": round(next(iter(played.values())), 2)}
         if session:
             section["scene"] = scene_index if scene_index is not None else "playing clips"
+            section["played"] = (f"Session scene {scene_index + 1}" if scene_index is not None
+                                 else "the Session clips playing")
         else:
             section["start_beat"] = start
-        return {"files": files, "section": section}
+            section["played"] = f"Arrangement, beats {start:g} to {start + length_beats:g}"
+        if armed or implicit:
+            section["disarmed_for_take"] = [names.get(t) for t in dict.fromkeys(armed + implicit)]
+        if tempo_back:
+            section["tempo_put_back"] = float(song["tempo"])
+        return {"files": files, "section": section, "seconds": reads}
+
+    async def post_mixer(track_ids: list[int]) -> None:
+        """Each recording track takes its source after devices, fader and
+        pan. Live 12.4.16 sets a track input's channel to "Post Mixer" with
+        the type; in the batch that sets the types, the later tracks still
+        listed Ext. In's channels (1/2, 1, 2), so setting the channel there
+        failed (Live's log). Read it in a later command; set it where it
+        is not."""
+        if not track_ids:
+            return
+        read = await asend("batch", {"commands": [
+            {"type": "lom_get", "params": {"path": f"id {t}",
+                                           "properties": ["input_routing_channel"]}}
+            for t in track_ids], "stop_on_error": False})
+        wrong = [t for t, step in zip(track_ids, read.get("results", []))
+                 if ((step.get("result") or {}).get("input_routing_channel") or {})
+                 .get("display_name") != "Post Mixer"]
+        if not wrong:
+            return
+        fixed = await asend("batch", {"commands": [
+            op_set(f"id {t}", "input_routing_channel",
+                   ref(f'id {t} available_input_routing_channels "Post Mixer"'))
+            for t in wrong], "stop_on_error": False})
+        failed = [s.get("message", "") for s in fixed.get("results", [])
+                  if s.get("status") == "error"]
+        if failed:
+            raise RuntimeError("Render setup failed: could not take the source after its "
+                               "mixer: " + "; ".join(failed))
+
+    async def take(session: bool, temp: dict[str, int], slot: int, start: float,
+                   length_beats: float, tempo: float, parts: int,
+                   ctx: Context | None, launch_beats: float = 32.0) -> None:
+        """Wait until the section has been recorded; raise if Live stops
+        playing first or never gets there. tempo: the slowest the take can
+        play at (the set's, or a fired scene's own)."""
+        began = time.monotonic()
+        seconds = length_beats * 60.0 / tempo
+        # Session recordings wait for the next launch boundary (≤ 8 bars)
+        deadline = (began + seconds + (launch_beats * 60.0 / tempo if session else 0)
+                    + RECORD_GRACE_S)
+        label = f"Recording {parts} part{'s' if parts > 1 else ''}"
+        end = start + length_beats
+        position, playing_seen = None, False
+        while True:
+            await asyncio.sleep(0.2)
+            elapsed = time.monotonic() - began
+            await report_progress(ctx, min(elapsed, seconds), seconds,
+                                  f"{label}: {elapsed:.0f} of {seconds:.0f} s")
+            if session:
+                polled = await asend("batch", {"commands": [
+                    {"type": "lom_get", "params": {
+                        "path": f"id {i} clip_slots {slot} clip",
+                        "properties": ["is_recording"]}} for i in temp.values()],
+                    "stop_on_error": False})
+                if all(s.get("status") == "success"
+                       and s["result"].get("is_recording") is False
+                       for s in polled["results"]):
+                    return
+            else:
+                now = await asend("lom_get", {"path": "live_set", "properties": [
+                    "current_song_time", "is_playing"]})
+                position = float(now["current_song_time"])
+                if position >= end:
+                    return
+                if now.get("is_playing") is False and (playing_seen or elapsed > 3.0):
+                    raise RuntimeError(f"Playback stopped at beat {position:g}, before the "
+                                       f"section's end ({end:g}); nothing was analysed.")
+                playing_seen = playing_seen or now.get("is_playing") is True
+            if time.monotonic() > deadline:
+                where = f" (at beat {position:g} of {end:g})" if position is not None else ""
+                raise RuntimeError(f"Live did not finish recording the section in time{where}"
+                                   f" ({time.monotonic() - began:.0f} s, {seconds:.0f} s "
+                                   "expected); nothing was analysed.")
 
     async def stem_sources(tracks: list[int | str] | None,
                            include_master: bool) -> list[tuple[str, str]]:
@@ -6181,18 +6470,23 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - scene: launch this Session scene (index or name) and record it
         - neither scene nor start_beat while Session clips play: record those
         - otherwise the Arrangement from start_beat (default: the loop start)
-        Takes as long as the section plays. Arm states, metronome, loop and
-        record mode are restored; the temporary track is deleted unless
-        keep_track. Undo history will contain the recording steps.
+        Takes as long as the section plays; only the temporary track records
+        (other arms are off meanwhile), and the file must hold the section.
+        Arms, selection, metronome, loop and record mode are restored; the
+        temporary track is deleted unless keep_track (remove kept ones with
+        manage_track(action="delete_recording_tracks")). The recording stays
+        in the project's Samples/Recorded (path in file).
         """
         from .audio_analysis import analyze
 
         input_name = "Resampling" if source.lower() == "master" else source
         recorded = await record_section([(source, input_name)], start_beat, length_beats,
                                         keep_track, scene, ctx)
-        analysis = await asyncio.to_thread(analyze, recorded["files"][source])
-        analysis["render"] = dict(recorded["section"], source=source, track_kept=keep_track)
-        return to_json(analysis)
+        file = recorded["files"][source]
+        # The section only: Live records on until the stop reaches it
+        analysis = await asyncio.to_thread(analyze, file, recorded["seconds"][source])
+        render = dict(recorded["section"], source=source, track_kept=keep_track)
+        return to_json({"render": render, **analysis})
 
     @tool(ui=ui.MIX)
     async def capture_stems(tracks: list[int | str] | None = None,
@@ -6209,9 +6503,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
           unmuted non-group track with audio output, every return, the master
         - start_beat / length_beats / scene: what plays, as in render_and_analyze
         Takes as long as the section plays. The temporary tracks are deleted;
-        the recorded files stay in the project and are listed. They are at the
-        audio device's sample rate (often 48 kHz): resample before lining them
-        up with 44.1 kHz material.
+        the recorded files stay in the project's Samples/Recorded and are
+        listed. They are at the audio device's sample rate (often 48 kHz):
+        resample before lining them up with 44.1 kHz material.
         """
         from .audio_analysis import load_audio
         from .mix_analysis import stem_summary
@@ -6221,7 +6515,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                         ctx=ctx)
 
         def summarise() -> dict:
-            return {label: dict(stem_summary(*load_audio(path)), file=path)
+            return {label: dict(stem_summary(*load_audio(path, recorded["seconds"][label])),
+                                file=path)
                     for label, path in recorded["files"].items()}
 
         stems = await asyncio.to_thread(summarise)
@@ -6255,11 +6550,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         sources = await stem_sources(tracks, include_master=True)
         recorded = await record_section(sources, start_beat, length_beats, scene=scene,
                                         ctx=ctx)
-        files = recorded["files"]
+        files, span = recorded["files"], recorded["seconds"]
 
         def diagnose() -> dict:
-            master = analyze(files["Master"])
-            audio = {label: load_audio(path) for label, path in files.items()
+            master = analyze(files["Master"], span["Master"])
+            audio = {label: load_audio(path, span[label]) for label, path in files.items()
                      if label != "Master"}
             stems = {label: stem_summary(*pair) for label, pair in audio.items()}
             masking = masking_report({label: pair for label, pair in audio.items()
@@ -6289,6 +6584,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             "masking": found["masking"]["pairs"],
             "stems": {label: {k: s[k] for k in ("lufs", "peak_dbfs", "main_band")}
                       for label, s in found["stems"].items()},
+            "files": files,
         })
 
     @tool(ui=ui.REFERENCE)
@@ -6320,10 +6616,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             recorded = await record_section([("Master", "Resampling")], start_beat,
                                             length_beats, scene=scene, ctx=ctx)
             mix_path = recorded["files"]["Master"]
-            section = recorded["section"]
+            section = dict(recorded["section"], file=mix_path)
+            span = recorded["seconds"]["Master"]
 
         def compare() -> dict:
-            return reference_report(load_audio(mix_path), load_audio(reference),
+            mix = load_audio(mix_path, span) if section else load_audio(mix_path)
+            return reference_report(mix, load_audio(reference),
                                     match_section=not whole_reference)
 
         report = await asyncio.to_thread(compare)
@@ -6429,26 +6727,56 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         found.append(("Master", f"id {master['$id']}"))
         return found
 
-    async def recorded_file(track: str, slot: int | None = None) -> str:
-        """Path of the newest recording on `track` (its Arrangement, or Session
-        clip slot `slot`), once Live has finished writing it."""
-        for _ in range(50):
-            if slot is None:
-                clips = (await asend("lom_get", {"path": f"{track} arrangement_clips",
-                                                 "properties": ["file_path"]}))["items"]
-            else:
-                clips = [await asend("lom_get", {"path": f"{track} clip_slots {slot} clip",
-                                                 "properties": ["file_path"]})]
-            if clips and clips[-1].get("file_path"):
-                candidate = Path(clips[-1]["file_path"])
-                if candidate.is_file() and candidate.stat().st_size > 0:
-                    size = candidate.stat().st_size
-                    await asyncio.sleep(0.3)
-                    if candidate.stat().st_size == size:
-                        return str(candidate)
-            await asyncio.sleep(0.2)
-        raise RuntimeError("Recording finished but no audio file was found on the "
-                           "MCP Render track; check that its input could be set.")
+    async def recorded_files(temp: dict[str, int], slot: int | None,
+                             length_beats: float) -> dict[str, tuple[str, float]]:
+        """{label: (path, seconds holding the section)} of the newest
+        recording on each temporary track (its Arrangement, or Session clip
+        slot `slot`), once Live has written it: known to Live, its size
+        unchanged for SETTLE_S, and holding the section (check_recording)."""
+        props = ["file_path"] + (["start_time", "end_time"] if slot is None else ["length"])
+        found: dict[str, tuple[str, float | None]] = {}
+        deadline = time.monotonic() + 15.0
+        while len(found) < len(temp) and time.monotonic() < deadline:
+            pending = [label for label in temp if label not in found]
+            polled = await asend("batch", {"commands": [
+                {"type": "lom_get", "params": {
+                    "path": (f"id {temp[label]} arrangement_clips" if slot is None
+                             else f"id {temp[label]} clip_slots {slot} clip"),
+                    "properties": props}} for label in pending], "stop_on_error": False})
+            for label, step in zip(pending, polled.get("results", [])):
+                if step.get("status") != "success":
+                    continue
+                clip = (step["result"].get("items") or [{}])[-1] if slot is None \
+                    else step["result"]
+                path = clip.get("file_path")
+                if path and Path(path).is_file():
+                    span = (clip.get("end_time"), clip.get("start_time")) if slot is None \
+                        else (clip.get("length"), 0.0)
+                    beats = (float(span[0]) - float(span[1])
+                             if all(isinstance(v, (int, float)) for v in span) else None)
+                    found[label] = (path, beats)
+            if len(found) < len(temp):
+                await asyncio.sleep(0.2)
+        if len(found) < len(temp):
+            raise RuntimeError("Recording finished but Live made no audio file for "
+                               + ", ".join(label for label in temp if label not in found)
+                               + ". " + audio_device_note())
+        # Settled: no file grew for SETTLE_S
+        sizes = {label: -1 for label in found}
+        steady_since, settle_by = time.monotonic(), time.monotonic() + 20.0
+        while True:
+            now = {label: Path(path).stat().st_size for label, (path, _b) in found.items()}
+            if now != sizes:
+                sizes, steady_since = now, time.monotonic()
+            elif time.monotonic() - steady_since >= SETTLE_S:
+                break
+            if time.monotonic() > settle_by:
+                raise RuntimeError("Live was still writing the recordings after 20 s: "
+                                   + ", ".join(path for path, _b in found.values()))
+            await asyncio.sleep(0.1)
+        return {label: (path, await asyncio.to_thread(
+                    check_recording, label, path, beats, length_beats))
+                for label, (path, beats) in found.items()}
 
     async def delete_track_by_id(track_id: int) -> None:
         items = (await asend("lom_get", {"path": "live_set tracks",

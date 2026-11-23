@@ -281,6 +281,16 @@ def _sample_roots() -> dict[str, list[Path]]:
     }
 
 
+def project_root(set_dir: Path) -> Path:
+    """The Live Project a set belongs to: the nearest folder holding
+    "Ableton Project Info" (the set's own folder, or one above it), else
+    the set's folder."""
+    for folder in (set_dir, *set_dir.parents):
+        if (folder / "Ableton Project Info").is_dir():
+            return folder
+    return set_dir
+
+
 def _sample(ref: ET.Element, set_dir: Path, roots: dict[str, list[Path]]) -> dict:
     path = (_value(ref, "Path") or "").replace("\\", "/")
     relative = (_value(ref, "RelativePath") or "").replace("\\", "/")
@@ -292,6 +302,8 @@ def _sample(ref: ET.Element, set_dir: Path, roots: dict[str, list[Path]]) -> dic
         where, bases = "pack", [b / pack for b in roots["packs"]]
     elif kind == "1":
         where, bases = "project", [set_dir]
+    elif kind == "3":
+        where, bases = "project", [project_root(set_dir)]
     elif kind == "6":
         where, bases = "user_library", roots["user_library"] + roots["core_library"]
     elif kind == "7":
@@ -301,6 +313,8 @@ def _sample(ref: ET.Element, set_dir: Path, roots: dict[str, list[Path]]) -> dic
     candidates = [Path(path)] if path else []
     if relative:
         candidates += [base / relative for base in bases]
+        if kind == "3":  # a moved project: Path names where it was
+            candidates.reverse()
     found = next((c for c in candidates if c.is_file()), None)
     if found is not None and where == "elsewhere" and set_dir in found.parents:
         where = "project"

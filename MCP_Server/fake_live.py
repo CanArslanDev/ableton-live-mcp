@@ -813,7 +813,8 @@ class FakeTrack(FakeObj):
         routing = [FakeObj(display_name=n) for n in ("Ext. In", "Resampling", "Drums")]
         super(FakeTrack, self).__init__(
             name=name, has_midi_input=midi, has_audio_input=not midi, mute=False, solo=False,
-            arm=False, can_be_armed=True, is_foldable=False, is_grouped=False,
+            arm=False, implicit_arm=False, can_be_armed=True, is_foldable=False,
+            is_grouped=False,
             color_index=1, color=0, mixer_device=mixer, devices=list(devices or []),
             clip_slots=[_slot_of(midi) for _ in range(slots)], arrangement_clips=[],
             current_monitoring_state=1, available_input_routing_types=routing,

@@ -639,9 +639,13 @@ def _fake_ml(monkeypatch, tmp_path):
     monkeypatch.setattr(ml, "INDEX_DIR", tmp_path / "sound-index")
 
     def vector(text):
+        if "lead" in text.lower():
+            return [0.0, 0.0, 1.0]
         return [1.0, 0.0, 0.0] if "kick" in text.lower() else [0.0, 1.0, 0.0]
 
-    async def run(task, job, report=None, timeout=3600.0):
+    async def run(task, job, report=None, timeout=3600.0, prepare=None):
+        if prepare is not None:
+            prepare(job)
         jobs.append((task, job))
         if report:
             await report(0.5, task)
@@ -707,6 +711,13 @@ def test_separate_stems_from_a_clip_onto_new_tracks(live_server, tmp_path, monke
     # each stem plays from where the source does, not where Live's warp analysis put its start
     assert (placed.start_marker, placed.loop_start) == (1.5, 1.5) != (fake_live.FIRST_TRANSIENT,) * 2
     assert result["tracks"][0] == {"track": "Song drums", "clip_index": 1}
+    # The same source again may overwrite its stems; another file's are refused
+    call("separate_stems", path=str(source), out_dir=str(tmp_path / "stems"))
+    other = tmp_path / "Other.wav"
+    sf.write(other, np.zeros(4410), 44100)
+    with pytest.raises(Exception, match="already holds stems"):
+        call("separate_stems", path=str(other), out_dir=str(tmp_path / "stems"))
+    assert len(jobs) == 2
 
 
 def _riff(path, rate=44100):
@@ -848,6 +859,28 @@ def test_find_similar_sounds_indexes_once_then_searches(live_server, tmp_path, m
     assert by_example["results"][0]["file"] == "Kick Short.wav"
     with pytest.raises(Exception, match="Give text"):
         call("find_similar_sounds", folder=str(folder))
+    assert "warning" not in first
+    # Nothing there sounds like it: the best match is weak, and said so
+    weak = call("find_similar_sounds", text="sustained lead", folder=str(folder), top=2)
+    assert weak["results"][0]["score"] == 0.0 and "Weak matches" in weak["warning"]
+    assert call("find_similar_sounds", text="sustained lead", folder=str(folder),
+                min_score=0.3)["results"] == []
+
+
+def test_find_similar_sounds_by_length(live_server, tmp_path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+
+    _script, call = live_server
+    _fake_ml(monkeypatch, tmp_path)
+    folder = tmp_path / "Sounds"
+    folder.mkdir()
+    for name, seconds in (("Kick Hit.wav", 0.3), ("Kick Drone.wav", 4.0), ("Kick Mid.wav", 1.0)):
+        sf.write(folder / name, np.zeros(int(22050 * seconds)), 22050)
+    long = call("find_similar_sounds", text="kick", folder=str(folder), min_seconds=2)
+    assert [(r["file"], r["seconds"]) for r in long["results"]] == [("Kick Drone.wav", 4.0)]
+    short = call("find_similar_sounds", text="kick", folder=str(folder), max_seconds=1.5)
+    assert {r["file"] for r in short["results"]} == {"Kick Hit.wav", "Kick Mid.wav"}
 
 
 def test_analyzer_tools_write_the_device_and_read_its_track(live_server, tmp_path, monkeypatch):
