@@ -299,6 +299,29 @@ and undoes the fixes below. Install from this version instead.
   the main thread and other commands answered in 8 ms (median; 78 ms at
   the 90th percentile). Listing one folder is still one call in Live
   (~3 µs an item: 0.33 s for those 100,000), the longest wait left.
+- **Transitions and Arrangement copies leave the selection alone.**
+  `design_transition` onto a "Riser" or "Reverse Cymbal" track that
+  already existed left that track selected (Live 12.4.16, 3 runs of 3),
+  and with such a track around `duplicate_to_arrangement` at 64 and 32
+  left it selected too. Live pins a new track once a clip was copied onto
+  it and the playhead set: a later copy over that clip's span, or the
+  playhead set back into it from outside, selects it again (seen from the
+  next command), and setting the selection back to the track before is
+  ignored until another track is set (deleting that track or its clip ends
+  it). Tools that put the playhead back (`duplicate_to_arrangement`,
+  `build_arrangement`, `write_arrangement_automation`, transitions, clips
+  made in the Arrangement) now also read the selection in the command
+  after and, when it moved, set the selected track and then the user's;
+  the arm put-back retries the same way. Such a tool now costs one
+  selection read more, and one batch more when the selection moved.
+- **`browser_load(item="808")` searches for "808".** Any item made of
+  digits was taken for an id from `browser_search` and failed with
+  "Unknown id 808"; digits that are no browser item's id are now a name
+  (also in `browser_preview` and for samples given to `build_drum_kit`).
+- **`create_locator` as the first call no longer reports the script
+  missing** (`loaded=None`): a capability check made before any
+  connection now connects and asks the script first, and when Live cannot
+  be reached it says so instead of asking for a reinstall.
 
 ### Added
 
@@ -411,6 +434,13 @@ and undoes the fixes below. Install from this version instead.
   tempo the peak alone got right; two ML jobs at once; stems of two
   sources in one folder.
   `fake_live` tracks have `implicit_arm`.
+- `fake_live` pins a selection as measured in Live 12.4.16
+  (`FakeSongView`): a new track, a clip copied onto it and the playhead
+  set; from outside its span, a copy over it or a playhead set into it
+  selects it after the command, and a set back to the track before is
+  ignored; deleting the track or its clip ends it. Tests for the three fixes
+  above and capability checks before any connection, with and without
+  Live.
 
 ## 2.4.3 — 2026-11-16
 

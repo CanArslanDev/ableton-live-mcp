@@ -717,22 +717,105 @@ def _songs_of(track):
                     + [song.master_track])]
 
 
-def _playhead_to(track, beat):
+def _playhead_to(track, beat, moved=False):
     """Live 12.4.16 moves the stopped playhead to the start of a clip that
     duplicate_clip_to_arrangement, create_midi_clip or create_audio_clip
-    makes in a track's Arrangement (deleting one leaves it)."""
+    makes in a track's Arrangement (deleting one leaves it). moved: not a
+    set, for the pinned selection (FakeSongView)."""
     for song in _songs_of(track):
         if not vars(song).get("is_playing"):
-            song.current_song_time = float(beat)
+            if moved:
+                object.__setattr__(song, "_position", float(beat))
+                object.__setattr__(song, "_moved", True)
+                if song.running_clock:
+                    object.__setattr__(song, "_clock", (time.monotonic(), float(beat)))
+            else:
+                song.current_song_time = float(beat)
 
 
-def _select(track):
+def _select(track, new=False):
     """Live 12.4.16 selects a track a device was inserted on, a new MIDI or
-    audio track (create_*_track), and one whose device was deleted while another device stays on it
-    (that device is selected); Live does it after the command, the fake at
-    once."""
+    audio track (create_*_track, new), and one whose device was deleted
+    while another device stays on it (that device is selected); Live does
+    it after the command, the fake at once. A new track, selected so, can be
+    pinned (FakeSongView)."""
     for song in _songs_of(track):
         song.view.selected_track = track
+        if new:
+            object.__setattr__(song.view, "_made", track)
+
+
+class FakeSongView(FakeObj):
+    """Song.view with the pinned selection measured in Live 12.4.16
+    (2026-11-23). A clip copied onto a new track Live selected on creating
+    it, then the playhead set, pin that track and the copy's span. From a
+    playhead outside the span, a playhead set to inside it ([start, end])
+    or a copy overlapping it selects the pinned track, seen from the next
+    command on (here at end_undo_step); a copy that only moves the
+    playhead, or a set from inside, does not. Inside is [start, end] for a
+    playhead set there, [start, end) for one a copy moved there.
+    selected_track set back to the track selected before is then ignored
+    until another track is set; the pin stays. Deleting the pinned track,
+    or a clip covering its whole span (the pinning copy, or one that
+    replaced it), ends it. Where Live was not measured the fake is strict: a
+    device insert's selection pins nothing (one Reverb trial did not), and the
+    pin outlives new tracks (one made and deleted in Live ended it; which of
+    the two is unknown)."""
+
+    def __setattr__(self, name, value):
+        if name == "selected_track":
+            ignored = vars(self).get("_ignored")
+            if ignored is not None and value is ignored:
+                return
+            object.__setattr__(self, "_ignored", None)
+        FakeObj.__setattr__(self, name, value)
+
+    def _entering(self, origin, moved, lands):
+        """Queue the jump when the pinned span is entered from outside;
+        moved: a copy put the playhead at origin (not a set)."""
+        pinned = vars(self).get("_pinned")
+        if pinned is None:
+            return
+        track, start, end = pinned
+        inside = start <= origin < end if moved else start <= origin <= end
+        if not inside and lands(start, end):
+            object.__setattr__(self, "_jump", track)
+
+    def arrangement_copy(self, track, copy, origin, moved):
+        """duplicate_clip_to_arrangement made `copy` on `track`, the playhead
+        at `origin` before it (the copy then moves it)."""
+        start, end = copy.start_time, copy.end_time
+        self._entering(origin, moved, lambda s, e: start < e and end > s)
+        if track is vars(self).get("_made") and track is self.selected_track:
+            object.__setattr__(self, "_pin_next", (track, start, end))
+
+    def playhead_set(self, origin, moved, target):
+        if vars(self).get("_pin_next") is not None:
+            object.__setattr__(self, "_pinned", self._pin_next)
+            object.__setattr__(self, "_pin_next", None)
+            return
+        self._entering(origin, moved, lambda s, e: s <= target <= e)
+
+    def after_command(self):
+        jump = vars(self).get("_jump")
+        object.__setattr__(self, "_jump", None)
+        if jump is not None and self.selected_track is not jump:
+            previous = self.selected_track
+            FakeObj.__setattr__(self, "selected_track", jump)
+            object.__setattr__(self, "_ignored", previous)
+
+    def track_deleted(self, track):
+        pinned = vars(self).get("_pinned")
+        if pinned is not None and pinned[0] is track:
+            object.__setattr__(self, "_pinned", None)
+
+    def clip_deleted(self, track, clip):
+        """Track.delete_clip: a clip of the pinned track covering its whole
+        span (the pinning copy, or one that replaced it) ends the pin."""
+        pinned = vars(self).get("_pinned")
+        if pinned is not None and pinned[0] is track and clip.start_time <= pinned[1] \
+                and clip.end_time >= pinned[2]:
+            object.__setattr__(self, "_pinned", None)
 
 
 def _auto_arm(track, empty=None):
@@ -852,6 +935,8 @@ class FakeTrack(FakeObj):
         """Track.delete_clip: removes an Arrangement clip (Live 12.4.16)."""
         if not any(c is clip for c in self.arrangement_clips):
             raise RuntimeError("Clip not found on this track")
+        for song in _songs_of(self):
+            song.view.clip_deleted(self, clip)
         self.arrangement_clips[:] = [c for c in self.arrangement_clips if c is not clip]
         object.__setattr__(clip, "_gone", True)
 
@@ -888,7 +973,10 @@ class FakeTrack(FakeObj):
                 kept.append(other)
         kept.append(copy)
         self.arrangement_clips[:] = sorted(kept, key=lambda c: c.start_time)
-        _playhead_to(self, start)
+        for song in _songs_of(self):
+            song.view.arrangement_copy(self, copy, song.current_song_time,
+                                       bool(vars(song).get("_moved")))
+        _playhead_to(self, start, moved=True)
         return copy
 
     def create_midi_clip(self, start, length):
@@ -925,7 +1013,7 @@ class FakeTrack(FakeObj):
 _NOT_SET_STATE = frozenset(["_live_named", "_unwarped_length", "_gone", "_midi", "exclusive_arm", "_listeners", "undo_log", "calls",
                             "_undo", "_redo", "_open_step",
                             "_position", "_clock", "_stopped_at", "_pass", "_pass_closing", "_pass_starting",
-                            "running_clock", "_data"])
+                            "running_clock", "_data", "_moved"])
 _MISSING = object()
 
 
@@ -1044,7 +1132,11 @@ class FakeSong(FakeObj):
 
     @current_song_time.setter
     def current_song_time(self, value):
+        origin, moved = vars(self).get("_position", 0.0), bool(vars(self).get("_moved"))
         object.__setattr__(self, "_position", float(value))
+        object.__setattr__(self, "_moved", False)
+        if "view" in vars(self):
+            self.view.playhead_set(origin, moved, float(value))
         if self.running_clock:
             object.__setattr__(self, "_clock", (time.monotonic(), float(value)))
 
@@ -1097,7 +1189,7 @@ class FakeSong(FakeObj):
             root_note=0, scale_name="Major", scale_mode=False,
             scale_intervals=[0, 2, 4, 5, 7, 9, 11], punch_in=False, punch_out=False,
             back_to_arranger=False, automation={})
-        object.__setattr__(self, "view", FakeObj(selected_track=tracks[0], detail_clip=None))
+        object.__setattr__(self, "view", FakeSongView(selected_track=tracks[0], detail_clip=None))
         object.__setattr__(self, "undo_log", [])
         object.__setattr__(self, "_undo", [])
         object.__setattr__(self, "_redo", [])
@@ -1111,6 +1203,7 @@ class FakeSong(FakeObj):
 
     def end_undo_step(self):
         self.undo_log.append("end")
+        self.view.after_command()  # what Live changes after the command
         before = self._open_step
         object.__setattr__(self, "_open_step", None)
         if before is None:
@@ -1210,7 +1303,7 @@ class FakeSong(FakeObj):
             self.tracks.append(track)
         else:
             self.tracks.insert(index, track)
-        _select(track)
+        _select(track, new=True)
         return track
 
     def create_audio_track(self, index):
@@ -1219,10 +1312,11 @@ class FakeSong(FakeObj):
             self.tracks.append(track)
         else:
             self.tracks.insert(index, track)
-        _select(track)
+        _select(track, new=True)
         return track
 
     def delete_track(self, index):
+        self.view.track_deleted(self.tracks[index])
         del self.tracks[index]
 
     def create_scene(self, index):

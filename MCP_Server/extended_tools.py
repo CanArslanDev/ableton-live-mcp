@@ -803,8 +803,7 @@ async def keeping_the_playhead(step: Any) -> Any:
     if PLAYHEAD_KEPT.get():
         return await step
     try:
-        before = await asend("lom_get", {"path": "live_set",
-                                         "properties": ["current_song_time", "is_playing"]})
+        before = await asyncio.to_thread(read_playhead)
     except BaseException:
         if asyncio.iscoroutine(step):
             step.close()  # never started: no "never awaited" warning
@@ -812,9 +811,43 @@ async def keeping_the_playhead(step: Any) -> Any:
     try:
         return await step
     finally:
-        if before.get("is_playing") is False:
-            await asend("lom_set", {"path": "live_set", "property": "current_song_time",
-                                    "value": float(before["current_song_time"])})
+        try:
+            await asyncio.to_thread(put_back_playhead, before)
+        except Exception as e:  # never in place of the step's own result or error
+            logger.warning("Could not put the playhead and the selection back: %s", e)
+
+
+# The playhead and the selected track, read in one batch (playhead_put_back)
+SELECTION_READ = {"type": "lom_get", "params": {"path": "live_set view",
+                                                "properties": ["selected_track"]}}
+PLAYHEAD_READ = [{"type": "lom_get", "params": {"path": "live_set", "properties": [
+    "current_song_time", "is_playing"]}}, SELECTION_READ]
+
+
+def read_playhead() -> tuple[dict, int | None]:
+    """(the song's current_song_time and is_playing, the selected track's id)."""
+    steps = batch(PLAYHEAD_READ, stop_on_error=False)["results"]
+    if steps[0].get("status") == "error":
+        raise RuntimeError(steps[0].get("message"))
+    return steps[0]["result"], selected_in(steps[1])
+
+
+def put_back_playhead(before: tuple[dict, int | None]) -> None:
+    """The playhead back (stopped only; no undo step), then the selection
+    read in the next command and set again when Live moved it: with a
+    pinned selection (CLAUDE.md) a copy, or the playhead set back, selects
+    another track, the latter seen only from the next command on."""
+    song, selected = before
+    if song.get("is_playing") is False:
+        send("lom_set", {"path": "live_set", "property": "current_song_time",
+                         "value": float(song["current_song_time"])})
+    if selected is None:
+        return
+
+    def run(cmds: list[dict]) -> dict:
+        return batch(cmds, stop_on_error=False)
+
+    select_again(selected_in(run([SELECTION_READ])["results"][0]), selected, run)
 
 
 @contextlib.contextmanager
@@ -822,12 +855,13 @@ def playhead_put_back():
     """Live 12.4.16 moves the stopped playhead to each clip that
     duplicate_clip_to_arrangement, create_midi_clip or create_audio_clip
     makes in the Arrangement: it goes back where it was (not while Live
-    plays; no undo step). Inside another, it does nothing."""
+    plays; no undo step), and so does the selected track. Inside another,
+    it does nothing."""
     if PLAYHEAD_KEPT.get():
         yield
         return
     try:
-        before = lom_get("live_set", ["current_song_time", "is_playing"])
+        before = read_playhead()
     except Exception as e:  # no Live to ask (tests, previews)
         logger.debug("No playhead read: %s", e)
         before = None
@@ -836,12 +870,11 @@ def playhead_put_back():
         yield
     finally:
         PLAYHEAD_KEPT.reset(token)
-        if isinstance(before, dict) and before.get("is_playing") is False and not PREVIEW.get():
+        if before is not None and not PREVIEW.get():
             try:
-                send("lom_set", {"path": "live_set", "property": "current_song_time",
-                                 "value": float(before["current_song_time"])})
+                put_back_playhead(before)
             except Exception as e:
-                logger.warning("Could not put the playhead back: %s", e)
+                logger.warning("Could not put the playhead and the selection back: %s", e)
 
 
 def song_context(optional: bool = False) -> dict:
@@ -984,17 +1017,21 @@ def setting_report(asked: list[str], names: dict[str, str], applied: dict) -> di
 
 # Every track's arm and the selected track, read in one batch (ARM_READ)
 ARM_READ = [{"type": "lom_get", "params": {"path": "live_set tracks", "properties": ["arm"]}},
-            {"type": "lom_get", "params": {"path": "live_set view",
-                                           "properties": ["selected_track"]}}]
+            SELECTION_READ]
+
+
+def selected_in(step: dict) -> int | None:
+    """The selected track's id from a SELECTION_READ result."""
+    view = step.get("result", {}) if step.get("status") != "error" else {}
+    selected = view.get("selected_track") if isinstance(view, dict) else None
+    return selected.get("$id") if isinstance(selected, dict) else None
 
 
 def arms_and_selection(steps: list[dict]) -> tuple[dict[int, bool], int | None]:
     """({track id: arm}, selected track id) from ARM_READ's two results."""
     rows = steps[0].get("result", {}).get("items", []) if steps[0].get("status") != "error" else []
     arms = {r["$id"]: r["arm"] for r in rows if isinstance(r.get("arm"), bool)}
-    view = steps[1].get("result", {}) if steps[1].get("status") != "error" else {}
-    selected = view.get("selected_track") if isinstance(view, dict) else None
-    return arms, selected.get("$id") if isinstance(selected, dict) else None
+    return arms, selected_in(steps[1])
 
 
 def put_back_arms(before: tuple[dict[int, bool], int | None],
@@ -1008,16 +1045,31 @@ def put_back_arms(before: tuple[dict[int, bool], int | None],
     come back, then the selection; one batch (no undo step), read back. The
     selection changes only after the command that landed the device (Live
     defers it), so it is set back whatever `after` read; call this in a
-    later command than the one that landed the device."""
+    later command than the one that landed the device. A selection that
+    reads back unchanged is set again through the selected track (Live
+    12.4.16 can ignore the set back: CLAUDE.md, pinned selection)."""
     (arms_before, selected_before), (arms_after, _selected_after) = before, after
+    run = run or (lambda cmds: batch(cmds, stop_on_error=False))
     ops = [op_set(f"id {t}", "arm", False) for t, armed in arms_after.items()
            if armed and arms_before.get(t) is False]
     ops += [op_set(f"id {t}", "arm", True) for t, armed in arms_after.items()
             if not armed and arms_before.get(t) is True]
-    if selected_before is not None:
-        ops.append(op_set("live_set view", "selected_track", ref(f"id {selected_before}")))
-    if ops:
-        (run or (lambda cmds: batch(cmds, stop_on_error=False)))(ops + ARM_READ[:1])
+    if selected_before is None:
+        if ops:
+            run(ops + ARM_READ[:1])
+        return
+    select = op_set("live_set view", "selected_track", ref(f"id {selected_before}"))
+    now = arms_and_selection(run(ops + [select] + ARM_READ)["results"][-2:])[1]
+    select_again(now, selected_before, run)
+
+
+def select_again(now: int | None, wanted: int, run: Callable[[list[dict]], Any]) -> None:
+    """When the selection read `now` is not `wanted`, set the selected track
+    and then the wanted one in one batch: Live 12.4.16 can ignore a set
+    back to the track selected before (CLAUDE.md, pinned selection)."""
+    if now is not None and now != wanted:
+        run([op_set("live_set view", "selected_track", ref(f"id {now}")),
+             op_set("live_set view", "selected_track", ref(f"id {wanted}")), SELECTION_READ])
 
 
 @contextlib.contextmanager
@@ -4778,10 +4830,19 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              "uri": e["uri"]} for e in ranked[:max_results]]}
 
     def browser_item_id(item: int | str, category: str) -> tuple[int, str]:
-        """(id, name) for a browser_search id or a search query."""
-        if isinstance(item, int) or re.fullmatch(r"\d+", str(item).strip()):
-            name = lom_get(f"id {int(item)}", ["name"]).get("name")
-            return int(item), name if isinstance(name, str) else str(item)
+        """(id, name) for a browser_search id or a search query; digits that
+        are no browser item's id ("808") are searched for as a name."""
+        text = str(item).strip()
+        if isinstance(item, int) or re.fullmatch(r"\d+", text):
+            try:
+                found = lom_get(f"id {int(text)}", ["name", "uri"])
+            except AbletonCommandError as e:
+                if "Unknown id" not in str(e):
+                    raise
+                found = {}
+            if isinstance(found.get("uri"), str):  # a browser item (others have no uri)
+                name = found.get("name")
+                return int(text), name if isinstance(name, str) else text
         # an exact name ends the walk; otherwise 25 strong hits or 3 s after
         # the first (a whole large User Library walked kept Live busy for
         # minutes); with nothing found yet it goes on for up to 20 s
@@ -5719,8 +5780,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - drum_fill: the drum track's last `bars` (1) become a fill: fill =
           snare_roll | toms | build; track: default the first with a Drum Rack
         - gap: silence for the last `bars` (1/4 bar) on `tracks` (default:
-          MIDI tracks with notes there; audio tracks are cut); returns the
-          clips around it
+          MIDI tracks with notes there); audio tracks named in `tracks` are
+          cut; returns the clips around it
         - filter_sweep: a high-pass Auto Filter on each MIDI track in `tracks`
           (default: those playing) sweeping up over the last `bars` (4), open
           again on the downbeat (record_automation for audio tracks or the

@@ -2283,7 +2283,7 @@ def test_build_arrangement_reports_a_track_it_could_not_clear(live_server, monke
     bass.clip_slots[0].has_clip = True
     object.__setattr__(vox, "is_foldable", True)
     drums.clip_slots[1].clip, drums.clip_slots[1].has_clip = fake_live.FakeClip(name="B"), True
-    real_cut, real_get = extended_tools.cut_ranges, extended_tools.lom_get
+    real_cut, real_read = extended_tools.cut_ranges, extended_tools.read_playhead
     cleared, playhead_reads = [], []
 
     def cut(track, ranges):
@@ -2292,13 +2292,12 @@ def test_build_arrangement_reports_a_track_it_could_not_clear(live_server, monke
             raise extended_tools.AbletonCommandError("Live refused the scratch clip")
         return real_cut(track, ranges)
 
-    def counting(path, properties=None):
-        if properties == ["current_song_time", "is_playing"]:
-            playhead_reads.append(path)
-        return real_get(path, properties)
+    def counting():
+        playhead_reads.append(1)
+        return real_read()
 
     monkeypatch.setattr(extended_tools, "cut_ranges", cut)
-    monkeypatch.setattr(extended_tools, "lom_get", counting)
+    monkeypatch.setattr(extended_tools, "read_playhead", counting)
     _arranged(drums, fake_live.FakeClip(name="Old Beat", length=8.0), 0.0)
     result = call("build_arrangement", sections=[{"name": "A", "bars": 2, "clips": {"Bass": 0}}],
                   locators=False)
@@ -2355,13 +2354,13 @@ def test_clip_lengths_that_cannot_be_are_refused(live_server):
 def test_keeping_the_playhead_closes_a_step_it_never_ran(monkeypatch):
     from MCP_Server import extended_tools
 
-    async def no_live(*_args, **_kwargs):
+    def no_live(*_args, **_kwargs):
         raise RuntimeError("no Live")
 
     async def step():
         return 1
 
-    monkeypatch.setattr(extended_tools, "asend", no_live)
+    monkeypatch.setattr(extended_tools, "send", no_live)
     coro = step()
     with pytest.raises(RuntimeError, match="no Live"):
         asyncio.run(extended_tools.keeping_the_playhead(coro))
@@ -3168,6 +3167,19 @@ def test_browser_load_follows_a_track_live_renames(live_server):
     assert loaded["warning"] == "the track's devices did not change"
 
 
+def test_a_name_made_of_digits_is_searched_for(live_server):
+    """browser_load(item="808") took the digits for a browser id and failed
+    with "Unknown id 808"; an id that is no browser item is a name too."""
+    script, call = live_server
+    loaded = call("browser_load", track="Bass", item="808", category="drums")
+    assert "808" in loaded["loaded"], loaded
+    track_id = call("lom_get_object", path="live_set tracks 2")["$id"]
+    with pytest.raises(Exception, match="Nothing in the browser"):  # not a browser item
+        call("browser_preview", item=str(track_id))
+    found = call("browser_search", query="crash 505", category="drums")["results"][0]
+    assert call("browser_preview", item=str(found["id"]))["previewing"] == "Crash 505.wav"
+
+
 def test_an_exact_name_ends_the_browser_walk(monkeypatch):
     """Looking up a name walked up to 200 strong hits, or the whole category
     for 20 s (a large User Library kept Live busy for minutes); an exact
@@ -3656,6 +3668,77 @@ def test_new_tracks_and_deletes_leave_the_users_selection(live_server):
     ret.devices[:] = [fake_live.INSERTABLE["Reverb"](), fake_live.INSERTABLE["Utility"]()]
     call("manage_device", track="return A", device="Utility", action="delete")
     assert [d.name for d in ret.devices] == ["Reverb"] and song.view.selected_track is vox
+
+
+def test_a_transition_onto_its_existing_track_leaves_the_selection(live_server):
+    """Live 12.4.16 pins a track it made once a clip was copied onto it and
+    the playhead set: a copy over its clip, or the playhead set back into
+    it, selects it again, and a set back to the track before is ignored. A
+    second riser left "Riser" selected, and copies at 64 and 32 did."""
+    from MCP_Server import extended_tools
+    script, call = live_server
+    song = script._song
+    vox, bass = song.tracks[2], song.tracks[1]
+    song.view.selected_track = vox
+    for _ in range(2):
+        call("design_transition", kind="riser", at_bar=5)  # Riser plays 0..16
+        assert song.view.selected_track is vox, song.view.selected_track.name
+    riser = next(t for t in song.tracks if t.name == "Riser")
+    # the fake pins as Live does: the playhead set back into the span selects it
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=4.0)
+    bass.clip_slots[0].has_clip = True
+    bass.duplicate_clip_to_arrangement(bass.clip_slots[0].clip, 64.0)
+    song.end_undo_step()
+    assert song.view.selected_track is vox and song.current_song_time == 64.0
+    song.current_song_time = 0.0
+    assert song.view.selected_track is vox  # not within the command
+    song.end_undo_step()
+    assert song.view.selected_track is riser
+    song.view.selected_track = vox
+    assert song.view.selected_track is riser  # ignored
+    song.view.selected_track = riser
+    song.view.selected_track = vox
+    assert song.view.selected_track is vox
+    song.current_song_time = 8.0  # from inside: no jump
+    song.end_undo_step()
+    assert song.view.selected_track is vox
+    song.current_song_time = 40.0
+    song.current_song_time = 16.0  # the span's end, set: inside, so it jumps
+    song.end_undo_step()
+    assert song.view.selected_track is riser
+    song.view.selected_track = riser
+    song.view.selected_track = vox
+    song.current_song_time = 8.0   # from the end, set there: inside, no jump
+    song.end_undo_step()
+    assert song.view.selected_track is vox
+    bass.duplicate_clip_to_arrangement(bass.clip_slots[0].clip, 16.0)
+    song.current_song_time = 0.0   # from the end, a copy moved there: outside
+    song.end_undo_step()
+    assert song.view.selected_track is riser
+    song.view.selected_track = riser
+    song.view.selected_track = vox
+    # copy tools put the selection back (playhead_put_back)
+    for at in (64.0, 32.0, 8.0, 0.0):
+        extended_tools.duplicate_session_clip(1, 0, at)
+        assert song.view.selected_track is vox, at
+    call("write_arrangement_automation", track="Bass", parameter="Volume", start=40, end=42,
+         shape="ramp_up")
+    assert song.view.selected_track is vox
+    for _ in range(2):
+        call("design_transition", kind="reverse_cymbal", at_bar=5)
+        assert song.view.selected_track is vox
+    # the cymbal pinned anew; deleting its clip ends the pin
+    cymbal = next(t for t in song.tracks if t.name == "Reverse Cymbal")
+    inside = cymbal.arrangement_clips[0].start_time + 0.5
+    for pinned in (True, False):
+        bass.duplicate_clip_to_arrangement(bass.clip_slots[0].clip, 64.0)
+        song.current_song_time = inside
+        song.end_undo_step()
+        assert (song.view.selected_track is cymbal) is pinned
+        song.view.selected_track = cymbal
+        song.view.selected_track = vox
+        for clip in list(cymbal.arrangement_clips):
+            cymbal.delete_clip(clip)
 
 
 def test_inserts_skip_the_put_back_when_nothing_can_change(live_server, monkeypatch):

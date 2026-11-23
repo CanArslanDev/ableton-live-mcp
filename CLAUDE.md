@@ -259,6 +259,37 @@ Measured on Live 12.3.8:
   `insert_device` refuses a second instrument ("Device chains cannot have more
   than one instrument each"). `put_back_arms` restores arms and the selection
   after `inserted_device_ids`, `load_items` and the legacy load tools.
+- **A pinned selection** (12.4.16, 2026-11-23): after Live selected a new
+  track itself (`create_midi_track`), a Session clip copied onto it with
+  `duplicate_clip_to_arrangement` and then the playhead set
+  (`current_song_time`, as `keeping_playhead` does) pin that track and
+  the copy's span; a copy onto a track selected through the LOM, or one
+  Reverb insert's selection, pinned nothing. With the playhead outside
+  the span, a copy overlapping the span (pinned 16..32: copies at 14, 16,
+  20, 31 jumped, at 0, 12, 32, 64 not) or a playhead set into it, end
+  included (pinned 0..16: 64 → 0, 40 → 15.9, 40 → 16 jumped; 40 → 20,
+  0 → 8, 8 → 0 not) selects the pinned track, seen from the next command
+  on (a read in the same batch still shows the old one). Where the
+  playhead starts counts as inside on [start, end] when it was set there
+  (pinned 16..32, set to 32: copies at 20 and 14 and sets 32 → 24 did not
+  jump) but on [start, end) when a copy moved it there (pinned 0..16, a
+  copy at 16, then 16 → 0 jumped; a copy at 32 on 16..32, then 32 → 24
+  jumped). A copy that only moves the playhead does not jump (a copy at
+  64 from 0, then the set 64 → 0 did). Then `selected_track` set back to
+  the track selected before reads back unchanged, again and again;
+  setting another track first (even the pinned one) and then that one
+  takes, in one batch. The pin outlives that and fired clips; deleting
+  the pinned track, or its clip, ends it (a track created and deleted
+  once ended it too, which of the two is unknown). Firing a Session clip
+  (a probe's, 2026-11-23) leaves `back_to_arranger` True after the
+  transport stops; none of `duplicate_to_arrangement`,
+  `build_arrangement`, `write_arrangement_automation`,
+  `design_transition` (riser, gap, reverse cymbal), a generator with
+  `arrangement_time` or `render_and_analyze`, stopped or playing, did.
+  `playhead_put_back` therefore sets the playhead back, reads the selection in
+  the next command and, when it moved, sets the selected track and then the
+  user's (`select_again`); `put_back_arms` reads back the same way.
+  `FakeSongView` models this (jumps at `end_undo_step`).
 - **Sidechain** (12.4): Compressor has `input_routing_type` (its sidechain
   source, e.g. `available_input_routing_types 'Kick'`); Gate has none, so its
   sidechain cannot be set from a script.
