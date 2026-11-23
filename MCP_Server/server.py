@@ -595,6 +595,15 @@ def set_tempo(ctx: Context, tempo: float) -> str:
         return f"Error setting tempo: {str(e)}"
 
 
+def _arms_put_back(ableton):
+    """Live 12.4.16 arms a MIDI track that had no device when one lands on it
+    and drops the other tracks' arms: put the arms back
+    (extended_tools.arms_put_back; these tools select the track themselves)."""
+    from .extended_tools import arms_put_back
+    return arms_put_back(select=False, run=lambda commands: ableton.send_command(
+        "batch", {"commands": commands, "stop_on_error": False}))
+
+
 @legacy_tool("full")
 def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
     """
@@ -606,10 +615,11 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
     """
     try:
         ableton = get_ableton_connection()
-        result = ableton.send_command("load_browser_item", {
-            "track_index": track_index,
-            "item_uri": uri
-        })
+        with _arms_put_back(ableton):
+            result = ableton.send_command("load_browser_item", {
+                "track_index": track_index,
+                "item_uri": uri
+            })
         
         # Check if the instrument was loaded successfully
         if result.get("loaded", False):
@@ -835,42 +845,46 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
     """
     try:
         ableton = get_ableton_connection()
-        
-        # Step 1: Load the drum rack
-        result = ableton.send_command("load_browser_item", {
-            "track_index": track_index,
-            "item_uri": rack_uri
-        })
-        
-        if not result.get("loaded", False):
-            return f"Failed to load drum rack with URI '{rack_uri}'"
-        
-        # Step 2: Get the drum kit items at the specified path
-        kit_result = ableton.send_command("get_browser_items_at_path", {
-            "path": kit_path
-        })
-        
-        if "error" in kit_result:
-            return f"Loaded drum rack but failed to find drum kit: {kit_result.get('error')}"
-        
-        # Step 3: Find a loadable drum kit
-        kit_items = kit_result.get("items", [])
-        loadable_kits = [item for item in kit_items if item.get("is_loadable", False)]
-        
-        if not loadable_kits:
-            return f"Loaded drum rack but no loadable drum kits found at '{kit_path}'"
-        
-        # Step 4: Load the first loadable kit
-        kit_uri = loadable_kits[0].get("uri")
-        ableton.send_command("load_browser_item", {
-            "track_index": track_index,
-            "item_uri": kit_uri
-        })
-        
-        return f"Loaded drum rack and kit '{loadable_kits[0].get('name')}' on track {track_index}"
+        with _arms_put_back(ableton):
+            return _load_drum_kit(ableton, track_index, rack_uri, kit_path)
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+
+def _load_drum_kit(ableton, track_index: int, rack_uri: str, kit_path: str) -> str:
+    # Step 1: Load the drum rack
+    result = ableton.send_command("load_browser_item", {
+        "track_index": track_index,
+        "item_uri": rack_uri
+    })
+
+    if not result.get("loaded", False):
+        return f"Failed to load drum rack with URI '{rack_uri}'"
+
+    # Step 2: Get the drum kit items at the specified path
+    kit_result = ableton.send_command("get_browser_items_at_path", {
+        "path": kit_path
+    })
+
+    if "error" in kit_result:
+        return f"Loaded drum rack but failed to find drum kit: {kit_result.get('error')}"
+
+    # Step 3: Find a loadable drum kit
+    kit_items = kit_result.get("items", [])
+    loadable_kits = [item for item in kit_items if item.get("is_loadable", False)]
+
+    if not loadable_kits:
+        return f"Loaded drum rack but no loadable drum kits found at '{kit_path}'"
+
+    # Step 4: Load the first loadable kit
+    kit_uri = loadable_kits[0].get("uri")
+    ableton.send_command("load_browser_item", {
+        "track_index": track_index,
+        "item_uri": kit_uri
+    })
+
+    return f"Loaded drum rack and kit '{loadable_kits[0].get('name')}' on track {track_index}"
 
 # ── Arrangement view tools ────────────────────────────────────────────────────
 

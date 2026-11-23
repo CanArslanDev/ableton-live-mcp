@@ -867,12 +867,34 @@ def test_add_device_inserts_by_name_and_applies_settings(live_server):
     bass = script._song.tracks[1]
     result = call("add_device", track="Bass", device="Utility",
                   settings={"Bass Mono": "On", "Gain": 0.25})
-    assert result["settings"]["ok"]
+    assert result["ok"] and result["settings"] == "2 of 2 applied" and "errors" not in result
     utility = bass.devices[-1]
     assert utility.class_name == "StereoGain"
     assert utility.parameters[1].value == 1 and utility.parameters[2].value == 0.25
     with pytest.raises(Exception, match="Could not insert 'Nope'"):
         call("add_device", track="Bass", device="Nope")
+
+
+def test_add_device_reports_failed_settings_at_the_top(live_server):
+    """An EQ Eight filter type Live does not have looked like success: the
+    failure sat inside result["settings"]."""
+    script, call = live_server
+    result = call("add_device", track="Bass", device="EQ Eight",
+                  settings={"1 Filter Type A": "High Pass 24dB", "1 Frequency A": "80 Hz"})
+    assert result["ok"] is False and result["settings"] == "1 of 2 applied"
+    assert list(result["errors"]) == ["1 Filter Type A"]
+    assert "High Pass 48dB" in result["errors"]["1 Filter Type A"]   # Live's choices
+
+
+def test_apply_device_chain_reports_failed_settings_at_the_top(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import device_recipes
+    broken = {"description": "x", "devices": [("EQ Eight", {"1 Filter Type A": "High Pass 24dB"}),
+                                              ("Limiter", {"Gain": "2 dB"})]}
+    monkeypatch.setattr(device_recipes, "recipe", lambda name: broken)
+    result = call("apply_device_chain", track="Bass", chain="anything")
+    assert result["ok"] is False and list(result["errors"]) == ["EQ Eight: 1 Filter Type A"]
+    assert result["renamed"] == {"Limiter: Gain": "Limiter: Input Gain"}
 
 
 def test_sidechain_chain_keys_the_compressor_from_another_track(live_server):
@@ -1539,16 +1561,35 @@ def test_parameter_names_from_another_live_version_still_work(live_server):
     script, call = live_server
     added = call("add_device", track="Bass", device="Compressor",
                  settings={"Output Gain": "6 dB", "Threshold": "-30 dB"})
-    assert added["settings"]["ok"], added
+    assert added["ok"] and added["renamed"] == {"Output Gain": "Output"}, added
     compressor = script._song.tracks[1].devices[-1]
     output = next(p for p in compressor.parameters if p.name == "Output")
     assert output.str_for_value(output.value) == "6.00 dB"
-    call("set_device_parameter_by_name", track="Bass", device="Compressor",
-         parameter="Output Gain", display_value="-3 dB")
+    set_ = call("set_device_parameter_by_name", track="Bass", device="Compressor",
+                parameter="Output Gain", display_value="-3 dB")
     assert output.str_for_value(output.value) == "-3.00 dB"
+    assert (set_["asked"], set_["parameter"]) == ("Output Gain", "Output")
     from MCP_Server.extended_tools import parameter_aliases
     assert parameter_aliases("2 Resonance A") == ["2 Q A"]
     assert parameter_aliases("Output") == ["Output Gain", "Makeup", "Gain", "Master Output"]
+
+
+def test_limiter_gain_is_its_input_gain_not_its_output(live_server):
+    """Live 12.3's Limiter "Gain" is 12.4's "Input Gain"; the general rename
+    "Gain" → "Output" (Utility) used to send it to the Limiter's Output."""
+    script, call = live_server
+    added = call("add_device", track="Bass", device="Limiter", settings={"Gain": "4 dB"})
+    assert added["ok"] and added["renamed"] == {"Gain": "Input Gain"}, added
+    limiter = {p.name: p for p in script._song.tracks[1].devices[-1].parameters}
+    assert limiter["Input Gain"].value == pytest.approx(4.0, abs=0.05)
+    assert limiter["Output"].value == 0.0
+    set_ = call("set_device_parameter_by_name", track="Bass", device="Limiter",
+                parameter="Gain", display_value="2 dB")
+    assert set_["parameter"] == "Input Gain" and limiter["Output"].value == 0.0
+    from MCP_Server.extended_tools import parameter_aliases
+    assert parameter_aliases("Gain", "Limiter") == ["Input Gain"]
+    assert parameter_aliases("Output", "Limiter") == ["Output Gain", "Makeup", "Master Output"]
+    assert parameter_aliases("Gain", "StereoGain") == ["Output"]
 
 
 def _updates_server():
@@ -2052,3 +2093,561 @@ def test_a_track_named_with_digits_is_found_by_its_name(live_server, monkeypatch
     result = call("apply_device_chain", track="Bass", chain="sidechain_duck", sidechain_from="808")
     assert result["ok"], result
     assert bass.devices[-1].input_routing_type.display_name == "808"
+
+
+# ── Remake sessions: loads, names, racks (fix/remake-session-issues) ─────────
+
+def _boot_kit():
+    """Like Live 12.4's "BNYX Boot Kit": an Instrument Rack whose one chain
+    holds a Drum Rack (kick on 36) and a Saturator."""
+    rack = fake_live.FakeDrumRack()
+    rack.name = "Boot Kit"
+    rack.insert_chain()
+    rack.chains[0].in_note = 36
+    rack.chains[0].name = "Kick Boot"
+    rack.chains[0].insert_device("Simpler")
+    rack.drum_pads[36].name = "Kick Boot"
+    saturator = fake_live.INSERTABLE["Saturator"]()
+    return fake_live.FakeRack("Boot Kit", [("Boot Kit", [rack, saturator])])
+
+
+def test_browser_load_refuses_a_missing_track_before_loading(live_server):
+    """A failed track select used to load the item onto whatever track was
+    selected: a preset replaced the Drums track's Drum Rack."""
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    song.view.selected_track = song.tracks[2]
+    with pytest.raises(Exception, match="No item named 'Nope'"):
+        call("browser_load", track="Nope", item="pad warm")
+    # the track is checked before the browser is searched
+    with pytest.raises(Exception, match="No item named 'Nope'"):
+        call("browser_load", track="Nope", item="nothing is called this")
+    with pytest.raises(Exception, match="No Drum Rack"):
+        call("browser_load", track="Vox", item="nothing is called this", drum_pad="kick")
+    with pytest.raises(Exception, match="No item named 'Nope'"):
+        call("build_drum_kit", track="Nope", roles=["kick"])
+    assert browser.loaded == [] and song.tracks[2].devices == []
+
+
+def test_browser_load_follows_a_track_live_renames(live_server):
+    """Live names a "5-MIDI" track after the instrument it loads; reading the
+    track back by its old name failed after the load had happened."""
+    script, call = live_server
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("5-MIDI"))
+    loaded = call("browser_load", track="5-MIDI", item="pad warm")
+    assert loaded["track"] == "5-Warm Pad" and loaded["devices"] == ["Warm Pad"]
+    assert "warning" not in loaded
+    assert song.tracks[-1].arm is False           # Live armed it on loading; put back
+    # a load that changes nothing says so
+    browser = script.application().browser
+    object.__setattr__(browser, "load_item", lambda item: None)
+    loaded = call("browser_load", track="Vox", item="pad warm")
+    assert loaded["warning"] == "the track's devices did not change"
+
+
+def test_an_exact_name_ends_the_browser_walk(monkeypatch):
+    """Looking up a name walked up to 200 strong hits, or the whole category
+    for 20 s (a large User Library kept Live busy for minutes); an exact
+    name now ends the walk."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    chunks = [[("Impact Layered Reversed.wav", 1)], [("Impact Layered.wav", 2)],
+              [("Impact Layered Long.wav", 3)]]
+    sent = []
+
+    def send(command, params=None, timeout=None):
+        sent.append((command, params))
+        if command == "browser_search" and params.get("cancel"):
+            return {}
+        if command == "browser_search":
+            part = chunks[sum(1 for c, p in sent if c == "browser_search") - 1]
+            return {"walk_id": 1, "done": False, "visited": 10,
+                    "results": [{"$id": i, "name": n, "kind": "sample", "root": "Drums",
+                                 "path": "Drum Hits/FX Hit/" + n, "source": "Core Library",
+                                 "uri": ""} for n, i in part]}
+        return {}
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    # register() sets the module's connection: put the old one back afterwards
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    asyncio.run(mcp.call_tool("browser_preview", {"item": "impact layered"}))
+    walks = [p for c, p in sent if c == "browser_search"]
+    assert len(walks) == 3 and walks[-1] == {"walk_id": 1, "cancel": True}
+    assert sent[-1] == ("lom_call", {"path": "live_app browser", "method": "preview_item",
+                                     "args": [{"$ref": "id 2"}]})
+
+
+def test_explicit_sound_names_prefer_the_exact_item(live_server):
+    """build_drum_kit(sounds={"crash": "Impact Layered"}) loaded "Impact
+    Layered Reversed", the browser's first hit."""
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    song.tracks.append(fake_live.FakeTrack("Beat"))
+    kit = call("build_drum_kit", track="Beat", roles=["crash"],
+               sounds={"crash": "Impact Layered"})
+    assert kit["pads"][0]["sample"].endswith("FX Hit/Impact Layered.wav"), kit
+    assert browser.loaded[-1] == ("Beat", 49, "Impact Layered.wav")
+    from MCP_Server.extended_tools import by_name_match
+    hits = [{"name": n} for n in ("Kick 808 Reverse Thud.wav", "Kick 808 Deep.wav",
+                                  "Kick 808 1.aif", "Kick 808.wav", "Kick 808 Loop 120 BPM.wav")]
+    assert [h["name"] for h in by_name_match("kick 808", hits)] == [
+        "Kick 808.wav", "Kick 808 1.aif", "Kick 808 Deep.wav", "Kick 808 Reverse Thud.wav",
+        "Kick 808 Loop 120 BPM.wav"]
+    assert by_name_match("KICK 808.WAV", hits)[0]["name"] == "Kick 808.wav"
+    assert by_name_match("kick 808 reverse", hits)[0]["name"] == "Kick 808 Reverse Thud.wav"
+
+
+def test_drum_rack_inside_an_instrument_rack(live_server):
+    """get_drum_pads said "No Drum Rack" for a kit whose Drum Rack sits in an
+    Instrument Rack; loads onto its pads and set_device_parameter_by_name
+    could not reach it either."""
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    kit = _boot_kit()
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit]))
+    pads = call("get_drum_pads", track="Boot")
+    assert [p["name"] for p in pads["pads"]] == ["Kick Boot"]
+    assert pads["rack"].endswith("devices 0 chains 0 devices 0")
+    loaded = call("browser_load", track="Boot", item="snare tight", drum_pad="snare")
+    assert loaded["pad_name"] == "Snare Tight" and browser.loaded[-1][1] == 38
+    drum_rack, saturator = kit.chains[0].devices
+    assert [c.in_note for c in drum_rack.chains] == [36, 38]
+    # a device inside the rack, by name
+    call("set_device_parameter_by_name", track="Boot", device="Saturator",
+         parameter="Drive", display_value="6 dB")
+    drive = next(p for p in saturator.parameters if p.name == "Drive")
+    assert drive.value == pytest.approx(6.0, abs=0.05)
+    assert call("manage_device", track="Boot", device="saturator",
+                action="info")["class_name"] == "Saturator"
+    with pytest.raises(Exception, match="No device named 'Nope'.*Saturator"):
+        call("set_device_parameter_by_name", track="Boot", device="Nope", parameter="Drive")
+    # a pad chain's mixer, and the device on a pad
+    call("set_device_parameter_by_name", track="Boot", device="mixer", pad="kick",
+         parameter="volume", display_value="-6 dB")
+    assert drum_rack.chains[0].mixer_device.volume.str_for_value(
+        drum_rack.chains[0].mixer_device.volume.value) == "-6.0 dB"
+    call("set_device_parameter_by_name", track="Boot", device=0, pad=36,
+         parameter="Volume", value=-3.0)
+    assert drum_rack.chains[0].devices[0].parameters[4].value == -3.0
+
+
+def test_a_name_several_nested_devices_share_is_an_error(live_server):
+    script, call = live_server
+    song = script._song
+    rack = fake_live.FakeRack("Fx", [("A", [fake_live.INSERTABLE["Saturator"]()]),
+                                     ("B", [fake_live.INSERTABLE["Saturator"]()])],
+                              class_name="AudioEffectGroupDevice")
+    song.tracks.append(fake_live.FakeTrack("Bus", midi=False, devices=[rack]))
+    with pytest.raises(Exception, match=r"2 devices inside racks are named 'Saturator': "
+                                        r".*chains 0 devices 0; .*chains 1 devices 0"):
+        call("set_device_parameter_by_name", track="Bus", device="Saturator", parameter="Drive")
+    second = "live_set tracks 3 devices 0 chains 1 devices 0"
+    call("set_device_parameter_by_name", track="Bus", device=second, parameter="Drive",
+         value=3.0)
+    assert rack.chains[1].devices[0].parameters[1].value == 3.0
+    # a device named like a path is that device, not the path
+    rack.chains[0].devices[0].name = "live_set tracks 0"
+    call("set_device_parameter_by_name", track="Bus", device="live_set tracks 0",
+         parameter="Drive", value=4.0)
+    assert rack.chains[0].devices[0].parameters[1].value == 4.0
+    # the track's own device of a name wins over one inside a rack
+    song.tracks[3].devices.append(fake_live.INSERTABLE["Saturator"]())
+    call("set_device_parameter_by_name", track="Bus", device="Saturator", parameter="Drive",
+         value=5.0)
+    assert song.tracks[3].devices[1].parameters[1].value == 5.0
+
+
+def test_run_batch_checks_each_step_before_running(live_server):
+    """param_set_display without params.path ran and answered "Empty path"."""
+    script, call = live_server
+    song = script._song
+    before = song.tempo
+    for commands, message in (
+            ([{"type": "lom_set", "params": {"path": "live_set", "property": "tempo",
+                                             "value": 99.0}},
+              {"type": "param_set_display", "params": {"value": "-6 dB"}}],
+             r"Step 1 \(param_set_display\): params.path is missing"),
+            ([{"params": {}}], "Step 0: needs"),
+            ([{"type": "lom_get", "params": {}}], r"Step 0 \(lom_get\): params.path"),
+            ([{"type": "lom_get", "params": ["live_set"]}], r"Step 0 \(lom_get\): params must")):
+        with pytest.raises(Exception, match=message):
+            call("run_batch", commands=commands)
+    assert song.tempo == before          # nothing ran
+
+
+def test_manage_device_deletes_by_path_id_and_inside_racks(live_server):
+    """A path or id as the device went to index_in and failed ("No item named
+    'live_set tracks 3 devices 1'"); a device inside a rack is deleted by its
+    chain."""
+    script, call = live_server
+    song = script._song
+    kit = _boot_kit()
+    extra = [fake_live.INSERTABLE[n]() for n in ("Utility", "Reverb", "Delay")]
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit] + extra))
+    call("manage_device", track="Boot", device="live_set tracks 3 devices 1", action="delete")
+    assert [d.name for d in song.tracks[3].devices] == ["Boot Kit", "Reverb", "Delay"]
+    reverb = call("manage_device", track="Boot", device="Reverb", action="info")["$id"]
+    call("manage_device", track="Boot", device=f"id {reverb}", action="delete")
+    assert [d.name for d in song.tracks[3].devices] == ["Boot Kit", "Delay"]
+    call("manage_device", track="Boot", device="Saturator", action="delete")
+    assert [d.name for d in kit.chains[0].devices] == ["Boot Kit"]
+    saturator = fake_live.INSERTABLE["Saturator"]()
+    kit.chains[0].devices.append(saturator)
+    sat_id = call("manage_device", track="Boot", device="Saturator", action="info")["$id"]
+    call("manage_device", track="Boot", device=f"id {sat_id}", action="delete")
+    assert [d.name for d in kit.chains[0].devices] == ["Boot Kit"]
+    call("manage_device", track="Boot", device="-1", action="delete")
+    assert [d.name for d in song.tracks[3].devices] == ["Boot Kit"]
+
+
+def test_pads_digit_names_and_kit_track_names(live_server):
+    script, call = live_server
+    song = script._song
+    kit = _boot_kit()
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit]))
+    with pytest.raises(Exception, match=r"Pad 38 \(D1\) is empty"):
+        call("set_device_parameter_by_name", track="Boot", device="mixer", pad="snare",
+             parameter="volume")
+    # a device inside a rack named only with digits is found by that name
+    kit.chains[0].devices[1].name = "808"
+    call("set_device_parameter_by_name", track="Boot", device="808", parameter="Drive", value=2.0)
+    assert kit.chains[0].devices[1].parameters[1].value == 2.0
+    call("set_device_parameter_by_name", track="Boot", device=0, parameter=0, value=0.0)
+    assert kit.parameters[0].value == 0.0          # an integer stays an index
+    # build_drum_kit names the track as it is after loading (Live renames a
+    # "6-MIDI" track after what it holds)
+    song.tracks.append(fake_live.FakeTrack("6-MIDI"))
+    browser = script.application().browser
+    load = browser.load_item
+
+    def load_and_rename(item):
+        load(item)
+        song.tracks[-1].name = "6-Drum Rack"
+
+    object.__setattr__(browser, "load_item", load_and_rename)
+    built = call("build_drum_kit", track="6-MIDI", roles=["kick"])
+    assert built["track"] == "6-Drum Rack" and built["ok"]
+
+
+def test_device_digits_paths_and_pad_chains(live_server):
+    """Digit-only text that is both an index and a nested name is refused;
+    a path must be on the track; pad chains loaded through the browser are
+    the rack's chains, where devices are found and deleted by name."""
+    script, call = live_server
+    song = script._song
+    kit = _boot_kit()
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit, fake_live.INSERTABLE["Utility"]()]))
+    drum_rack = kit.chains[0].devices[0]
+    drum_rack.chains[0].devices[0].name = "1"            # a pad Simpler from "1.wav"
+    with pytest.raises(Exception, match=r"'1' is ambiguous: index 1 is 'Utility'.*"
+                                        r"chains 0 devices 0 chains 0 devices 0"):
+        call("manage_device", track="Boot", device="1", action="info")
+    assert call("manage_device", track="Boot", device=1, action="info")["name"] == "Utility"
+    drum_rack.chains[0].devices[0].name = "7"            # no index 7: the nested name
+    assert call("manage_device", track="Boot", device="7", action="info")["name"] == "7"
+    # a path on another track is refused; "id N …" nested paths work
+    with pytest.raises(Exception, match="tracks 1 devices 0 is not a device on this track"):
+        call("manage_device", track="Boot", device="live_set tracks 1 devices 0", action="info")
+    kit_id = call("manage_device", track="Boot", device=0, action="info")["$id"]
+    assert call("manage_device", track="Boot", device=f"id {kit_id} chains 0 devices 1",
+                action="info")["name"] == "Saturator"
+    # a pad filled through the browser: its chain is one of the rack's chains
+    call("browser_load", track="Boot", item="snare tight", drum_pad="snare")
+    pad_chain = drum_rack.drum_pads[38].chains[0]
+    assert pad_chain in drum_rack.chains and isinstance(pad_chain, fake_live.FakeDrumChain)
+    call("manage_device", track="Boot", device="Snare Tight", action="delete")
+    assert pad_chain.devices == []
+
+
+def test_pad_sends_need_the_racks_returns(live_server):
+    """A pad chain's sends go to its Drum Rack's own return chains; a fresh
+    rack has none, which gave Live's raw "Index 0 out of range"."""
+    script, call = live_server
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[_boot_kit()]))
+    with pytest.raises(Exception, match="no return chain 0: pad sends go to the rack's own"):
+        call("set_device_parameter_by_name", track="Boot", device="mixer", pad="kick",
+             parameter="send A", value=0.5)
+
+
+class _Clock:
+    """extended_tools' time with a monotonic clock that moves a second per read."""
+
+    def __init__(self):
+        import time as real
+        self._real, self.now = real, 0.0
+
+    def monotonic(self):
+        self.now += 1.0
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _walk_stub(monkeypatch, chunk_for, fallback=None):
+    """browser_search answered by chunk_for(call number) and never finishing;
+    other commands go to fallback (or answer {})."""
+    from MCP_Server import extended_tools
+    sent = []
+
+    def send(command, params=None, timeout=None):
+        if command == "browser_search":
+            sent.append(params)
+            if params.get("cancel"):
+                return {}
+            return {"walk_id": 1, "done": False, "visited": 100 * len(sent),
+                    "results": [{"$id": i, "name": n, "kind": "sample", "root": "Drums",
+                                 "path": "Drum Hits/Kick/" + n, "source": "User Library",
+                                 "uri": ""} for i, n in chunk_for(len(sent))]}
+        return fallback(command, params, timeout) if fallback else {}
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    monkeypatch.setattr(extended_tools, "time", _Clock())
+    return sent
+
+
+def test_name_lookups_wait_for_a_first_hit_and_say_when_unfinished(monkeypatch):
+    """With the 3 s limit, a name further into a large library came back as
+    "Nothing in the browser matches"; the short limit now counts only once a
+    hit is found, and a walk that ran out says so."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+
+    def preview(item):
+        result = asyncio.run(mcp.call_tool("browser_preview", {"item": item}))
+        return result.content[0].text
+
+    # nothing for a while, then the item: found (the old limit gave up at 3 s)
+    sent = _walk_stub(monkeypatch, lambda n: [(7, "My Kick.wav")] if n == 6 else [])
+    assert "Drums/Drum Hits/Kick/My Kick.wav" in preview("my kick")
+    # a strong hit that is not the exact name: the walk ends a few seconds on
+    sent = _walk_stub(monkeypatch, lambda n: [(8, "My Kick Long.wav")] if n == 1 else [])
+    assert "My Kick Long.wav" in preview("my kick")
+    assert len(sent) <= 6 and sent[-1] == {"walk_id": 1, "cancel": True}
+    # nothing at all: up to 20 s, then an error saying the walk did not finish
+    sent = _walk_stub(monkeypatch, lambda n: [])
+    with pytest.raises(Exception, match=r"Nothing in the browser \(samples\) matches 'my kick': "
+                                        r"searched \d+ items in [\d.]+ s without finishing; pass "
+                                        r"an id from browser_search or a narrower category"):
+        preview("my kick")
+    assert 15 <= len(sent) <= 25          # ~20 s of walking, then the cancel
+
+
+def test_build_drum_kit_says_which_searches_did_not_finish(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import extended_tools
+    real = extended_tools.send
+    _walk_stub(monkeypatch, lambda n: [], fallback=real)
+    script._song.tracks.append(fake_live.FakeTrack("Beat"))
+    kit = call("build_drum_kit", track="Beat", roles=["kick"])
+    assert kit["no_match"] == ["kick"]
+    assert "without finishing" in kit["searches_unfinished"]["kick"]
+
+
+def test_devices_landing_on_an_empty_midi_track_leave_it_unarmed(live_server):
+    """Live 12.4.16 arms a MIDI track with no devices when one lands on it;
+    tools put arm back, and leave a track the user armed armed."""
+    script, call = live_server
+    song = script._song
+    bass = song.tracks[1]
+    for name in ("A", "B", "C"):
+        song.tracks.append(fake_live.FakeTrack(name))
+    a, b, c = song.tracks[-3:]
+    bass.arm = True                                   # the user's armed track
+    call("add_device", track="A", device="Drift")
+    assert (a.arm, bass.arm) == (False, True)
+    call("build_drum_kit", track="B", roles=["kick"])
+    assert (b.arm, bass.arm) == (False, True)
+    c.arm = True                                      # armed by the user: stays
+    call("add_device", track="C", device="Drift")
+    assert (c.arm, bass.arm) == (True, True)
+
+
+def test_tools_follow_tracks_live_renames_as_devices_land(live_server):
+    """Live renames "1-MIDI" to "1-Drift" when an instrument lands on it: the
+    arm read after the insert failed (the track stayed armed), and
+    build_drum_kit lost the track after inserting its Drum Rack."""
+    script, call = live_server
+    song = script._song
+    for n in (5, 6, 7, 8):
+        song.tracks.append(fake_live.FakeTrack(f"{n}-MIDI"))
+    added = call("add_device", track="5-MIDI", device="Drift")
+    assert added["track"] == "5-Drift" and added["ok"]
+    chain = call("apply_device_chain", track="6-MIDI", chain="pad")
+    assert chain["ok"]
+    kit = call("build_drum_kit", track="7-MIDI", roles=["kick"])
+    assert kit["track"] == "7-Drum Rack" and kit["ok"] and kit["pads"][0]["sample"]
+    loaded = call("browser_load", track="8-MIDI", item="pad warm")
+    assert loaded["track"] == "8-Warm Pad"
+    assert [(t.name, t.arm) for t in song.tracks[-4:]] == [
+        ("5-Drift", False), ("6-MIDI", False), ("7-Drum Rack", False), ("8-Warm Pad", False)]
+
+
+def test_a_late_strong_hit_does_not_end_the_walk_at_once(monkeypatch):
+    """The 3 s counted from the start: a strong hit found late ended the walk
+    at once, and "Impact Layered Reversed" beat "Impact Layered" one chunk on."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    late = {5: [(1, "Impact Layered Reversed.wav")], 6: [(2, "Impact Layered.wav")]}
+    _walk_stub(monkeypatch, lambda n: late.get(n, []))
+    result = asyncio.run(mcp.call_tool("browser_preview", {"item": "impact layered"}))
+    assert "Drum Hits/Kick/Impact Layered.wav" in result.content[0].text
+
+
+def test_legacy_load_tools_leave_tracks_unarmed(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import server
+    from MCP_Server.connection import AbletonConnection
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("Empty"))
+    connection = AbletonConnection(host="127.0.0.1", port=script.module.DEFAULT_PORT)
+    monkeypatch.setattr(server, "get_ableton_connection", lambda: connection)
+    try:
+        text = server.load_instrument_or_effect(None, 3, "query:Warm%20Pad.adg")
+        assert text.startswith("Loaded"), text
+        assert song.tracks[3].devices and song.tracks[3].arm is False
+        song.tracks[3].arm = True                     # the user's arm stays
+        server.load_instrument_or_effect(None, 3, "query:Glass%20Pad.adg")
+        assert song.tracks[3].arm is True
+        # Live's exclusive arm took the other track's arm: it comes back
+        song.tracks.append(fake_live.FakeTrack("Empty 2"))
+        song.tracks[3].arm = True
+        server.load_instrument_or_effect(None, 4, "query:Warm%20Pad.adg")
+        assert (song.tracks[3].arm, song.tracks[4].arm) == (True, False)
+    finally:
+        connection.disconnect()
+
+
+def test_exclusive_arm_and_selection_are_put_back(live_server):
+    """A device landing on an empty MIDI track makes Live arm it, drop every
+    other track's arm (exclusive arm) and select it (Live 12.4.16): the
+    user's armed track lost its arm, and add_device left the selection moved."""
+    script, call = live_server
+    song = script._song
+    bass, vox = song.tracks[1], song.tracks[2]
+    for name in ("5-MIDI", "6-MIDI", "7-MIDI"):
+        song.tracks.append(fake_live.FakeTrack(name))
+    bass.arm = True
+    song.view.selected_track = vox
+    call("add_device", track="5-MIDI", device="Reverb")
+    call("browser_load", track="6-MIDI", item="pad warm")
+    call("build_drum_kit", track="7-MIDI", roles=["kick"])
+    assert bass.arm is True and song.view.selected_track is vox
+    assert [t.arm for t in song.tracks[-3:]] == [False, False, False]
+    # the fake behaves as Live: without put_back_arms the arm would be gone
+    empty = fake_live.FakeTrack("8-MIDI")
+    song.tracks.append(empty)
+    empty.insert_device("Drift")
+    assert (empty.arm, bass.arm, song.view.selected_track) == (True, False, empty)
+    assert empty.name == "8-Drift"
+    empty.devices[:] = []
+    fake_live._named_after(empty, "Operator")      # a replacing instrument renames again
+    assert empty.name == "8-Operator"
+
+
+def test_new_tracks_and_deletes_leave_the_users_selection(live_server):
+    """Live selects a new track (create_midi_track) and the track of a device
+    deleted while another stays (12.4.16, after the command): build_tracks
+    left its last track selected, a delete on a return selected the return."""
+    script, call = live_server
+    song = script._song
+    vox = song.tracks[2]
+    song.view.selected_track = vox
+    song.tracks[1].arm = True
+    call("build_tracks", tracks=[{"name": "Keys", "instrument": "Drift"},
+                                 {"name": "Pad", "effects": [{"device": "Reverb"}]}])
+    assert song.view.selected_track is vox and song.tracks[1].arm is True
+    assert [t.arm for t in song.tracks[-2:]] == [False, False]
+    call("design_transition", kind="riser", at_bar=5)
+    assert song.view.selected_track is vox
+    ret = song.return_tracks[0]
+    ret.devices[:] = [fake_live.INSERTABLE["Reverb"](), fake_live.INSERTABLE["Utility"]()]
+    call("manage_device", track="return A", device="Utility", action="delete")
+    assert [d.name for d in ret.devices] == ["Reverb"] and song.view.selected_track is vox
+
+
+def test_inserts_skip_the_put_back_when_nothing_can_change(live_server, monkeypatch):
+    """An effect onto the selected track that has devices neither arms nor
+    moves the selection: two round trips, no restore batch."""
+    script, call = live_server
+    song = script._song
+    from MCP_Server import extended_tools
+    song.view.selected_track = song.tracks[1]
+    batches = []
+    real = extended_tools.batch
+
+    def counting(commands, stop_on_error=True):
+        batches.append([c["type"] for c in commands])
+        return real(commands, stop_on_error)
+
+    monkeypatch.setattr(extended_tools, "batch", counting)
+    added = call("add_device", track="Bass", device="Reverb")
+    assert added["track"] == "Bass" and len(batches) == 2, batches
+
+
+def test_a_failed_put_back_does_not_hide_the_original_error():
+    from MCP_Server.extended_tools import arms_put_back
+    reads = {"n": 0}
+
+    def run(commands):
+        if commands[0]["type"] == "lom_set":
+            raise RuntimeError("put back failed")
+        reads["n"] += 1
+        arm = reads["n"] == 1  # armed before, disarmed after: a put-back is needed
+        return {"results": [{"status": "success", "result": {"items": [{"$id": 1, "arm": arm}]}},
+                            {"status": "success", "result": {"selected_track": {"$id": 1}}}]}
+
+    with pytest.raises(ValueError, match="the load failed"):
+        with arms_put_back(run=run):
+            raise ValueError("the load failed")
+    reads["n"] = 0
+    with pytest.raises(RuntimeError, match="put back failed"):
+        with arms_put_back(run=run):
+            pass
+
+
+def test_fake_arms_only_for_a_device_that_lands(live_server):
+    """An unknown device name does not arm (or select) anything; a MIDI track
+    holding only a MIDI effect is not empty (Live 12.4.16)."""
+    script, call = live_server
+    song = script._song
+    empty = fake_live.FakeTrack("Empty")
+    song.tracks.append(empty)
+    song.view.selected_track = song.tracks[0]
+    with pytest.raises(RuntimeError):
+        empty.insert_device("Nope")
+    assert empty.arm is False and song.view.selected_track is song.tracks[0]
+    empty.devices.append(fake_live.FakeDevice("Arpeggiator", "MidiArpeggiator"))
+    empty.insert_device("Drift")
+    assert empty.arm is False
+
+
+def test_a_failed_insert_reports_lives_error_over_the_put_back(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import extended_tools
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("Empty"))
+    song.view.selected_track = song.tracks[0]
+
+    def failing(*args, **kwargs):
+        raise ConnectionError("lost Live")
+
+    monkeypatch.setattr(extended_tools, "put_back_arms", failing)
+    with pytest.raises(Exception, match="Could not insert 'Nope'"):
+        call("add_device", track="Empty", device="Nope")

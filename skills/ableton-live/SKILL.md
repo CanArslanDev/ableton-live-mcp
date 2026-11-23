@@ -20,9 +20,11 @@ audible at once, and each tool call is one step in Live's undo history.
   `memory(action="remember", text="Kick at -6 dB", key="kick")` for this set
   (saved inside it), `scope="user"` for every set. A key replaces that key's
   old note.
-- Tracks: index, exact name, `master` or `return A`. Devices: index or name.
-  Session clips: `clip_index` (the scene row). Arrangement clips:
-  `arrangement_clip_index`.
+- Tracks: index, exact name, `master` or `return A`. Devices: index or name
+  (a name also finds a device inside a rack). A Drum Rack pad's chain:
+  `set_device_parameter_by_name(track=..., device="mixer", pad="kick",
+  parameter="volume", display_value="-4 dB")`. Session clips: `clip_index`
+  (the scene row). Arrangement clips: `arrangement_clip_index`.
 - Anything without a dedicated tool: read the Live Object Model with
   `lom_get_object(path="live_set tracks 0 devices 0")` and change it with
   `lom_set_property(...)` or `lom_call_method(...)`. Several edits in one
@@ -84,3 +86,8 @@ finds sets by file, track or plug-in name. These never touch the open set.
 
 Connection refused, timeouts or "older than this server" errors: run
 `doctor()` and follow its fixes; the ableton-setup skill has the details.
+
+A call that was interrupted, rejected or timed out may still have reached
+Live: read the track's devices (`get_session_overview()`) before retrying,
+or the retry adds a second device. Results with `ok: false` list what
+failed under `errors`; `renamed` says which parameter a setting went to.

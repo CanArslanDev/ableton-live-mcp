@@ -145,6 +145,28 @@ def batch(commands: list[dict], stop_on_error: bool = True) -> dict:
     return send("batch", {"commands": commands, "stop_on_error": stop_on_error})
 
 
+# Batch commands whose params must name a LOM path
+PATH_COMMANDS = {"lom_get", "lom_set", "lom_call", "param_set_display", "observe"}
+
+
+def check_batch(commands: Any) -> None:
+    """Refuse a malformed batch before anything runs, naming the step."""
+    if not isinstance(commands, list):
+        raise ValueError("commands must be a list of {\"type\": ..., \"params\": {...}}")
+    for index, command in enumerate(commands):
+        where = f"Step {index}"
+        if not isinstance(command, dict) or not isinstance(command.get("type"), str) \
+                or not command["type"]:
+            raise ValueError(f"{where}: needs {{\"type\": <command name>, \"params\": {{...}}}}, "
+                             f"got {json.dumps(command)[:120]}")
+        params = command.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError(f"{where} ({command['type']}): params must be an object")
+        if command["type"] in PATH_COMMANDS and not str(params.get("path") or "").strip():
+            raise ValueError(f"{where} ({command['type']}): params.path is missing, e.g. "
+                             f"{{\"path\": \"live_set tracks 0 devices 0 parameters 1\"}}")
+
+
 def op_set(path: str, prop: str, value: Any) -> dict:
     return {"type": "lom_set", "params": {"path": path, "property": prop, "value": value}}
 
@@ -237,7 +259,26 @@ def named(items: str, value: int | str) -> str:
     return selector(value)
 
 
+class TrackId(str):
+    """A track pinned by its LOM id ("id N", pin_track): Live renames a track
+    still named as it named it ("1-MIDI" → "1-Drift") when an instrument
+    lands on it, so a tool that inserts or loads re-addresses it by id."""
+
+
+def pin_track(track: int | str) -> TrackId:
+    if isinstance(track, TrackId):
+        return track
+    return TrackId(f"id {lom_get(track_path(track), ['name'])['$id']}")
+
+
+def track_name(track: int | str) -> str:
+    """The track's name now."""
+    return lom_get(track_path(track), ["name"])["name"]
+
+
 def track_path(track: int | str) -> str:
+    if isinstance(track, TrackId):
+        return str(track)
     if isinstance(track, int):
         return f"live_set tracks {track}"
     text = str(track).strip()
@@ -255,8 +296,155 @@ def track_path(track: int | str) -> str:
 
 
 def device_path(track: int | str, device: int | str) -> str:
+    """A device by index (the track's own chain), by name (the track's own
+    devices first, then those inside its racks: find_device) or by LOM path
+    ("live_set tracks 0 devices 0 chains 1 devices 0", "id N …") on this
+    track."""
     tp = track_path(track)
-    return f"{tp} devices {named(f'{tp} devices', device)}"
+    if isinstance(device, int):
+        return f"{tp} devices {device}"
+    text = str(device).strip()
+    if re.fullmatch(r"-?\d+", text):
+        return digits_device(tp, text)
+    if re.fullmatch(r"id \d+( \S+)*|live_set( \S+)+", text):
+        # one walk for both: a device named so wins, else the path's device
+        try:
+            wanted = lom_get(text, ["name"]).get("$id")
+        except AbletonCommandError:
+            wanted = None
+        low = text.lower()
+        found, seen = nested_devices(tp, lambda d: str(d.get("name", "")).lower() == low
+                                     or (wanted is not None and d.get("$id") == wanted))
+        by_name = [d for d in found if str(d.get("name", "")).lower() == low]
+        if by_name:
+            return pick_named(text, by_name, seen)
+        if found:
+            return found[0]["path"]
+        raise ValueError(f"{text} is not a device on this track (nor inside its racks)")
+    return find_device(tp, text)
+
+
+def digits_device(tp: str, text: str) -> str:
+    """Text made only of digits: the track's own device of that name, else
+    its device at that index, unless a device inside a rack has that name
+    too (an error naming both); else a nested device of that name."""
+    found, seen = nested_devices(tp, lambda d: d.get("name") == text)
+    if found and found[0]["depth"] == 0:
+        return found[0]["path"]
+    own = [d for d in seen if d["depth"] == 0]
+    index = int(text)
+    if found and -len(own) <= index < len(own):
+        raise ValueError(f"Device {text!r} is ambiguous: index {index} is "
+                         f"{own[index]['name']!r} ({own[index]['path']}), and a device inside "
+                         f"a rack is named {text!r} ({'; '.join(d['path'] for d in found)}). "
+                         f"Pass the index as a number or one of these paths.")
+    if len(found) > 1:
+        raise ValueError(f"{len(found)} devices inside racks are named {text!r}: "
+                         + "; ".join(d["path"] for d in found))
+    return found[0]["path"] if found else f"{tp} devices {index}"
+
+
+def device_on_track(tp: str, path: str) -> str:
+    """A device path given as such, checked to be on the track at tp (or in
+    its racks) and written as that track's path."""
+    wanted = lom_get(path, ["name"]).get("$id")
+    found, _seen = nested_devices(tp, lambda d: d.get("$id") == wanted)
+    if not found:
+        raise ValueError(f"{path} is not a device on this track (nor inside its racks)")
+    return found[0]["path"]
+
+
+class NoSuchDevice(ValueError):
+    pass
+
+
+def device_owner(tp: str, dp: str) -> tuple[str, int]:
+    """(the track or chain holding the device at dp, its index there), for
+    delete_device: dp may end in "devices <n>" or be any path to a device."""
+    m = re.fullmatch(r"(.+) devices (-?\d+)", dp)
+    if m:
+        owner, index = m.group(1), int(m.group(2))
+        if index < 0:
+            index += len(lom_get(f"{owner} devices", ["name"])["items"])
+        return owner, index
+    return device_owner(tp, device_on_track(tp, dp))
+
+
+DEVICE_FIELDS = ["name", "class_name", "can_have_chains"]
+RACK_DEPTH = 4  # racks inside racks inside racks…
+
+
+def read_many(paths: list[tuple[str, list[str]]]) -> list[list[dict]]:
+    """Several list reads in one round trip (a read-only batch); [] for one
+    that fails."""
+    if not paths:
+        return []
+    result = batch([{"type": "lom_get", "params": {"path": p, "properties": props}}
+                    for p, props in paths], stop_on_error=False)
+    return [step["result"].get("items", []) if step.get("status") != "error"
+            and isinstance(step.get("result"), dict) else []
+            for step in result["results"]]
+
+
+def nested_devices(tp: str, wanted: Callable[[dict], bool]) -> tuple[list[dict], list[dict]]:
+    """Devices `wanted` accepts, level by level: the track's own devices, then
+    those in the chains of its racks (Instrument, Audio/MIDI Effect and Drum
+    Racks), then in racks inside those, each level in chain order. Returns the
+    matches of the shallowest level that has any and every device seen, each
+    {name, class_name, path, depth}."""
+    level = [dict(d, path=f"{tp} devices {i}", depth=0)
+             for i, d in enumerate(lom_get(f"{tp} devices", DEVICE_FIELDS)["items"])]
+    seen: list[dict] = []
+    depth = 0
+    while True:
+        seen += level
+        found = [d for d in level if wanted(d)]
+        racks = [d["path"] for d in level if d.get("can_have_chains") is True]
+        if found or not racks or depth == RACK_DEPTH:
+            return found, seen
+        depth += 1
+        chains = [f"{rack} chains {i}" for rack, items in
+                  zip(racks, read_many([(f"{r} chains", ["name"]) for r in racks]))
+                  for i in range(len(items))]
+        level = [dict(d, path=f"{chain} devices {i}", depth=depth)
+                 for chain, items in zip(chains, read_many([(f"{c} devices", DEVICE_FIELDS)
+                                                            for c in chains]))
+                 for i, d in enumerate(items)]
+
+
+def find_device(tp: str, name: str) -> str:
+    """The path of the device named `name` (exact, else ignoring case) on the
+    track at tp or inside its racks. The track's own devices win (the first of
+    a name, as Live's paths do); a name several nested devices share is an
+    error naming each one's path."""
+    text = name.strip()
+    found, seen = nested_devices(tp, lambda d: str(d.get("name", "")).lower() == text.lower())
+    return pick_named(text, found, seen)
+
+
+def pick_named(text: str, found: list[dict], seen: list[dict]) -> str:
+    """find_device's choice among the devices a walk found by name."""
+    name = text
+    exact = [d for d in found if d.get("name") == text] or found
+    if not exact:
+        names = [f"{d['name']}" + (f" ({d['path']})" if d["depth"] else "") for d in seen]
+        more = f", … {len(names) - 12} more" if len(names) > 12 else ""
+        raise NoSuchDevice(f"No device named {name!r} on this track or in its racks. Devices: "
+                         f"{', '.join(names[:12]) or 'none'}{more}")
+    if exact[0]["depth"] == 0 or len(exact) == 1:
+        return exact[0]["path"]
+    raise ValueError(f"{len(exact)} devices inside racks are named {name!r}: "
+                     + "; ".join(d["path"] for d in exact) + ". Pass one of these paths as "
+                     "the device, or rename one.")
+
+
+def drum_rack_path(track: int | str, tp: str | None = None) -> str | None:
+    """The track's first Drum Rack: its own devices first, then inside its
+    racks (a kit preset wrapped in an Instrument Rack). tp: the track's path,
+    when known."""
+    found, _seen = nested_devices(tp or track_path(track),
+                                  lambda d: d.get("class_name") == "DrumGroupDevice")
+    return found[0]["path"] if found else None
 
 
 def clip_path(track: int | str, clip_index: int | None = None,
@@ -268,19 +456,28 @@ def clip_path(track: int | str, clip_index: int | None = None,
     return f"{track_path(track)} clip_slots {int(clip_index)} clip"
 
 
+def mixer_parameter_path(owner: str, parameter: int | str) -> str:
+    """volume | pan | "send A"/"send 0" of a track's or a rack chain's mixer."""
+    p = str(parameter).strip().lower()
+    if p in ("volume", "vol"):
+        return f"{owner} mixer_device volume"
+    if p in ("pan", "panning"):
+        return f"{owner} mixer_device panning"
+    m = re.fullmatch(r"send\s*([a-z]|\d+)", p)
+    if m:
+        token = m.group(1)
+        index = int(token) if token.isdigit() else ord(token) - ord("a")
+        return f"{owner} mixer_device sends {index}"
+    raise ValueError("Mixer parameter must be volume, pan or 'send A'/'send 0'")
+
+
+def is_mixer(device: int | str) -> bool:
+    return str(device).lower() in ("mixer", "mixer_device")
+
+
 def parameter_path(track: int | str, device: int | str, parameter: int | str) -> str:
-    if str(device).lower() in ("mixer", "mixer_device"):
-        p = str(parameter).strip().lower()
-        if p in ("volume", "vol"):
-            return f"{track_path(track)} mixer_device volume"
-        if p in ("pan", "panning"):
-            return f"{track_path(track)} mixer_device panning"
-        m = re.fullmatch(r"send\s*([a-z]|\d+)", p)
-        if m:
-            token = m.group(1)
-            index = int(token) if token.isdigit() else ord(token) - ord("a")
-            return f"{track_path(track)} mixer_device sends {index}"
-        raise ValueError("Mixer parameter must be volume, pan or 'send A'/'send 0'")
+    if is_mixer(device):
+        return mixer_parameter_path(track_path(track), parameter)
     return f"{device_path(track, device)} parameters {selector(parameter)}"
 
 
@@ -547,6 +744,17 @@ def previewable(fn: Callable) -> Callable:
     return run
 
 
+def keeping_arms(fn: Callable) -> Callable:
+    """Run a tool that creates tracks or lands devices inside arms_put_back:
+    Live selects each new track (after the command), so the user's selection
+    and arms are read first and put back at the end."""
+    @functools.wraps(fn)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        with arms_put_back():
+            return fn(*args, **kwargs)
+    return run
+
+
 def song_context(optional: bool = False) -> dict:
     """The set's bar length and Key & Scale, which generators default to.
 
@@ -607,10 +815,21 @@ PARAMETER_RENAMES = [
 ]
 
 
-def parameter_aliases(name: str) -> list[str]:
-    """Other names the same parameter has in another Live version."""
-    found = [new for old, new in PARAMETER_RENAMES if old == name]
-    found += [old for old, new in PARAMETER_RENAMES if new == name]
+# Renames of one device (by class_name). They replace the general ones for
+# every name they mention: Live 12.3's Limiter "Gain" was its input gain, which
+# 12.4 calls "Input Gain" next to an "Output" (measured in 12.4.16, 2026-11-23)
+DEVICE_PARAMETER_RENAMES = {"Limiter": [("Gain", "Input Gain")]}
+
+
+def parameter_aliases(name: str, class_name: str | None = None) -> list[str]:
+    """Other names the same parameter has in another Live version, on a
+    device of this class_name."""
+    own = DEVICE_PARAMETER_RENAMES.get(class_name or "", [])
+    mentioned = {n for pair in own for n in pair}
+    renames = own + [(old, new) for old, new in PARAMETER_RENAMES
+                     if old not in mentioned and new not in mentioned]
+    found = [new for old, new in renames if old == name]
+    found += [old for old, new in renames if new == name]
     eq_band = re.fullmatch(r"(\d) (Resonance|Q) ([AB])", name)
     if eq_band:
         number, kind, side = eq_band.groups()
@@ -623,14 +842,21 @@ def resolve_parameter_names(device: str, names: list[str]) -> dict[str, str]:
     from Live 12.3 ("Output Gain") also works on 12.4 ("Output") and back."""
     present = {p.get("name") for p in send("lom_get", {
         "path": f"{device} parameters", "properties": ["name"], "ids": False})["items"]}
-    mapping = {}
+    mapping, class_name = {}, None
     for name in names:
         if name in present or isinstance(name, int) or str(name).isdigit():
             mapping[name] = name
             continue
-        mapping[name] = next((alias for alias in parameter_aliases(name)
+        if class_name is None:
+            class_name = str(lom_get(device, ["class_name"]).get("class_name"))
+        mapping[name] = next((alias for alias in parameter_aliases(name, class_name)
                               if alias in present), name)
     return mapping
+
+
+def renamed(names: dict[str, str]) -> dict[str, str]:
+    """The settings resolve_parameter_names sent to another name: asked → set."""
+    return {asked: actual for asked, actual in names.items() if asked != actual}
 
 
 def setting_ops(device: str, settings: dict[str, Any],
@@ -647,11 +873,119 @@ def setting_ops(device: str, settings: dict[str, Any],
     return ops
 
 
-def inserted_device_ids(track: str, inserts: list[list[Any]]) -> list[int]:
-    """Insert devices with Track.insert_device (Live 12.3+); their ids, in order."""
-    result = batch([op_call(track, "insert_device", *args) for args in inserts])
+def setting_report(asked: list[str], names: dict[str, str], applied: dict) -> dict:
+    """What add_device-style tools say about their settings (one batch step
+    each, in order): ok, the failed ones under errors, and those set under
+    another parameter name (renamed)."""
+    errors = {asked[s["step"]]: s["error"] for s in applied["steps"]
+              if isinstance(s, dict) and "error" in s and s.get("step") is not None
+              and s["step"] < len(asked)}
+    report: dict[str, Any] = {"ok": applied["ok"], "settings": f"{len(asked) - len(errors)} of "
+                              f"{len(asked)} applied"}
+    if errors:
+        report["errors"] = errors
+    if renamed(names):
+        report["renamed"] = renamed(names)
+    return report
+
+
+# Every track's arm and the selected track, read in one batch (ARM_READ)
+ARM_READ = [{"type": "lom_get", "params": {"path": "live_set tracks", "properties": ["arm"]}},
+            {"type": "lom_get", "params": {"path": "live_set view",
+                                           "properties": ["selected_track"]}}]
+
+
+def arms_and_selection(steps: list[dict]) -> tuple[dict[int, bool], int | None]:
+    """({track id: arm}, selected track id) from ARM_READ's two results."""
+    rows = steps[0].get("result", {}).get("items", []) if steps[0].get("status") != "error" else []
+    arms = {r["$id"]: r["arm"] for r in rows if isinstance(r.get("arm"), bool)}
+    view = steps[1].get("result", {}) if steps[1].get("status") != "error" else {}
+    selected = view.get("selected_track") if isinstance(view, dict) else None
+    return arms, selected.get("$id") if isinstance(selected, dict) else None
+
+
+def put_back_arms(before: tuple[dict[int, bool], int | None],
+                  after: tuple[dict[int, bool], int | None],
+                  run: Callable[[list[dict]], Any] | None = None) -> None:
+    """Undo what Live did on its own when a device landed on an empty MIDI
+    track (Live 12.4.16): it arms that track, drops every other track's arm
+    (exclusive arm) and selects it (it selects a track any device lands on,
+    and a new track). Arms set through the LOM are not
+    exclusive, so tracks Live armed are disarmed first, then the user's arms
+    come back, then the selection; one batch (no undo step), read back. The
+    selection changes only after the command that landed the device (Live
+    defers it), so it is set back whatever `after` read; call this in a
+    later command than the one that landed the device."""
+    (arms_before, selected_before), (arms_after, _selected_after) = before, after
+    ops = [op_set(f"id {t}", "arm", False) for t, armed in arms_after.items()
+           if armed and arms_before.get(t) is False]
+    ops += [op_set(f"id {t}", "arm", True) for t, armed in arms_after.items()
+            if not armed and arms_before.get(t) is True]
+    if selected_before is not None:
+        ops.append(op_set("live_set view", "selected_track", ref(f"id {selected_before}")))
+    if ops:
+        (run or (lambda cmds: batch(cmds, stop_on_error=False)))(ops + ARM_READ[:1])
+
+
+@contextlib.contextmanager
+def arms_put_back(select: bool = True, run: Callable[[list[dict]], Any] | None = None):
+    """Around steps that create tracks or land devices: every track's arm and
+    (select) the selected track are read first and put back afterwards
+    (put_back_arms). A failure of the put-back never hides the steps' own."""
+    run = run or (lambda cmds: batch(cmds, stop_on_error=False))
+    try:
+        before = arms_and_selection(run(ARM_READ)["results"])
+    except Exception as e:  # an older script: nothing to put back
+        logger.debug("No arms read: %s", e)
+        before = None
+    if before is not None and not select:
+        before = (before[0], None)
+    failed = True
+    try:
+        yield
+        failed = False
+    finally:
+        if before is not None:
+            try:
+                put_back_arms(before, arms_and_selection(run(ARM_READ)["results"]), run)
+            except Exception as e:
+                if not failed:
+                    raise
+                logger.warning("Could not put arms and the selection back: %s", e)
+
+
+def insert_devices(track: str, inserts: list[list[Any]]) -> tuple[list[int], str]:
+    """Insert devices with Track.insert_device (Live 12.3+): their ids, in
+    order, and the track's name afterwards. Live 12.4.16 selects the track
+    and, landing on a MIDI track with no device, arms it and disarms the
+    others (put_back_arms); nothing is put back when neither can happen."""
+    # by id: Live renames a track named "1-MIDI" as an instrument lands on it
+    read = batch([{"type": "lom_get", "params": {"path": track, "properties": [
+        "name", "has_midi_input", "devices"]}}] + ARM_READ, stop_on_error=False)["results"]
+    if read[0]["status"] == "error":
+        raise ValueError(read[0]["message"])
+    info = read[0]["result"]
+    track = f"id {info['$id']}"
+    before = arms_and_selection(read[1:])
+    empty_midi = info.get("has_midi_input") is True and not info.get("devices")
+    name_read = {"type": "lom_get", "params": {"path": track, "properties": ["name"]}}
+    ops = [op_call(track, "insert_device", *args) for args in inserts] + [name_read] \
+        + (ARM_READ if empty_midi else [])
+    steps = batch(ops)["results"]  # stops at a failed insert
+    done = len(steps) == len(ops)
+    try:
+        if empty_midi:  # armed and the others disarmed (arms read back at once)
+            after = steps[-2:] if done else batch(ARM_READ, stop_on_error=False)["results"]
+            put_back_arms(before, arms_and_selection(after))
+        elif before[1] != info["$id"]:  # only the selection moved (after the command)
+            put_back_arms(before, (before[0], None))
+    except Exception as e:
+        if done:
+            raise
+        logger.warning("Could not put arms and the selection back: %s", e)  # Live's error first
+    name = steps[len(inserts)]["result"].get("name", "") if done else ""
     ids = []
-    for args, step in zip(inserts, result["results"]):
+    for args, step in zip(inserts, steps[:len(inserts)]):
         if step["status"] == "error":
             message = step["message"]
             if "has no method 'insert_device'" in message:
@@ -659,7 +993,12 @@ def inserted_device_ids(track: str, inserts: list[list[Any]]) -> list[int]:
                            "device with browser_search and load it with browser_load")
             raise RuntimeError(f"Could not insert {args[0]!r}: {message}")
         ids.append(step["result"]["result"]["$id"])
-    return ids
+    return ids, name
+
+
+def inserted_device_ids(track: str, inserts: list[list[Any]]) -> list[int]:
+    """insert_devices' ids."""
+    return insert_devices(track, inserts)[0]
 
 
 # SimplerDevice.replace_sample(path) loads a file by absolute path since
@@ -913,14 +1252,62 @@ def place_locators(cues: list[tuple[str, float]], zoom: bool = True) -> list[dic
     return result
 
 
-def drum_mapping_from_rack(track: int | str) -> dict[str, int]:
-    devices = lom_get(f"{track_path(track)} devices", ["class_name"])["items"]
-    rack_index = next((i for i, d in enumerate(devices)
-                       if d.get("class_name") == "DrumGroupDevice"), None)
-    if rack_index is None:
+FILE_EXTENSION = re.compile(r"\.(wav|aiff?|flac|mp3|ogg|m4a|adg|adv|amxd|alc|als)$", re.I)
+
+
+def _family(word: str) -> str | None:
+    """Words a name may carry that change what the sound is."""
+    if word == "rev" or word.startswith("revers"):
+        return "reverse"
+    if word.startswith("loop") or word == "bpm":
+        return "loop"
+    return None
+
+
+def name_words(text: str) -> list[str]:
+    """A name's words, lower case, without its file extension."""
+    return re.findall(r"[^\W_]+", FILE_EXTENSION.sub("", text.strip()).lower())
+
+
+def same_name(query: str, name: str) -> bool:
+    """"impact layered" is "Impact Layered.wav"; "Impact Layered Reversed" is not."""
+    return bool(name_words(query)) and name_words(query) == name_words(name)
+
+
+def by_name_match(query: str, hits: list[dict]) -> list[dict]:
+    """Browser results for a name someone asked for, best first: the exact
+    name (case and file extension aside), then names that are not reversed or
+    loops unless the query says so, have every word asked, fewer other words,
+    and are shorter; ties keep the browser's order."""
+    words = name_words
+    asked = words(query)
+    families = {_family(w) for w in asked}
+
+    def key(item: tuple[int, dict]) -> tuple:
+        index, hit = item
+        name = words(hit["name"])
+        return (name != asked,
+                any(_family(w) not in families for w in name if _family(w)),
+                sum(w not in name for w in asked),
+                sum(w not in asked for w in name),
+                len(" ".join(name)), index)
+
+    return [hit for _i, hit in sorted(enumerate(hits), key=key)]
+
+
+def is_reversed(file_path: str) -> bool:
+    """A sample Simpler reversed (Live keeps the reversed copy in
+    Samples/Processed/Reverse, 12.4.16) or one named reversed."""
+    folders = file_path.replace("\\", "/").lower()
+    return "/processed/reverse/" in folders or any(
+        _family(w) == "reverse" for w in re.findall(r"[^\W_]+", os.path.basename(folders)))
+
+
+def drum_mapping_from_rack(track: int | str, rack: str | None = None) -> dict[str, int]:
+    rack = rack or drum_rack_path(track)
+    if rack is None:
         return {}
-    pads = lom_get(f"{track_path(track)} devices {rack_index} drum_pads",
-                   ["note", "name", "chains"])["items"]
+    pads = lom_get(f"{rack} drum_pads", ["note", "name", "chains"])["items"]
     mapping: dict[str, int] = {}
     for pad in pads:
         if not pad.get("chains"):
@@ -940,13 +1327,10 @@ DARBUKA_WORDS = {"düm": ("doum", "dum", "düm", "doom"), "tek": ("tek", "tak", 
 def darbuka_pads(track: int | str) -> dict[str, int]:
     """Stroke → pad for a darbuka/doumbek kit whose pads are named after the
     strokes (doum, tek, ka). Empty for an ordinary drum kit."""
-    devices = lom_get(f"{track_path(track)} devices", ["class_name"])["items"]
-    rack = next((i for i, d in enumerate(devices) if d.get("class_name") == "DrumGroupDevice"),
-                None)
+    rack = drum_rack_path(track)
     if rack is None:
         return {}
-    pads = lom_get(f"{track_path(track)} devices {rack} drum_pads",
-                   ["note", "name", "chains"])["items"]
+    pads = lom_get(f"{rack} drum_pads", ["note", "name", "chains"])["items"]
     found: dict[str, int] = {}
     for pad in pads:
         if not pad.get("chains"):
@@ -1182,8 +1566,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         set_device_parameter, load_browser_item, fire_clip, …
         e.g. [{"type": "lom_call", "params": {"path": "live_set", "method":
         "create_midi_track", "args": [-1]}}, {"type": "lom_set", "params": {"path":
-        "live_set tracks -1", "property": "name", "value": "Pad"}}]
+        "live_set tracks -1", "property": "name", "value": "Pad"}},
+        {"type": "param_set_display", "params": {"path": "live_set tracks 0 devices 0
+        parameters 1", "value": "-6 dB"}}]
         """
+        check_batch(commands)
         return to_json(batch(commands, stop_on_error))
 
     @tool(read_only=True, ui=ui.SESSION)
@@ -2706,9 +3093,16 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                                       "value_items"])["items"]]
             return to_json(info)
         if action == "delete":
-            idx = index_in(f"{track_path(track)} devices", device)
-            return to_json(send("lom_call", {"path": track_path(track),
-                                             "method": "delete_device", "args": [idx]}))
+            owner, idx = device_owner(track_path(track), dp)  # a track or a rack's chain
+            # Live selects the track of a deleted device when another device
+            # stays (12.4.16, after the command; inside racks unmeasured): the
+            # user's selection goes back in any case (no undo step)
+            selected = lom_get("live_set view", ["selected_track"]).get("selected_track")
+            deleted = send("lom_call", {"path": owner, "method": "delete_device", "args": [idx]})
+            if isinstance(selected, dict) and "$id" in selected:
+                send("lom_set", {"path": "live_set view", "property": "selected_track",
+                                 "value": ref(f"id {selected['$id']}")})
+            return to_json(deleted)
         if action in ("enable", "disable", "toggle"):
             on = f"{dp} parameters 0"
             if action == "toggle":
@@ -2748,14 +3142,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - settings: {"Threshold": "-18 dB", "1 Filter Type A": "High Pass 48dB"} as Live
           displays them, or raw numbers
         """
-        tp = track_path(track)
         args = [device] if position is None else [device, int(position)]
-        device_id = inserted_device_ids(tp, [args])[0]
-        result: dict[str, Any] = {"device": device, "track": track, "id": device_id}
+        ids, name = insert_devices(track_path(track), [args])
+        device_id = ids[0]
+        result: dict[str, Any] = {"ok": True, "device": device, "track": name, "id": device_id}
         if settings:
             names = resolve_parameter_names(f"id {device_id}", list(settings))
-            result["settings"] = batch_summary(batch(
+            applied = batch_summary(batch(
                 setting_ops(f"id {device_id}", settings, names), stop_on_error=False))
+            result.update(setting_report(list(settings), names, applied))
         return to_json(result)
 
     @tool
@@ -2779,22 +3174,25 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if spec.get("needs_sidechain") and sidechain_from is None:
             raise ValueError("This chain needs sidechain_from: the track that should duck "
                              "this one (usually the kick or drums)")
-        tp = track_path(track)
-        ids = inserted_device_ids(tp, [[name] for name, _settings in spec["devices"]])
-        ops = []
-        for (_name, settings), device_id in zip(spec["devices"], ids):
-            names = resolve_parameter_names(f"id {device_id}", list(settings))
-            ops += setting_ops(f"id {device_id}", settings, names)
+        source = track_name(sidechain_from) if sidechain_from is not None else None
+        ids = inserted_device_ids(track_path(track), [[name] for name, _settings in spec["devices"]])
+        ops, asked, names = [], [], {}
+        for (name, settings), device_id in zip(spec["devices"], ids):
+            mapping = resolve_parameter_names(f"id {device_id}", list(settings))
+            ops += setting_ops(f"id {device_id}", settings, mapping)
+            asked += [f"{name}: {s}" for s in settings]
+            names.update({f"{name}: {k}": f"{name}: {v}" for k, v in mapping.items()})
         if sidechain_from is not None:
-            source = lom_get(track_path(sidechain_from), ["name"])["name"]
             compressor = f"id {ids[0]}"
             ops.append(op_set(compressor, "input_routing_type", ref(
                 f"{compressor} available_input_routing_types "
                 f"{named(f'{compressor} available_input_routing_types', source)}")))
+        if sidechain_from is not None:
+            asked.append("sidechain")
         applied = batch_summary(batch(ops, stop_on_error=False))
-        return to_json({"chain": chain, "description": spec["description"],
-                        "devices": [name for name, _settings in spec["devices"]],
-                        "ok": applied["ok"], "settings": applied["steps"]})
+        return to_json(dict({"chain": chain, "description": spec["description"],
+                             "devices": [name for name, _settings in spec["devices"]]},
+                            **setting_report(asked, names, applied)))
 
     def find_sample(query: str, wait_s: float = 0.0) -> tuple[int, str]:
         """(id, path) of a browser sample: an exact file name when the query has
@@ -2892,6 +3290,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return f"id {inserted_device_ids(tp, [['Drum Rack', index or 0]])[0]}"
 
     @tool(destructive=True)
+    @keeping_arms
     def build_tracks(tracks: list[dict], replace: bool = False, sample_wait_s: float = 40.0,
                      signature: str | list[int] | None = None) -> str:
         """Build tracks from a spec in one call, e.g. to rebuild a set the Trial
@@ -3107,7 +3506,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             except Exception as e:  # Gate and most devices have no sidechain input here
                 next(r for r in report if r["track"] == owner)["problems"].append(
                     f"sidechain from {source}: {e}")
-        return to_json({"tracks": report, "sidechains": len(sidechains)})
+        return to_json({"ok": not any(r["problems"] for r in report), "tracks": report,
+                        "sidechains": len(sidechains)})
 
     # ── Reference songs: reference-dissector jobs and blueprints ─────────────
     # (reference_jobs.py runs refdissect in its own uv environment, detached;
@@ -3448,25 +3848,53 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(idempotent=True)
     def set_device_parameter_by_name(track: int | str, device: int | str,
                                      parameter: int | str, value: float | None = None,
-                                     display_value: str | None = None) -> str:
+                                     display_value: str | None = None,
+                                     pad: int | str | None = None) -> str:
         """Set a device parameter by name (or index), either as a raw value or as
         the text Live shows: display_value="800 Hz", "-6 dB", "35 %", "120 ms",
-        "1.2 kHz", "25L", or a list item like "Lowpass". device="mixer" works
-        with parameter "volume" | "pan" | "send A".
+        "1.2 kHz", "25L", or a list item like "Lowpass". device: index or name
+        (devices inside racks are found by name too); device="mixer" works
+        with parameter "volume" | "pan" | "send A" (a pad's sends go to its
+        Drum Rack's own returns). pad (note, "C1" or role
+        like "kick"): the device (or "mixer": the pad chain's mixer) on that
+        pad of the track's Drum Rack.
         The error message lists valid parameter names when one is not found.
         """
         auto_snapshot("set_device_parameter_by_name", [track])
-        if str(device).lower() not in ("mixer", "mixer_device") and isinstance(parameter, str) \
-                and not parameter.strip().isdigit():
-            parameter = resolve_parameter_names(device_path(track, device),
-                                                [parameter])[parameter]
-        pp = parameter_path(track, device, parameter)
+        asked = parameter
+        if pad is not None:
+            rack = drum_rack_path(track)
+            if rack is None:
+                raise ValueError("No Drum Rack on this track (nor inside its racks) for pad")
+            note = pad_note(pad)
+            if not lom_get(f"{rack} drum_pads {note}", ["chains"]).get("chains"):
+                raise ValueError(f"Pad {note} ({music.note_name(note)}) is empty")
+            chain = f"{rack} drum_pads {note} chains 0"
+            dp = None if is_mixer(device) else \
+                f"{chain} devices {named(f'{chain} devices', device)}"
+        else:
+            chain = None
+            dp = None if is_mixer(device) else device_path(track, device)
+        if dp is not None and isinstance(parameter, str) and not parameter.strip().isdigit():
+            parameter = resolve_parameter_names(dp, [parameter])[parameter]
+        if dp is not None:
+            pp = f"{dp} parameters {selector(parameter)}"
+        else:
+            pp = mixer_parameter_path(chain or track_path(track), parameter)
+            send_index = re.search(r" sends (\d+)$", pp)
+            if chain and send_index and int(send_index.group(1)) >= len(
+                    lom_get(f"{rack} return_chains", ["name"])["items"]):
+                raise ValueError(f"This Drum Rack has no return chain {send_index.group(1)}: "
+                                 "pad sends go to the rack's own returns, not the set's")
         if display_value is not None:
-            return to_json(send("param_set_display", {"path": pp, "value": display_value}))
-        if value is None:
-            info = lom_get(pp, ["name", "value", "min", "max", "is_quantized", "value_items"])
-            return to_json(info)
-        return to_json(send("lom_set", {"path": pp, "property": "value", "value": float(value)}))
+            result = send("param_set_display", {"path": pp, "value": display_value})
+        elif value is None:
+            result = lom_get(pp, ["name", "value", "min", "max", "is_quantized", "value_items"])
+        else:
+            result = send("lom_set", {"path": pp, "property": "value", "value": float(value)})
+        if parameter != asked and isinstance(result, dict):
+            result = dict(result, asked=asked, parameter=parameter)
+        return to_json(result)
 
     @tool(destructive=True)
     def rack_control(track: int | str, device: int | str, action: str = "info",
@@ -3520,25 +3948,32 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
     @tool(read_only=True, ui=ui.DRUMS)
     def get_drum_pads(track: int | str, device: int | str | None = None) -> str:
         """List the filled pads of a Drum Rack: MIDI note, note name, pad name,
-        mute/solo. Without `device`, the first Drum Rack on the track is used.
+        mute/solo. Without `device`, the track's first Drum Rack (also one
+        inside an Instrument Rack) is used.
         """
-        if device is None:
-            devices = lom_get(f"{track_path(track)} devices", ["class_name"])["items"]
-            device = next((i for i, d in enumerate(devices)
-                           if d.get("class_name") == "DrumGroupDevice"), None)
-            if device is None:
-                raise ValueError("No Drum Rack on this track")
-        pads = lom_get(f"{device_path(track, device)} drum_pads",
-                       ["note", "name", "mute", "solo", "chains"])["items"]
+        rack = drum_rack_path(track) if device is None else device_path(track, device)
+        if rack is None:
+            raise ValueError("No Drum Rack on this track (nor inside its racks)")
+        pads = lom_get(f"{rack} drum_pads", ["note", "name", "mute", "solo", "chains"])["items"]
         filled = [{"note": p["note"], "note_name": music.note_name(p["note"]),
                    "name": p["name"], "mute": p["mute"], "solo": p["solo"]}
                   for p in pads if p.get("chains")]
-        return to_json({"pads": filled, "auto_mapping": drum_mapping_from_rack(track)})
+        result: dict[str, Any] = {"pads": filled,
+                                  "auto_mapping": drum_mapping_from_rack(track, rack)}
+        if " chains " in rack:
+            result["rack"] = rack  # inside another rack
+        return to_json(result)
 
     # ── Browser ──────────────────────────────────────────────────────────────
 
     def search_browser(query: str, category: str = "all", max_results: int = 25,
-                       time_limit: float = 20.0, within: list[str] | None = None) -> dict:
+                       time_limit: float = 20.0, within: list[str] | None = None,
+                       enough: Callable[[dict], bool] | None = None,
+                       patience: float | None = None) -> dict:
+        """enough: an item that ends the walk once found (listed first).
+        patience: time_limit counts from the first strong hit (every word of
+        the query in its name); without one the walk goes on up to patience
+        seconds."""
         roots = BROWSER_CATEGORIES.get(category.strip().lower().replace(" ", "_"))
         if roots is None:
             raise ValueError(f"Unknown category {category!r}. Known: "
@@ -3556,7 +3991,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         found: list[dict] = []
         walk_id, done, visited = None, False, 0
-        deadline = time.monotonic() + time_limit
+        started = time.monotonic()
+        first_strong: float | None = None  # when the first strong hit came
         while True:
             params: dict[str, Any] = ({"walk_id": walk_id} if walk_id is not None
                                       else {"query": query, "roots": roots,
@@ -3566,17 +4002,25 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             reply = send("browser_search", params)
             walk_id, done, visited = reply["walk_id"], reply["done"], reply["visited"]
             found += reply["results"]
+            now = time.monotonic()
+            elapsed = now - started
+            if first_strong is None and any(rank(e) < 2 for e in found):
+                first_strong = now
             if done or sum(rank(e) == 0 for e in found) >= max_results \
-                    or time.monotonic() > deadline:
+                    or (patience is None and elapsed > time_limit) \
+                    or (patience is not None and first_strong is not None
+                        and now - first_strong > time_limit) \
+                    or (patience is not None and elapsed > patience) \
+                    or (enough is not None and any(enough(e) for e in found)):
                 break
         if not done:
             try:
                 send("browser_search", {"walk_id": walk_id, "cancel": True})
             except AbletonCommandError as e:  # the walk ended on its own meanwhile
                 logger.debug("Browser walk %s already gone: %s", walk_id, e)
-        ranked = sorted(found, key=rank)
+        ranked = sorted(found, key=lambda e: (enough is None or not enough(e), rank(e)))
         return {"query": query, "category": category, "complete": done, "searched": visited,
-                "matches": len(found),
+                "seconds": round(time.monotonic() - started, 1), "matches": len(found),
                 "results": [{"id": e["$id"], "name": e["name"], "kind": e["kind"],
                              "path": f"{e['root']}/{e['path']}", "source": e["source"],
                              "uri": e["uri"]} for e in ranked[:max_results]]}
@@ -3586,16 +4030,25 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if isinstance(item, int) or re.fullmatch(r"\d+", str(item).strip()):
             name = lom_get(f"id {int(item)}", ["name"]).get("name")
             return int(item), name if isinstance(name, str) else str(item)
-        hits = search_browser(str(item), category, max_results=1)["results"]
+        # an exact name ends the walk; otherwise 25 strong hits or 3 s after
+        # the first (a whole large User Library walked kept Live busy for
+        # minutes); with nothing found yet it goes on for up to 20 s
+        search = search_browser(str(item), category, max_results=25, time_limit=3.0,
+                                patience=20.0,
+                                enough=lambda e: same_name(str(item), e["name"]))
+        hits = search["results"]
         if not hits:
-            raise ValueError(f"Nothing in the browser ({category}) matches {item!r}")
-        return hits[0]["id"], hits[0]["path"]
+            raise ValueError(f"Nothing in the browser ({category}) matches {item!r}"
+                             + incomplete(search))
+        best = by_name_match(str(item), hits)[0]
+        return best["id"], best["path"]
 
-    def drum_rack_path(track: int | str) -> str | None:
-        devices = lom_get(f"{track_path(track)} devices", ["class_name"])["items"]
-        index = next((i for i, d in enumerate(devices)
-                      if d.get("class_name") == "DrumGroupDevice"), None)
-        return None if index is None else f"{track_path(track)} devices {index}"
+    def incomplete(search: dict) -> str:
+        """Why a search found nothing, when its walk did not finish."""
+        if search["complete"]:
+            return ""
+        return (f": searched {search['searched']} items in {search['seconds']} s without "
+                "finishing; pass an id from browser_search or a narrower category")
 
     def pad_note(pad: int | str) -> int:
         text = str(pad).strip().lower().replace(" ", "_")
@@ -3606,33 +4059,77 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             raise ValueError(f"Pad note {note} is outside 0-127")
         return note
 
-    def selected_track_ref() -> dict | None:
-        selected = lom_get("live_set view", ["selected_track"]).get("selected_track")
-        return ref(f"id {selected['$id']}") if isinstance(selected, dict) \
-            and "$id" in selected else None
-
-    def load_items(track: int | str, loads: list[tuple[int | None, int]]) -> dict:
+    def load_items(track: int | str, loads: list[tuple[int | None, int]],
+                   rack: str | None = None) -> dict:
         """Load browser items (by id) onto a track, or onto Drum Rack pads
-        (note), keeping the user's track selection."""
-        tp = track_path(track)
-        previous = selected_track_ref()
-        ops = [op_set("live_set view", "selected_track", ref(tp))]
-        rack = None
-        for note, item_id in loads:
-            if note is not None:
-                rack = rack or drum_rack_path(track)
-                if rack is None:
-                    raise ValueError("No Drum Rack on this track for drum_pad")
-                ops.append(op_set(f"{rack} view", "selected_drum_pad",
-                                  ref(f"{rack} drum_pads {note}")))
-            ops.append(op_call("live_app browser", "load_item", ref(f"id {item_id}")))
-        result = batch_summary(batch(ops, stop_on_error=False))
-        if previous:
-            try:
-                send("lom_set", {"path": "live_set view", "property": "selected_track",
-                                 "value": previous})
-            except AbletonCommandError as e:  # that track was deleted meanwhile
-                logger.debug("Could not reselect the previous track: %s", e)
+        (note), keeping the user's track selection. Live's browser loads onto
+        whatever is selected, so the track (and its Drum Rack) is found before
+        anything loads, and an item loads only once its track reads back as
+        selected (and its pad's selection was accepted). Then reads back what
+        the track holds; a pad that holds no chain afterwards is an error.
+        rack: the Drum Rack's path when the caller found it (by the track's id)."""
+        target = lom_get(track_path(track), ["name"])  # raises for a missing track
+        tid = f"id {target['$id']}"  # its name can change as it loads (Live names it)
+        if rack is None and any(note is not None for note, _item in loads):
+            rack = drum_rack_path(track, tid)
+            if rack is None:
+                raise ValueError("No Drum Rack on this track (nor inside its racks) for drum_pad")
+        before = [d["$id"] for d in lom_get(f"{tid} devices", ["name"])["items"]]
+        steps: list[dict] = []
+        # the user's selection, and arms Live changes as an item lands
+        with arms_put_back():
+            for note, item_id in loads:
+                ops = [op_set("live_set view", "selected_track", ref(tid))]
+                if note is not None:
+                    ops.append(op_set(f"{rack} view", "selected_drum_pad",
+                                      ref(f"{rack} drum_pads {note}")))
+                ops.append({"type": "lom_get", "params": {"path": "live_set view",
+                                                          "properties": ["selected_track"]}})
+                chosen = batch(ops)
+                failed = next((r for r in chosen["results"] if r["status"] == "error"), None)
+                selected = (chosen["results"][-1].get("result") or {}).get("selected_track") \
+                    if failed is None else None
+                if failed is None and not (isinstance(selected, dict)
+                                           and f"id {selected.get('$id')}" == tid):
+                    failed = {"message": "another track stayed selected"}
+                if failed is not None:
+                    if note is None:
+                        raise RuntimeError(f"Nothing loaded: could not select the track "
+                                           f"({failed['message']})")
+                    steps.append({"item": item_id, "drum_pad": note,
+                                  "error": f"not loaded, the pad was not selected: "
+                                           f"{failed['message']}"})
+                    continue
+                done = batch_summary(batch([op_call("live_app browser", "load_item",
+                                                    ref(f"id {item_id}"))]))
+                step: dict[str, Any] = {"item": item_id}
+                if note is not None:
+                    step["drum_pad"] = note
+                if not done["ok"]:
+                    step["error"] = done["steps"][0].get("error")
+                steps.append(step)
+        # what the track holds now
+        now = lom_get(tid, ["name"])["name"]
+        devices = lom_get(f"{tid} devices", ["name"])["items"]
+        result: dict[str, Any] = {"track": now, "devices": [d["name"] for d in devices]}
+        notes = [s["drum_pad"] for s in steps if "drum_pad" in s and "error" not in s]
+        if notes:
+            pads = lom_get(f"{rack} drum_pads", ["note", "name", "chains"])["items"]
+            by_note = {p["note"]: p for p in pads}
+            result["pads"] = {}
+            for s in steps:
+                pad = by_note.get(s.get("drum_pad"))
+                if pad is None or "error" in s:
+                    continue
+                if pad.get("chains"):
+                    result["pads"][str(pad["note"])] = pad.get("name")
+                else:
+                    s["error"] = "the pad is still empty"
+        if any("drum_pad" not in s and "error" not in s for s in steps) \
+                and [d["$id"] for d in devices] == before:
+            result["warning"] = "the track's devices did not change"
+        result["ok"] = not any("error" in s for s in steps)
+        result["steps"] = steps
         return result
 
     @tool(read_only=True)
@@ -3662,14 +4159,22 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         instrument, as in Live.
         """
         note = pad_note(drum_pad) if drum_pad is not None else None
+        track = pin_track(track)  # a missing track fails before the search
+        rack = drum_rack_path(track) if note is not None else None
+        if note is not None and rack is None:
+            raise ValueError("No Drum Rack on this track (nor inside its racks) for drum_pad")
         item_id, label = browser_item_id(
             item, category or ("drums" if note is not None else "all"))
-        result = load_items(track, [(note, item_id)])
+        result = load_items(track, [(note, item_id)], rack)
         if not result["ok"]:
-            raise RuntimeError(f"Live could not load {label}: {result['steps']}")
-        devices = lom_get(f"{track_path(track)} devices", ["name", "class_name"])["items"]
-        return to_json({"loaded": label, "track": track, "drum_pad": note,
-                        "devices": [d["name"] for d in devices]})
+            raise RuntimeError(f"Live could not load {label}: {result['steps'][0]['error']}")
+        loaded = {"loaded": label, "track": result["track"], "drum_pad": note,
+                  "devices": result["devices"]}
+        if note is not None:
+            loaded["pad_name"] = result["pads"].get(str(note))
+        if result.get("warning"):
+            loaded["warning"] = result["warning"]
+        return to_json(loaded)
 
     @tool(read_only=True)
     def browser_preview(item: int | str | None = None, stop: bool = False,
@@ -3730,6 +4235,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         unknown = [r for r in roles if r not in DRUM_KIT_ROLES]
         if unknown:
             raise ValueError(f"Unknown roles {unknown}. Known: {', '.join(DRUM_KIT_ROLES)}")
+        track = pin_track(track)  # Live renames "1-MIDI" as the Drum Rack lands
         rack = drum_rack_path(track)
         if rack is None:
             inserted_device_ids(track_path(track), [["Drum Rack"]])
@@ -3738,6 +4244,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         filled = {p["note"] for p in pads if p.get("chains")}
         rng = random.Random(seed)
         plan, report, missing = [], [], []
+        unfinished: dict[str, str] = {}
         for role in roles:
             note = music.GM_DRUMS[role]
             if note in filled and not replace:
@@ -3754,10 +4261,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 choice = None
                 for query in queries:
                     try:
-                        found = search_browser(query, "drums", max_results=400,
-                                               within=["Drum Hits", folder])["results"]
+                        search = search_browser(query, "drums", max_results=400,
+                                                within=["Drum Hits", folder])
                     except AbletonCommandError:  # no such folder in this Live
                         break
+                    found = search["results"]
+                    if not search["complete"]:
+                        unfinished[role] = incomplete(search)[2:]
                     hits = sorted((h for h in found if h["kind"] == "sample"),
                                   key=lambda h: -drum_sample_score(h, folder, style, source))
                     if hits:
@@ -3770,9 +4280,13 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             report.append({"role": role, "note": note, "pad": music.note_name(note),
                            "sample": choice["path"]})
         loaded = load_items(track, plan) if plan else {"ok": True, "steps": []}
-        result = {"track": track, "pads": report, "ok": loaded["ok"]}
+        result = {"track": loaded.get("track") or track_name(track), "pads": report,
+                  "ok": loaded["ok"]}
         if missing:
             result["no_match"] = missing
+            if any(r in unfinished for r in missing):
+                result["searches_unfinished"] = {r: unfinished[r] for r in missing
+                                                 if r in unfinished}
         if not loaded["ok"]:
             result["errors"] = [s for s in loaded["steps"] if isinstance(s, dict) and "error" in s]
         return to_json(result)
@@ -4159,6 +4673,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     async def place_generated(track: int | str, file: str, clip_index: int | None,
                               arrangement_time: float | None, drum_pad: int | str | None) -> dict:
+        track = await asyncio.to_thread(pin_track, track)  # a load can rename it
         tp = track_path(track)
         info = await asend("lom_get", {"path": tp, "properties": ["name", "has_audio_input"]})
         if info.get("has_audio_input"):
@@ -4197,7 +4712,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         loaded = await asyncio.to_thread(load_items, track, [(note, item_id)])
         if not loaded.get("ok"):
             raise RuntimeError(f"Live could not load it: {loaded.get('steps')}")
-        return {"track": info["name"], **({"drum_pad": note} if note is not None
+        return {"track": loaded["track"], **({"drum_pad": note} if note is not None
                                           else {"device": "Simpler"})}
 
     # ── Arrangement automation and transitions ──────────────────────────────
@@ -4375,6 +4890,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         return found
 
     @tool(destructive=True)
+    @keeping_arms
     def design_transition(kind: str, at_bar: float, bars: float | None = None,
                           track: int | str | None = None,
                           tracks: list[int | str] | None = None,
@@ -4416,7 +4932,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             index = track_named("Riser")
             tp = track_path(index)
             if not lom_get(f"{tp} devices", ["name"])["items"]:
-                send("lom_call", {"path": tp, "method": "insert_device", "args": ["Operator"]})
+                inserted_device_ids(tp, [["Operator"]])
             operator = f"{tp} devices 0"
             params = device_parameters(operator)
             ops = []
@@ -4447,16 +4963,38 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             index = track_named("Reverse Cymbal")
             tp = track_path(index)
             devices = lom_get(f"{tp} devices", ["class_name"])["items"]
+            simplers = [i for i, d in enumerate(devices) if d.get("class_name") == "OriginalSimpler"]
+            if simplers:  # a Simpler holding something else than a crash goes
+                try:
+                    held = str(lom_get(f"{tp} devices {simplers[0]} sample",
+                                       ["file_path"]).get("file_path") or "")
+                except AbletonCommandError:  # an empty Simpler has no sample
+                    held = ""
+                # Live's reversed copy is this transition's own, whatever its name
+                if "crash" not in os.path.basename(held).lower() and not is_reversed(held):
+                    for i in reversed(simplers):
+                        send("lom_call", {"path": tp, "method": "delete_device", "args": [i]})
+                    devices = lom_get(f"{tp} devices", ["class_name"])["items"]
             if not any(d.get("class_name") == "OriginalSimpler" for d in devices):
-                found = search_browser("crash", "drums", 10)["results"]
-                sample = next((r for r in found if r["kind"] == "sample"), None)
-                if sample is None:
+                found = [r for r in search_browser("crash", "drums", 40)["results"]
+                         if r["kind"] == "sample"]
+                if not found:
                     raise ValueError("No crash sample in the browser's Drums")
-                load_items(index, [(None, sample["id"])])
+                # a plain crash (Drum Hits/Cymbal), not a loop or one already reversed
+                sample = sorted(by_name_match("crash", found),
+                                key=lambda r: "/cymbal/" not in r["path"].lower())[0]
+                loaded = load_items(index, [(None, sample["id"])])
+                if not loaded["ok"]:
+                    raise RuntimeError(f"Could not load {sample['path']}: {loaded['steps']}")
                 devices = lom_get(f"{tp} devices", ["class_name"])["items"]
             simpler = f"{tp} devices " + str(next(
                 i for i, d in enumerate(devices) if d.get("class_name") == "OriginalSimpler"))
-            send("lom_call", {"path": simpler, "method": "reverse"})
+            # Simpler.reverse() toggles; Live writes the reversed copy to
+            # Samples/Processed/Reverse/<name> R.wav (12.4.16), so a sample
+            # already there, or named reversed, stays as it is
+            path = str(lom_get(f"{simpler} sample", ["file_path"]).get("file_path") or "")
+            if not is_reversed(path):
+                send("lom_call", {"path": simpler, "method": "reverse"})
             info = lom_get(f"{simpler} sample", ["length", "sample_rate", "file_path"])
             seconds = float(info["length"]) / float(info["sample_rate"] or 44100.0)
             tempo = float(lom_get("live_set", ["tempo"])["tempo"])
@@ -4515,8 +5053,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 if "Auto Filter" in devices:
                     index = devices.index("Auto Filter")
                 else:
-                    send("lom_call", {"path": tp, "method": "insert_device",
-                                      "args": ["Auto Filter"]})
+                    inserted_device_ids(tp, [["Auto Filter"]])
                     index = len(devices)
                 device = f"{tp} devices {index}"
                 params = device_parameters(device)
@@ -5385,6 +5922,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(device)
         listening = analyzer.listener()
+        track = await asyncio.to_thread(pin_track, track)  # a load can rename it
         tp = track_path(track)
 
         async def on_track() -> list[dict]:
@@ -5434,7 +5972,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             found = await on_track()
             replaced = True
             receiving = await receiving_from(name)
-        payload = {"device": str(target), "track": track, "on_track": len(found),
+        payload = {"device": str(target), "track": name, "on_track": len(found),
                    "receiving": receiving}
         if replaced:
             payload["replaced"] = "an older version of the device"

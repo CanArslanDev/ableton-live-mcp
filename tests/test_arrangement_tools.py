@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from MCP_Server import extended_tools, journal
+from MCP_Server import extended_tools, fake_live, journal
 from MCP_Server import server as live_server
 from MCP_Server import transitions
 from MCP_Server.simulator import Simulator, free_port
@@ -93,11 +93,36 @@ def test_transitions_into_bar_five(sim):
 
     cymbal = call("design_transition", kind="reverse_cymbal", at_bar=5)
     track = next(t for t in sim.state()["tracks"] if t["name"] == "Reverse Cymbal")
-    assert track["devices"][0]["reversed"] and track["devices"][0]["sample"] == "Crash 505.wav"
+    # the plain crash, not the one already reversed that the browser lists first,
+    # reversed by Simpler into the project's Processed/Reverse copy
+    assert track["devices"][0]["reversed"] and track["devices"][0]["sample"] == "Crash 505 R.wav"
     clip = track["arrangement_clips"][0]
     swell = 2.76 * 2  # seconds at 120 BPM, in beats
     assert clip["end_time"] == 16 and clip["start_time"] == pytest.approx(16 - swell, abs=0.01)
     assert clip["notes"][0][2] == pytest.approx(swell, abs=0.01) and cymbal["notes"] == 1
+    # Simpler.reverse() toggles: a second call must not play it forwards again
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    track = next(t for t in sim.state()["tracks"] if t["name"] == "Reverse Cymbal")
+    assert track["devices"][0]["reversed"] and again["sample"] == "Crash 505 R.wav"
+    assert len(track["devices"]) == 1
+
+    # a "Reverse Cymbal" track whose Simpler holds something else gets a crash
+    track = next(t for t in sim.song.tracks if t.name == "Reverse Cymbal")
+    track.devices[:] = [fake_live.FakeSimpler("Kick", fake_live.FakeSample("/s/Kick 808 Long.wav"))]
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    assert again["sample"] == "Crash 505 R.wav" and len(track.devices) == 1
+    # a crash however it is spelled stays (and one named reversed is not reversed again)
+    track.devices[:] = [fake_live.FakeSimpler("C", fake_live.FakeSample("/s/ReverseCrash01.wav"))]
+    kept = track.devices[0]
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    assert again["sample"] == "ReverseCrash01.wav" and track.devices == [kept]
+    assert not kept.reversed
+    # Live's reversed copy of a crash not named so ("Cymbal 01") stays too
+    track.devices[:] = [fake_live.FakeSimpler(
+        "C", fake_live.FakeSample("/project/Samples/Processed/Reverse/Cymbal 01 R.wav"))]
+    kept = track.devices[0]
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    assert again["sample"] == "Cymbal 01 R.wav" and track.devices == [kept]
 
     fill = call("design_transition", kind="drum_fill", at_bar=5, fill="snare_roll")
     assert fill["track"] == "Drums"

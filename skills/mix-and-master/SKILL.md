@@ -37,7 +37,9 @@ moves before making them.
 - Balance and space: `set_track_mixer(track=..., volume_db=..., pan=..., sends_db={...})`.
 - EQ and dynamics: `add_device(track=..., device="EQ Eight", settings={...})`,
   then `set_device_parameter_by_name(...)` to adjust. Live shows parameter
-  names like "1 Frequency A", "1 Gain A".
+  names like "1 Frequency A", "1 Gain A". Check `ok` and `errors` in the
+  result: a value Live does not have (an EQ Eight filter type, say) is
+  reported there, not applied.
 - Ready-made starting points: `apply_device_chain(track=..., chain="drum_bus")`
   (vocal, drum_bus, bass, pad, master, sidechain_duck with `sidechain_from`).
 - Masking: cut the less important part 2–4 dB in the shared band, or duck it

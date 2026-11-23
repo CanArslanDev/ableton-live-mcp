@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+The Remote Script is unchanged: no reinstall or Live restart needed.
+
 ### Fixed
 
 - **A stopped `build_from_blueprint` no longer doubles a period.** Live's
@@ -9,6 +11,127 @@
   build's "build_tracks stopped: … It left … in the set" put a second
   after it (seen in Live 12.4.16, 2026-11-18). The fake's unknown-device
   error now reads as Live's does.
+- **`browser_load` and `build_drum_kit` no longer load onto the wrong
+  track** (this and the fixes below were met while remaking songs in Live
+  12.4.16). When selecting the target track failed, Live's browser still
+  loaded the item onto whatever track was selected (a preset replaced a
+  Drums track's Drum Rack). The track (and its Drum Rack) is now found
+  before anything loads (and before the browser is searched), an item
+  loads only once its track reads back as selected and its pad's selection
+  was accepted, and the result says what the track holds afterwards
+  (`track`, `devices`, `pad_name`; `build_drum_kit`'s `track` too; a pad
+  still empty is an error, a track whose devices did not change a
+  `warning`). A track Live renames as it loads ("1-MIDI" becomes "1-BNYX
+  Boot Kit") is followed by id, where reading it back by its old name used
+  to fail after the load. The checks cost round trips: about 10 for one
+  item instead of about 4, and 2 more per further pad (a few ms each).
+- **Sounds named explicitly load that sound.** `sounds={"crash": "Impact
+  Layered"}` in `build_drum_kit` (and an item query in `browser_load`,
+  `browser_preview`) took the browser's first hit, "Impact Layered
+  Reversed". The exact name (case and extension aside) now wins, then names
+  that are not reversed or loops unless asked for, then the closest and
+  shortest. The walk ends at the exact name, else at 25 hits with every
+  word in the name and one in its folders, or 3 s after the first hit with
+  every word in the name, and after 20 s in any case; a walk that did not
+  finish and found nothing says so in the error ("searched N items in S s
+  without finishing"), as `build_drum_kit` does under
+  `searches_unfinished`.
+- **`design_transition(kind="reverse_cymbal")` reverses once.**
+  `Simpler.reverse()` toggles, so a second call played the crash forwards
+  again. Live keeps the reversed copy in `Samples/Processed/Reverse`, and a
+  sample there (or named reversed) is left as it is; the crash it picks is
+  a plain one from Drum Hits › Cymbal, not one already reversed. A Simpler
+  on that track holding something other than a crash (by its file name) is
+  replaced by one; one holding Live's reversed copy is kept, whatever its
+  name.
+- **Arms and the selection are put back.** When a device lands on a MIDI
+  track that has none, through `insert_device` or the browser, Live
+  12.4.16 arms that track (`arm`, not `implicit_arm`), takes the arm from
+  every other track (exclusive arm, Live's default) and selects it. So
+  `add_device`, `apply_device_chain`, `build_drum_kit`, `browser_load`,
+  `build_tracks`, `design_transition` and the legacy
+  `load_instrument_or_effect` and `load_drum_kit` left the new track armed,
+  disarmed the user's armed track and moved the selection. They now read
+  every track's arm and the selection before, and afterwards disarm tracks
+  Live armed, re-arm the ones it disarmed (arms set by a script are not
+  exclusive) and reselect the user's track (Live moves the selection only
+  after the command, so it is always set back; the legacy tools keep
+  their selection), in one batch that leaves no undo step. Live also
+  selects a track a device is inserted on, a new track, and the track of a
+  deleted device when another device stays on it: `build_tracks` and
+  `design_transition` put the selection back at the end, and
+  `manage_device(action="delete")` after any delete. An effect onto the
+  selected track that already has devices needs no put-back (inserting
+  still adds one read before the insert, against 2.4.3), and a failed
+  put-back never hides the error of the insert or load it followed.
+- **Tools keep hold of a track Live renames.** A track still named as Live
+  named it ("1-MIDI") takes the name of an instrument that lands on it
+  ("1-Drift"), by `insert_device` or the browser. `build_drum_kit` then
+  failed after inserting its Drum Rack ("No item named '1-MIDI'"), leaving
+  an empty rack; `add_device` could not disarm the track. Tools that insert
+  or load (`add_device`, `apply_device_chain`, `build_drum_kit`,
+  `browser_load`, `generate_audio`, `install_analyzer`) now address the
+  track by its id and report its current name as `track`.
+- **Limiter "Gain" sets its Input Gain**, not its Output. Live 12.3's
+  Limiter "Gain" is 12.4's "Input Gain"; the general rename "Gain" →
+  "Output" (right for Utility) is no longer applied to it. Renames can now
+  belong to one device (`DEVICE_PARAMETER_RENAMES`).
+- **A Drum Rack inside an Instrument Rack is found.** `get_drum_pads` said
+  "No Drum Rack" for kits like "BNYX Boot Kit"; it,
+  `browser_load(drum_pad=…)`, `build_drum_kit`, drum fills and darbuka
+  mapping now look inside racks' chains (the track's own devices first).
+  `get_drum_pads` names the `rack` when it is nested.
+- **Devices inside racks are found by name** in
+  `set_device_parameter_by_name`, `manage_device`, `rack_control` and the
+  other tools that take a device: the track's own devices first, then
+  rack chains level by level. A name that several nested devices share is
+  an error listing their paths, and a LOM
+  path on that track is accepted as the device ("live_set …" or "id N …";
+  one on another track is refused; a device named like one wins when found
+  at the same or a shallower rack level than the path's device), as
+  are names made only of digits ("808"; else the index, and an error when
+  both an index and a nested device's name fit). `manage_device`
+  deletes a device given by path, id or name, also inside a rack (through
+  its chain).
+- **Failed settings are reported at the top.** `add_device` and
+  `apply_device_chain` return `ok: false` and `errors` (setting → Live's
+  message) when a setting fails, e.g. an EQ Eight filter type Live does not
+  have; before, `add_device` looked successful with the failure inside
+  `settings`. `settings` is now a count ("1 of 2 applied"). `build_tracks`
+  returns a top-level `ok` too.
+- **`run_batch` checks every step before running any**: a step without a
+  `type`, with `params` that are not an object, or a `lom_get`/`lom_set`/
+  `lom_call`/`param_set_display`/`observe` step without `params.path` is
+  refused, naming the step (it ran and answered "Empty path").
+
+### Added
+
+- **`set_device_parameter_by_name(pad=…)`** reaches a Drum Rack pad's
+  chain: `device="mixer"` its volume, pan or sends, otherwise the device on
+  that pad (by index or name); an empty pad is an error that says so, and
+  so is a send the Drum Rack has no return chain for (pad sends go to the
+  rack's own returns).
+- **Settings say which parameter they set**: `renamed` in `add_device` and
+  `apply_device_chain`, `asked` and `parameter` in
+  `set_device_parameter_by_name`, when a name was mapped to another.
+
+### Docs
+
+- The ableton-live skill: read the track's devices before retrying an
+  interrupted call (it may have reached Live), and what `ok`, `errors` and
+  `renamed` mean; pad chain mixers and devices in racks. The mix-and-master
+  skill: check `errors` after `add_device`. CLAUDE.md: Limiter's 12.4
+  parameters, racks and chain mixers, track names following the
+  instrument, and Simpler's reverse, as measured in Live 12.4.16.
+
+### Tests
+
+- `fake_live`: Live 12.4.16's Limiter parameters, Instrument Racks
+  (`FakeRack`) and chain mixers, Simpler's reverse as a copy in
+  `Processed/Reverse`, tracks named after what loads onto them, the
+  browser loading onto a Drum Rack inside a rack, an "FX Hit" folder that
+  lists "Impact Layered Reversed" first and a "Crash Reverse Swell" listed
+  before "Crash 505". Tests for each fix above.
 
 ## 2.4.3 — 2026-11-16
 

@@ -48,7 +48,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
-| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, `replace_sample`, Live's version: 12.4.16). Tests and the simulator use it. |
+| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, Instrument Racks and chain mixers, `replace_sample`, Simpler's reverse, Live's version: 12.4.16). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
 | `evals/` | `claude plugin eval` suite: 33 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
@@ -209,7 +209,52 @@ Measured on Live 12.3.8:
   "Master Output" → "Output", EQ Eight "N Resonance A" → "N Q A", and names in
   Reverb, Delay, Auto Filter, Echo, Chorus-Ensemble and Roar. Settings go
   through `resolve_parameter_names`, which maps either version's name onto the
-  device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
+  device (`PARAMETER_RENAMES`); recipes keep the 12.3 names. Not for every
+  device alike: Limiter's 12.3 "Gain" was its input gain, and 12.4.16
+  (2026-11-23) has "Input Gain" and "Output" (Device On, Input Gain, Ceiling,
+  Release, Auto, Link, M/S Link, Lookahead, Routing, Mode, Maximize On,
+  Threshold, Output), so `DEVICE_PARAMETER_RENAMES` maps Limiter "Gain" →
+  "Input Gain" and keeps the general "Gain" → "Output" (Utility) off it.
+  Glue Compressor has no "Makeup" ("Output" is right); Compressor has both.
+- **Racks and the browser** (12.4.16, 2026-11-23): a Core Library kit like
+  "BNYX Boot Kit" is an Instrument Rack (`InstrumentGroupDevice`) whose one
+  chain holds the Drum Rack and a Saturator; `Chain.devices` and
+  `Chain.mixer_device` (ChainMixerDevice: "Chain Volume", "Chain Panorama",
+  sends "Chain Send 0", "Speaker On") are there for rack and Drum Rack pad
+  chains alike. Selecting a pad of that nested Drum Rack and
+  `browser.load_item(sample)` fills it. A track still named as Live named it
+  ("1-MIDI") takes the name of an instrument that lands on it, by the browser
+  or `insert_device` ("1-BNYX Boot Kit", "1-Drift", visible in the same
+  batch), of an instrument that replaces it ("1-Operator"), and again when its
+  Simpler reverses ("2-Crash 707 R"); on a regular track an effect (Reverb)
+  leaves it, and deleting the instrument gives "1-MIDI" back. A return track
+  is renamed by effects too: `add_device("return A", "Utility")` made
+  "A-Reverb" "A-Reverb | Utility" (deleting it restored it); the fake does not
+  model returns. Tools that insert or load pin the track by id first
+  (`pin_track`, `TrackId`). `SimplerDevice.reverse()` toggles; the reversed
+  sample is a copy, `<project>/Samples/Processed/Reverse/<name> R.<ext>`,
+  readable at once as `sample.file_path`, and reversing again gives the
+  original path back. When a device lands on a MIDI track with no device, by
+  `insert_device` (Reverb, Drum Rack, Drift alike) or the browser, Live arms
+  it (`arm`, not `implicit_arm`), disarms every other track (exclusive arm)
+  and selects it; later devices, or an instrument loaded onto a track that has
+  one, change none of these. The arms read back changed in the same batch; the
+  selection only from the next command on (deferred, like the playhead), so
+  the selection is set back in a later command whatever was read. Live also
+  selects (after the command) a track any device is inserted on (Reverb onto
+  "1-Drift", onto an empty audio track, Utility onto a return), a new track
+  (`create_midi_track`, `create_audio_track`: the next command reads it
+  selected), and the track of a deleted device when another device stays on it
+  (none when the chain is left empty; deletes inside racks unmeasured). An
+  instrument onto a MIDI track that holds only a MIDI effect (Arpeggiator)
+  does not arm it. `insert_devices` reads whether the target is an empty MIDI
+  track and the selected one and skips the put-back when nothing can change;
+  `keeping_arms` wraps `build_tracks` and `design_transition`;
+  `manage_device(delete)` always sets the selection back. `arm` set through
+  the LOM is not exclusive (2-MIDI and 3-Audio both stayed armed), and
+  `insert_device` refuses a second instrument ("Device chains cannot have more
+  than one instrument each"). `put_back_arms` restores arms and the selection
+  after `inserted_device_ids`, `load_items` and the legacy load tools.
 - **Sidechain** (12.4): Compressor has `input_routing_type` (its sidechain
   source, e.g. `available_input_routing_types 'Kick'`); Gate has none, so its
   sidechain cannot be set from a script.
@@ -569,7 +614,13 @@ Not verified in Live (check each in a scratch set before claiming it):
   with `device_path()`, clips with `clip_path()`; quote names via `selector()`.
   A LOM path takes every number for an index, so text made only of digits
   that an item is named ("808") goes through `named()`, which looks the name
-  up first (one round trip); an integer is always an index.
+  up first (one round trip); an integer is always an index. Devices by name
+  go through `find_device`: the track's own devices, then its racks' chains
+  level by level (`nested_devices`, a batched read per level). Digit-only
+  text (`digits_device`) is a top-level name, else, if that index exists
+  and a nested device has the name, an error; else the one nested device
+  of that name; else the index. A path ("live_set …", "id N …") must
+  be on the given track (`device_on_track`).
 - A new audio clip's start: Live moved it to the file's first transient
   (21 ms to 3.6 s in, 2026-10-11) where warping went off. In Live 12.4.16
   (2026-11-16) a new clip starts at 0 while warped, also once its warp

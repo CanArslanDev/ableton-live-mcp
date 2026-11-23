@@ -11,9 +11,11 @@ setting values by display.
 
 import math
 import os
+import re
 import sys
 import time
 import types
+import weakref
 
 from .journal import NO_UNDO_PROPERTIES, PARAMETER_PROPERTIES
 
@@ -355,21 +357,50 @@ class FakeDrumPad(FakeObj):
         self.chains = []
 
 
+def chain_mixer(sends=0):
+    """A rack chain's ChainMixerDevice (Live 12.4.16's parameter names)."""
+    return FakeObj(volume=FakeParam("Chain Volume", 0.85, display=volume_display),
+                   panning=FakeParam("Chain Panorama", 0.0, -1.0, 1.0, display=pan_display),
+                   sends=[FakeParam("Chain Send %d" % i, 0.0, display=volume_display)
+                          for i in range(sends)],
+                   chain_activator=FakeParam("Speaker On", 1.0, items=["Off", "On"]))
+
+
 class FakeDrumChain(FakeObj):
     """A chain from RackDevice.insert_chain (Live 12.3+): it receives every
     note (in_note -1) until in_note puts it on a pad."""
 
     def __init__(self):
         super(FakeDrumChain, self).__init__(name="", in_note=-1, out_note=60, choke_group=0,
-                                            devices=[], mute=False, solo=False)
+                                            devices=[], mute=False, solo=False,
+                                            mixer_device=chain_mixer())
 
     def insert_device(self, name, index=-1):
         return _insert_device(self.devices, name, index)
+
+    def delete_device(self, index):
+        del self.devices[index]
+
+
+class FakeChain(FakeObj):
+    """A chain of an Instrument or Audio Effect Rack; Chain.delete_device
+    deleted the Saturator inside "BNYX Boot Kit" in Live 12.4.16."""
+
+    def __init__(self, name, devices):
+        super(FakeChain, self).__init__(name=name, devices=list(devices), mute=False, solo=False,
+                                        mixer_device=chain_mixer())
+
+    def insert_device(self, name, index=-1):
+        return _insert_device(self.devices, name, index)
+
+    def delete_device(self, index):
+        del self.devices[index]
 
 
 class FakeDrumRack(FakeDevice):
     def __init__(self):
         super(FakeDrumRack, self).__init__("Drum Rack", "DrumGroupDevice", chains=[],
+                                           return_chains=[],
                                            view=FakeObj(selected_drum_pad=None))
         object.__setattr__(self, "drum_pads", [FakeDrumPad(n, self) for n in range(128)])
         object.__setattr__(self, "can_have_chains", True)
@@ -383,6 +414,17 @@ class FakeDrumRack(FakeDevice):
 
 def _drum_rack():
     return FakeDrumRack()
+
+
+class FakeRack(FakeDevice):
+    """An Instrument (or Audio Effect) Rack: chains of devices, each with its
+    mixer. Kits like Live 12.4's "BNYX Boot Kit" are one holding a Drum Rack
+    and a Saturator in one chain."""
+
+    def __init__(self, name, chains, class_name="InstrumentGroupDevice"):
+        super(FakeRack, self).__init__(name, class_name, chains=[
+            FakeChain(chain_name, devices) for chain_name, devices in chains])
+        object.__setattr__(self, "can_have_chains", True)
 
 
 def _log_display(low, high, unit_low, unit_high=None, split=1000.0, digits=2):
@@ -472,7 +514,18 @@ class FakeSimpler(FakeDevice):
             sample=sample, playback_mode=0, reversed=False, voices=voices)
 
     def reverse(self):
+        """A toggle. As in Live 12.4.16, the sample becomes a reversed copy in
+        the project's Samples/Processed/Reverse ("<name> R.<its extension>"), and
+        reversing again gives the original file back."""
         self.reversed = not self.reversed
+        sample = self.sample
+        if sample is not None:
+            if self.reversed:
+                object.__setattr__(self, "_forward", sample.file_path)
+                stem, ext = os.path.splitext(os.path.basename(sample.file_path))
+                sample.file_path = "/project/Samples/Processed/Reverse/%s R%s" % (stem, ext)
+            else:
+                sample.file_path = vars(self).get("_forward", sample.file_path)
 
     def replace_sample(self, file_path):
         """Live 12.4: the audio file at an absolute path replaces the sample."""
@@ -480,6 +533,59 @@ class FakeSimpler(FakeDevice):
             raise RuntimeError("Could not load %s" % file_path)
         self.sample = FakeSample(file_path)
 
+
+def _named_after(track, instrument):
+    """Live 12.4.16 (2026-11-23): a regular track still named as Live named it
+    ("1-MIDI") takes the name of an instrument that lands on it ("1-Drift"),
+    by insert_device or the browser, and of the next one that replaces it
+    ("1-Operator"); effects (Reverb) leave it. (On a return track an effect
+    renames it too, "A-Reverb | Utility"; the fake does not model that.)"""
+    numbered = re.match(r"(\d+)-(MIDI|Audio)$", track.name)
+    if not numbered and track.name == vars(track).get("_live_named"):
+        numbered = re.match(r"(\d+)-", track.name)
+    if numbered:
+        track.name = "%s-%s" % (numbered.group(1), instrument)
+        object.__setattr__(track, "_live_named", track.name)
+
+
+def _songs_of(track):
+    return [song for song in (ref() for ref in _SONGS) if song is not None
+            and any(t is track for t in list(song.tracks) + list(song.return_tracks)
+                    + [song.master_track])]
+
+
+def _select(track):
+    """Live 12.4.16 selects a track a device was inserted on, a new MIDI or
+    audio track (create_*_track), and one whose device was deleted while another device stays on it
+    (that device is selected); Live does it after the command, the fake at
+    once."""
+    for song in _songs_of(track):
+        song.view.selected_track = track
+
+
+def _auto_arm(track, empty=None):
+    """Live 12.4.16, a device landing on a MIDI track with none: the track is
+    armed (arm, not implicit_arm), and with exclusive arm (Live's default)
+    every other track loses its arm. A MIDI track holding only a MIDI effect
+    (Arpeggiator) is not empty: an instrument onto it does not arm it.
+    empty: whether the track had no device (default: has none now)."""
+    if not track.has_midi_input or not (not track.devices if empty is None else empty):
+        return
+    track.arm = True
+    for song in _songs_of(track):
+        if song.exclusive_arm:
+            for other in song.tracks:
+                if other is not track and other.arm:
+                    other.arm = False
+
+
+_SONGS = []  # weak references to every FakeSong, for _auto_arm
+
+
+# Live 12.4's instruments, as its browser lists them
+INSTRUMENTS = frozenset(["Analog", "Collision", "Drift", "Drum Rack", "Drum Sampler", "Electric",
+                         "External Instrument", "Impulse", "Instrument Rack", "Meld", "Operator",
+                         "Sampler", "Simpler", "Tension", "Wavetable"])
 
 # What Track.insert_device builds (Live 12.3+), by browser name
 INSERTABLE = {
@@ -519,9 +625,15 @@ INSERTABLE = {
                                 "Comb", "Resampling"]),
         _hz("Frequency", 0.9), _percent("Resonance", 20.0), _percent("LFO Amount"),
         _percent("Dry/Wet", 100.0)]),
+    # Live 12.4.16's parameters, in its order (2026-11-23); Live stores the
+    # levels as 0..1, the fake as dB
     "Limiter": lambda: FakeDevice("Limiter", "Limiter", [
-        _db("Gain", 0.0, -24.0, 24.0), _db("Ceiling", 0.0, -24.0, 0.0),
-        _choice("Mode", ["Standard", "Soft Clip", "True Peak"])]),
+        _db("Input Gain", 0.0, -24.0, 24.0), _db("Ceiling", 0.0, -24.0, 0.0),
+        _ms("Release", 0.73, 1.0, 1000.0), _switch("Auto"), _percent("Link", 100.0),
+        _percent("M/S Link"), _choice("Lookahead", ["1.5 ms", "3 ms", "6 ms"]),
+        _choice("Routing", ["L/R", "M/S"]), _choice("Mode", ["Standard", "Soft Clip", "True Peak"]),
+        _switch("Maximize On"), _db("Threshold", 0.0, -24.0, 0.0),
+        _db("Output", 0.0, -24.0, 0.0)]),
     "Operator": _instrument("Operator", "Operator"),
     "Drift": _instrument("Drift", "Drift"),
     "Wavetable": _instrument("Wavetable", "InstrumentVector"),
@@ -548,6 +660,8 @@ class FakeTrack(FakeObj):
 
     def delete_device(self, index):
         del self.devices[index]
+        if self.devices:
+            _select(self)
 
     def duplicate_clip_to_arrangement(self, clip, time):
         """Like Live 12.4: the copy keeps notes and envelopes; clips under it
@@ -591,13 +705,20 @@ class FakeTrack(FakeObj):
         return clip
 
     def insert_device(self, name, index=-1):
-        return _insert_device(self.devices, name, index)
+        was_empty = not self.devices
+        device = _insert_device(self.devices, name, index)  # an unknown name raises first
+        _auto_arm(self, was_empty)  # Reverb, Drum Rack, Drift alike (Live 12.4.16)
+        _select(self)
+        if name in INSTRUMENTS:
+            _named_after(self, device.name)
+        return device
 
 
 # ── Undo history, by the rules measured on Live 12.4 (see journal.py) ───────
 
 # Bookkeeping of the fakes themselves, never part of an undo step
-_NOT_SET_STATE = frozenset(["_listeners", "undo_log", "calls", "_undo", "_redo", "_open_step",
+_NOT_SET_STATE = frozenset(["_live_named", "exclusive_arm", "_listeners", "undo_log", "calls",
+                            "_undo", "_redo", "_open_step",
                             "_position", "_clock", "_stopped_at", "_pass", "_pass_closing", "_pass_starting",
                             "running_clock", "_data"])
 _MISSING = object()
@@ -732,8 +853,10 @@ class FakeSong(FakeObj):
         points.append((round(self.current_song_time, 4), float(value)))
         lanes[id(param)] = {"parameter": param, "points": points}
 
-    def __init__(self, running_clock=False):
+    def __init__(self, running_clock=False, exclusive_arm=True):
         object.__setattr__(self, "running_clock", running_clock)
+        object.__setattr__(self, "exclusive_arm", exclusive_arm)  # Live's preference
+        _SONGS[:] = [ref for ref in _SONGS if ref() is not None] + [weakref.ref(self)]
         tracks = [FakeTrack("Drums", devices=[FakeDevice(
                       "Kit", "DrumGroupDevice",
                       drum_pads=[FakeObj(note=36, name="Kick 808", mute=False, solo=False,
@@ -875,6 +998,7 @@ class FakeSong(FakeObj):
             self.tracks.append(track)
         else:
             self.tracks.insert(index, track)
+        _select(track)
         return track
 
     def create_audio_track(self, index):
@@ -883,6 +1007,7 @@ class FakeSong(FakeObj):
             self.tracks.append(track)
         else:
             self.tracks.insert(index, track)
+        _select(track)
         return track
 
     def delete_track(self, index):
@@ -975,6 +1100,18 @@ class FakeBrowserItem(FakeObj):
             is_device=False, source=source, uri="query:" + name.replace(" ", "%20"))
 
 
+def _first_drum_rack(devices):
+    """The first Drum Rack in devices or in their racks' chains (breadth first)."""
+    level = list(devices)
+    while level:
+        rack = next((d for d in level if d.class_name == "DrumGroupDevice"), None)
+        if rack is not None:
+            return rack
+        level = [d for r in level if getattr(r, "class_name", "") != "DrumGroupDevice"
+                 for c in (getattr(r, "chains", None) or []) for d in getattr(c, "devices", [])]
+    return None
+
+
 class FakeBrowser(FakeObj):
     """Live's browser: roots of items; load_item drops onto the selected track,
     or onto the selected pad of its Drum Rack."""
@@ -985,7 +1122,10 @@ class FakeBrowser(FakeObj):
             item("Kick", [item("Kick 808 Long.wav"), item("Kick Acoustic.wav")]),
             item("Snare", [item("Snare Tight.wav")]),
             item("Hihat", [item("Hihat Closed 1.wav"), item("Hihat Open 1.wav")]),
-            item("Cymbal", [item("Crash 505.wav"), item("Ride 1.wav")])])
+            item("Cymbal", [item("Crash Reverse Swell.wav"), item("Crash 505.wav"),
+                            item("Ride 1.wav")]),
+            # Live 12.4.16 lists the reversed one first
+            item("FX Hit", [item("Impact Layered Reversed.wav"), item("Impact Layered.wav")])])
         roots = dict(
             sounds=item("Sounds", [item("Pad", [item("Warm Pad.adg"), item("Glass Pad.adg")])]),
             drums=item("Drums", [drum_hits, item("808 Core Kit.adg")]),
@@ -1000,20 +1140,25 @@ class FakeBrowser(FakeObj):
 
     def load_item(self, item):
         track = self.song.view.selected_track
-        rack = next((d for d in track.devices if d.class_name == "DrumGroupDevice"), None)
+        rack = _first_drum_rack(track.devices)
         pad = rack.view.selected_drum_pad if rack is not None else None
         stem = item.name.rsplit(".", 1)[0]
         if pad is not None:
             # as in Live: the pad's chain holds a Simpler with the sample, its
             # Fade In at 0, 3 voices, and plays it at C3 (Live 12.4.16, 2026-11-14)
-            pad.chains = [FakeObj(name=stem, choke_group=0, out_note=60, devices=[
-                FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5), fade_in=0.0, voices=3)])]
+            chain = FakeDrumChain()  # pad.chains lists it in rack.chains (FakeDrumPad)
+            object.__setattr__(chain, "name", stem)
+            chain.devices.append(FakeSimpler(stem, FakeSample("/samples/" + item.name, 0.5),
+                                             fade_in=0.0, voices=3))
+            pad.chains = [chain]
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:
             seconds = 2.76 if "crash" in item.name.lower() else 0.5
+            _auto_arm(track)  # as insert_device does
             track.devices.append(FakeSimpler(stem, FakeSample("/samples/" + item.name, seconds)))
             self.loaded.append((track.name, None, item.name))
+            _named_after(track, stem)
 
     def preview_item(self, item):
         object.__setattr__(self, "previewing", item.name)
