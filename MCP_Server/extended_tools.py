@@ -533,7 +533,10 @@ def batch_summary(result: dict) -> dict:
             if isinstance(inner, dict) and "property" in inner:
                 steps.append({"set": inner["property"], "value": inner.get("value")})
             elif isinstance(inner, dict) and "new" in inner:
-                steps.append({"set": inner.get("name"), "value": inner.get("new")})
+                step_out = {"set": inner.get("name"), "value": inner.get("new")}
+                if inner.get("note"):  # what was set instead ("-inf dB", the end)
+                    step_out["note"] = inner["note"]
+                steps.append(step_out)
             elif isinstance(inner, dict) and "method" in inner:
                 steps.append({"called": inner["method"], "result": inner.get("result")})
             else:
@@ -970,6 +973,10 @@ def setting_report(asked: list[str], names: dict[str, str], applied: dict) -> di
                               f"{len(asked)} applied"}
     if errors:
         report["errors"] = errors
+    notes = {asked[i]: s["note"] for i, s in enumerate(applied["steps"])
+             if i < len(asked) and isinstance(s, dict) and s.get("note")}
+    if notes:
+        report["notes"] = notes
     if renamed(names):
         report["renamed"] = renamed(names)
     return report
@@ -2201,7 +2208,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         kwargs: dict[str, Any] | None = None) -> str:
         """Call any LOM method, e.g. path="live_set", method="create_scene", args=[-1];
         path="live_set tracks 0 clip_slots 0 clip", method="duplicate_loop".
-        Arguments that must be Live objects are written {"$ref": "<path>"}.
+        Arguments that must be Live objects are written {"$ref": "<path>"}
+        or {"$id": n} (an id from an earlier result).
         """
         return to_json(send("lom_call", {"path": path, "method": method,
                                          "args": args or [], "kwargs": kwargs or {}}))
@@ -2289,7 +2297,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         monitoring: str | None = None) -> str:
         """Set mixer state for a track, return track ("return A") or "master".
 
-        - volume_db: fader in dB (0 = unity, +6 max; -70 or lower = -inf)
+        - volume_db: fader in dB, -inf .. +6 (0 = unity; below Live's lowest
+          level, about -70, it is -inf; 6.1 sets 6.0 with a note, more is
+          refused)
         - pan: -1.0 (left) .. 1.0 (right), or Live text like "25L", "C", "40R"
         - sends_db: {"A": -12, "B": -6} (letters or 0-based indexes)
         - monitoring: "in", "auto" or "off"
@@ -2320,7 +2330,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             ops.append(op_set(tp, "current_monitoring_state", MONITORING[monitoring.lower()]))
         if not ops:
             return "Nothing to change"
-        return to_json(batch_summary(batch(ops)))
+        summary = batch_summary(batch(ops, stop_on_error=False))
+        if not summary["ok"]:
+            # a part that failed is an error, not a success with ok: false
+            # in its text (a send set to "-80 dB" was refused that way)
+            failed = [s["error"] for s in summary["steps"] if isinstance(s, dict) and "error" in s]
+            applied = [s for s in summary["steps"] if not (isinstance(s, dict) and "error" in s)]
+            raise RuntimeError(f"{len(failed)} of {len(ops)} mixer changes failed: "
+                               f"{'; '.join(map(str, failed))}. Applied: {to_json(applied)}")
+        return to_json(summary)
 
     @tool(destructive=True)
     def manage_track(action: Literal["create_midi", "create_audio", "create_return", "delete",
@@ -3850,7 +3868,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
         - position: index in the chain (default the end)
         - settings: {"Threshold": "-18 dB", "1 Filter Type A": "High Pass 48dB"} as Live
-          displays them, or raw numbers
+          displays them, or raw numbers; `notes` says where one landed
+          instead (the end of its range, -inf)
         """
         args = [device] if position is None else [device, int(position)]
         ids, name = insert_devices(track_path(track), [args])
@@ -4029,7 +4048,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         name ("loaded_by_name" says why), and the call fails if neither works.
         A name with a file extension is looked up exactly, waiting up to
         sample_wait_s for Live to list a new file. Settings take display text
-        ("-12 dB", "-12 ct") or raw numbers. Sidechains are routed once every
+        ("-12 dB", "-12 ct") or raw numbers (`setting_notes`: where one landed
+        instead). Sidechains are routed once every
         track exists. signature: [7, 8] or "7/8", set first. replace=True first
         deletes tracks with these names.
         """
@@ -4184,6 +4204,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 ops.append(op_set(tp, "mute", bool(spec["mute"])))
             applied = batch_summary(batch(ops, stop_on_error=False))
             row["problems"] += [step for step in applied["steps"] if isinstance(step, dict) and "error" in step]
+            setting_notes = [step for step in applied["steps"] if isinstance(step, dict) and step.get("note")]
+            if setting_notes:
+                row["setting_notes"] = setting_notes
             row["devices"] = [d["name"] for d in lom_get(f"{tp} devices", ["name"])["items"]]
             row["notes"] = 0
             for clip in spec.get("clips") or []:
@@ -4575,7 +4598,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                      pad: int | str | None = None) -> str:
         """Set a device parameter by name (or index), either as a raw value or as
         the text Live shows: display_value="800 Hz", "-6 dB", "35 %", "120 ms",
-        "1.2 kHz", "25L", or a list item like "Lowpass". device: index or name
+        "1.2 kHz", "25L", or a list item like "Lowpass" (a bare number is in
+        display units: "0.5" on a pan is 1R). device: index or name
         (devices inside racks are found by name too); device="mixer" works
         with parameter "volume" | "pan" | "send A" (a pad's sends go to its
         Drum Rack's own returns). pad (note, "C1" or role
@@ -4716,16 +4740,18 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         walk_id, done, visited = None, False, 0
         started = time.monotonic()
         first_strong: float | None = None  # when the first strong hit came
+        rested = 0.0  # time spent waiting for Live, not counted against the limits
         while True:
             params: dict[str, Any] = ({"walk_id": walk_id} if walk_id is not None
                                       else {"query": query, "roots": roots,
                                             "within": within or []})
-            # ~120 ms of Live's main thread per call, then Live gets a breath
-            params.update(slice_ms=120, max_results=500)
+            # ~60 ms of Live's main thread per call, then as long for Live
+            # (script 2.2 says how long: rest_ms; a call sooner gets less)
+            params.update(slice_ms=60, max_results=500)
             reply = send("browser_search", params)
             walk_id, done, visited = reply["walk_id"], reply["done"], reply["visited"]
             found += reply["results"]
-            now = time.monotonic()
+            now = time.monotonic() - rested
             elapsed = now - started
             if first_strong is None and any(rank(e) < 2 for e in found):
                 first_strong = now
@@ -4736,6 +4762,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     or (patience is not None and elapsed > patience) \
                     or (enough is not None and any(enough(e) for e in found)):
                 break
+            pause = max(0.0, min(float(reply.get("rest_ms") or 0), 500.0) / 1000.0)
+            time.sleep(pause)
+            rested += pause
         if not done:
             try:
                 send("browser_search", {"walk_id": walk_id, "cancel": True})

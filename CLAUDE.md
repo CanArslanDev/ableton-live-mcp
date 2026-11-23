@@ -152,7 +152,11 @@ uv run python -m MCP_Server.blueprint FILE.json  # a blueprint's problems (schem
   (`…/Contents/App-Resources/MIDI Remote Scripts/`), which shadows the User
   Library copy.
 - Quitting Live with unsaved changes shows "Changes will be lost. Proceed?";
-  its buttons ignore Accessibility clicks, Return confirms.
+  its buttons ignore Accessibility clicks, Return confirms. Live 12.4.16
+  (2026-11-23) asks "Save changes to "Untitled" before closing?" instead
+  (Don't Save, Cancel, Save): Return picks Save (the Trial's Save As
+  panel, whose Cancel takes a click), an Accessibility click on Don't
+  Save does nothing, Cmd+D quits without saving.
 
 Measured on Live 12.3.8:
 
@@ -632,6 +636,131 @@ output) for the recording tools:
   device, several in a row while switching (a transient "No Device" before
   the device): the last "Output Device" line is the current one
   (`doctor.audio_devices`).
+
+Measured on 2026-11-23 (Live 12.4.16 Trial, empty unsaved set) for Remote
+Script 2.2.0:
+
+- **Parameter displays** (`str_for_value` at 0, ¼, ½, ¾ and 1 of the range
+  of Drum Buss, Compressor, EQ Eight, Utility, Reverb, Glue Compressor,
+  Auto Filter, Saturator, Delay and a track's mixer): dB ("-6.00 dB",
+  "-inf dB" at the bottom of faders, sends, Trim, Threshold), Hz switching
+  to kHz ("500 Hz" … "20.0 kHz"), ms switching to s ("459 ms", "1.36 s"),
+  "%" (also "-100 %" … "100 %" and "0.0 %" … "400 %"), pan "50L" / "C" /
+  "50R" (Utility Balance too), ratio "4.00 : 1" up to "inf : 1",
+  Compressor's Expansion Ratio "1 : 1.25", "st" (Auto Filter Pitch), "°"
+  (LFO Phase), note values "8", "5/16", "1/64", "1 / 16", "17  / 16", and
+  numbers without a unit: Drum Buss Transients "-1.00" … "1.00" (range
+  −1..1), EQ Q "0.10" … "18.0", Reverb's "0.50 " (with a trailing space),
+  Glue Compressor's ".01" … "30" and Release ending in "A". Quantized
+  ones list `value_items` ("Off"/"On", "Peak"/"RMS"/"Expand", "0 ms"/"1
+  ms"/"10 ms"). Most parameters keep one unit family across their range,
+  and `display_unit` (dB, Hz, ms, %, pan, ratio, st, °, note, morph,
+  none) taken at five points tells which units a target may carry; a bare
+  number is always read in display units. Not all: Glue Compressor's
+  Release ends in "A", Roar's Blend is a split ("100 / 0", "75 / 25" …
+  "0 / 100", read as its first number), Roar's FB Note shows note names
+  (12..84, "C-1" … "C5", read as MIDI notes with C3 = 60), and the Filter
+  Morph of Simpler, Operator and Wavetable restarts its number in each
+  section ("0 lp/bp" … "75 lp/bp", "0 bp/hp" … "75 no/lp", "100 no/lp"),
+  so it is read as section × 100 + number (bisecting on the number alone
+  set "25 lp/bp" to "25 no/lp", in 2.1.0 too). Script 2.1.0 clamped
+  "40 %" on Transients to 1.00, "100 Hz" on Drum Buss Damping Freq to 500
+  Hz, "-inf dB" on Compressor Output to −36 dB, and read "1/16" as 1/64;
+  2.2.0 refuses the first three (unit or range) and sets 1/16.
+- **Values Live keeps and shows** (sweep of 629 continuous parameters of
+  16 effects and 4 instruments, 7 displays each, 4,403 sets): Live stores
+  a float32, so a value found right at the edge of a display ("12 dB" on
+  Limiter's Input Gain) can be kept a hair below it and read back one
+  step off ("11 dB"); `param_set_display` then moves it into the display
+  it chose. Values a hair below zero show "-0.0 %", and Operator's
+  Freq<Vel shows "-50" at −50 exactly but "-50.0" beside it, so a value
+  that reads as asked is looked for next to the one found (rounded, then
+  nudged). A fader with "-inf dB" at its bottom has a lowest number above
+  it (Compressor Threshold −69.7 dB; a track's volume shows −69.565 dB at
+  0.001 and −inf at 0.0001, a send −69.695 dB at 0.005 and −inf at
+  0.003): a finite target below that sets −inf, as Live's faders do, and
+  the result says so (`note`); 2.1.0 landed it on the lowest number.
+  Server tools send such levels (`set_track_mixer(sends_db={"A": -80})`,
+  `build_tracks` volume_db), so none may be refused. The value set is a
+  rounded one or the middle of the chosen display ("C" pan 0.0, "25L"
+  −0.5), and every check runs before the one write (a refusal writes
+  nothing, so the journal's undo count stays right). A target past an end
+  by at most one display step there (`_end_step`: the distance to the
+  next display inward as read, or one unit of the end's own last digit
+  when it is a plain number and that is larger: "100 ms" beside "99.9
+  ms") sets the end with a `note` ("0 ms", "0.00 ms" on Attack, lowest
+  0.01 ms), whatever its own precision. Stepped controls take half their
+  last digit ("3.4" on an octave whose top is "+3 st"), and an end that is
+  not a plain number takes nothing past it (Ti Rate "1/256", "7" past "4
+  D"; "1:2.6" and "1:2.01" on Expansion Ratio, top "1 : 2.00"); "6
+  kHz" on a 5.50 kHz top, "2 s" on 1.50 s and "0" on a 0.20 bottom are
+  refused. Halfway between two displays goes to the larger
+  number, with a note ("1" on Glue Release: ".8" and "1.2" → 1.2). Tools
+  pass the notes on (`notes`, `setting_notes`, the summaries' steps). The
+  crossfader shows "50A" … "0" … "50B" (A as negative, like L). Live
+  does not always keep what is written as a float32 would: Shifter's
+  LFO Amt St shows "0.38 st" from
+  exactly 0.25, and 0.25 is kept as 0.24999998 ("0.37 st"), so a rounded
+  value at a display's edge is not taken and a read-back that differs is
+  stepped inside. A third sweep (890
+  parameters, 17 points, the display and four Python-formatted variants
+  each: 43,632 sets), left 101 flags, none a wrong set: 42 bare numbers on
+  note-name parameters (refused, out of the MIDI-note range), 56 targets
+  rounded past a range end by more than one display step (refused: "0 ms"
+  on a 0.10 ms bottom, "2 s" on a 1.50 s top), nearest values on
+  note-value displays ("2.400" → "4 T", i.e. 2.67; "0.400" → "6/16") and
+  Glue Release's tie ("1" → 1.2).
+- **More display forms** (a second sweep: 883 continuous parameters of 26
+  effects and 6 instruments, 11 displays each, 9,713 sets): Resonators'
+  I Note writes sharps as "♯" ("C♯3", read as "#"; "♭" as "b"); Hybrid
+  Reverb's Ti Rate (0..29, stepped) shows note values with triplets and
+  dots ("1/128 T" … "1/4 D", "1 T", "1", "1 D", "2 D", "4 D", read as
+  the note value × 2/3 or × 1.5); its Vintage (0..4, not quantized) shows
+  only names (Off, Subtle, Old, Older, Extreme), set by name. Compressor's
+  Ratio ("4.00 : 1") and Expansion Ratio ("1 : 1.25") are told apart, so
+  "1:4" on Ratio is refused. Before these, "C3" on I Note set E4 and
+  reported success. `param_set_display` now refuses any result whose
+  display is not the target (within its last digit) and does not have
+  the target between it and the display one step away (`_reads_near`):
+  a display it misreads can no longer set something else silently. With
+  script 2.2.0 as installed on 2026-11-23, both sweeps (4,403 sets over
+  629 parameters, 9,713 over 883) set every display read back exactly as
+  asked. Displays outside those sweeps (other devices, plug-ins, Max
+  devices) are untested.
+- **Glue Compressor's Attack, Release and Ratio are stepped, not
+  quantized**: `is_quantized` False, ranges 0..6, 0..6, 0..2, each step
+  shown from its value up (Attack ".01" ".1" ".3" "1" "3" "10" "30",
+  Release ".1" ".2" ".4" ".6" ".8" "1.2" "A", Ratio "2" "4" "10"); a
+  value of 2.5 reads back 2.0 (Live floors it). With Release ending in
+  "A" (Auto), script 2.1.0 refused every number ("not numeric");
+  `_numeric_span` now bisects over the steps that show numbers and sets
+  the others ("A") by name. `fake_live` models these (`_stepped`).
+- **Browser listings are not lazy.** `BrowserItem.children` builds the
+  whole vector: ~0.3 s for a folder of 100,000 samples (~3 µs an item),
+  and `iter_children` (a `BrowserItemIterator`) costs as much to create.
+  Reading the items afterwards is cheap: script 2.1.0 walked 120,000
+  items in 0.86 s in all. `hasattr` reads the property, so `_lom_resolve`
+  lists a folder twice (`… children 0` took 0.6 s there). The 100,000
+  files (empty WAVs) showed up after ~2 minutes; files added later to an
+  indexed folder did not show within 5 minutes, until it was renamed.
+  `browser.samples` lists the User Library's samples as well. Walks
+  therefore bound the time between slices: `BROWSER_WALK_SHARE` (0.5)
+  gives a slice no more time than Live had since the last one, so a
+  client that asks again at once (server 2.4.3: 120 ms slices) gets short
+  slices, and `rest_ms` tells a client how long to wait for a whole one
+  (this server: 60 ms slices; its time limits leave the waits out). The
+  share is per walk: the script keeps up to four, and walks run side by
+  side (several sessions searching) can take more of the thread together.
+  A walk of 208,705 items then took 48 % of the main thread over 2.2 s,
+  with other clients' commands at 8 ms median and 336 ms at most (one
+  listing); with 2.1.0 another client waited 396 ms median, 710 ms at
+  most, during a 120,000-item walk.
+- **Ids alone:** `{"$ref": 4965354872}` (a bare id, as a number or
+  digits) is read as `"id 4965354872"`; no root name is made of digits.
+- **Server 2.4.3 with script 2.2.0** (the plugin's server, expecting
+  2.1.0): handshake, capabilities, `get_session_overview`,
+  `browser_search`, `run_batch` with `param_set_display` and the LOM tools
+  work; its `doctor` reports the script as outdated (two warnings).
 
 Not verified in Live (check each in a scratch set before claiming it):
 

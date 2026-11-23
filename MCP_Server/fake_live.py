@@ -129,6 +129,15 @@ def volume_display(value):
     return "%.1f dB" % (40 * math.log10(value / 0.85))
 
 
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def note_display(value):
+    """A MIDI note as Live names it: 60 is "C3", 12 "C-1"."""
+    note = int(round(value))
+    return "%s%d" % (NOTE_NAMES[note % 12], note // 12 - 2)
+
+
 def pan_display(value):
     amount = int(round(abs(value) * 50))
     if amount == 0:
@@ -604,6 +613,13 @@ def _choice(name, items, index=0):
     return FakeParam(name, index, 0, len(items) - 1, items=list(items))
 
 
+def _stepped(name, shown, index=0):
+    """Glue Compressor's Attack, Release and Ratio (Live 12.4.16): not
+    quantized, 0..n-1, each step shown from its value up ("A" is Auto)."""
+    return FakeParam(name, float(index), 0.0, float(len(shown) - 1),
+                     display=lambda v: shown[min(int(v), len(shown) - 1)])
+
+
 def _switch(name, on=False):
     return _choice(name, ["Off", "On"], 1 if on else 0)
 
@@ -758,11 +774,17 @@ INSERTABLE = {
         _choice("Type", ["Analog Clip", "Soft Sine", "Bass Shaper", "Medium Curve",
                          "Hard Curve", "Sinoid Fold", "Digital Clip", "Waveshaper"]),
         _db("Output", 0.0, -36.0, 0.0), _percent("Dry/Wet", 100.0)]),
+    # Live 12.4.16: Blend shows a split, FB Note note names
+    "Roar": lambda: FakeDevice("Roar", "Roar", [
+        FakeParam("Blend", 0.5, display=lambda v: "%d / %d" % (round(100 * (1 - v)),
+                                                                 round(100 * v))),
+        FakeParam("FB Note", 60.0, 12.0, 84.0, display=note_display),
+        _db("Output", 0.0, -36.0, 36.0)]),
     "Glue Compressor": lambda: FakeDevice("Glue Compressor", "GlueCompressor", [
         _db("Threshold", 0.0, -40.0, 0.0),
-        _choice("Ratio", ["2", "4", "10"]),
-        _choice("Attack", [".01", ".1", ".3", "1", "3", "10", "30"], 3),
-        _choice("Release", [".1", ".2", ".4", ".6", ".8", "1.2", "A"], 6),
+        _stepped("Ratio", ["2", "4", "10"], 1),
+        _stepped("Attack", [".01", ".1", ".3", "1", "3", "10", "30"], 3),
+        _stepped("Release", [".1", ".2", ".4", ".6", ".8", "1.2", "A"], 3),
         _db("Output", 0.0, -20.0, 20.0), _percent("Dry/Wet", 100.0)]),
     "Drum Buss": lambda: FakeDevice("Drum Buss", "DrumBuss", [
         _percent("Drive"), _percent("Crunch"), FakeParam("Transients", 0.0, -1.0, 1.0),

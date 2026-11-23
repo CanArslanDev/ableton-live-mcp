@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-The Remote Script is unchanged: no reinstall or Live restart needed.
+Remote Script 2.2.0: reinstall it (`ableton-mcp-install-script`) and restart
+Live. Checked in Live 12.4.16: the script loads, and the plugin's server
+2.4.3 (which expects 2.1.0) still works with it.
+
+**Note for anyone also running an older server:** its `doctor` (2.4.3 and
+earlier) calls script 2.2.0 "Outdated copy" and suggests
+`install_remote_script`. Don't follow it: that installs the older 2.1.0
+and undoes the fixes below. Install from this version instead.
 
 ### Fixed
 
@@ -213,6 +220,86 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   four `find_similar_sounds` at once never finished and starved Live
   until its connection timed out. A queued call says what it waits for.
 
+- **Display values in the wrong unit or out of range are refused**
+  (Remote Script 2.2.0). `param_set_display` (behind setting parameters
+  by text, `"value": "-6 dB"`) clamped them: "40 %" on Drum Buss
+  Transients, which shows -1.00 to 1.00, set 1.00. A unit the parameter
+  does not show is now an error naming what it shows and its range ("'40
+  %' does not fit Transients: it shows plain numbers (no unit), from -1.00
+  to 1.00"), and so is a value past either end ("'5 s' is outside the
+  range of Release, 1.00 ms to 3.00 s"); a value past an end by at most
+  one display step there (to the next display inward) sets the end and
+  says so (`note`:
+  "Attack's lowest is 0.01 ms: set to 0.01 ms" for "0 ms"), however the
+  target is written; a stepped control takes half its last digit, and
+  an end that is not a plain number nothing past it (Hybrid Reverb's Ti
+  Rate "1/128 T", "4 D"; Expansion Ratio "1 : 2.00"). Hz and kHz, ms
+  and s, dB, %, pan ("25L", "C"), ratios ("4:1"), "-inf dB", plain
+  numbers and choice names work as before, and
+  so do other spellings of a unit the parameter shows ("1.5 sec", "300
+  msec", "-6 dBFS", "-1 dBTP", "12 semitones", "11 cents"). Note values
+  ("1/16") and Compressor's expansion ("1:1.5") are now read right; script
+  2.1.0 set them to 1/64 and 1:1.00. A minus typed with a space ("- 6
+  dB", read as +6 dB) or as "−" or "–" is a minus, and "1/0" is
+  refused instead of read as 1.
+- **`set_track_mixer` fails when a part fails.** A refused change came back
+  as a success with `"ok": false` in its text; the call is now an error
+  that names what failed and what was applied.
+- **Tools pass on what was set instead.** A setting that landed on −inf,
+  on the end of the range or on the upper of two displays carries a
+  `note`; `add_device` and `apply_device_chain` list them under `notes`
+  (setting → note), `build_tracks` under each track's `setting_notes`,
+  `set_track_mixer` and the batch summaries on the step, and
+  `set_device_parameter_by_name` and `run_batch` return them as Live's
+  script gave them.
+- **Glue Compressor's Release takes numbers** (Remote Script 2.2.0).
+  It shows ".1" to "1.2", then "A" (Auto), and every number was refused
+  ("Parameter display … is not numeric"); "A" now sets Auto, and a
+  target that is neither says what the parameter shows.
+- **Display values land on the display asked for** (Remote Script 2.2.0).
+  Checked by setting 7 displays of each of 629 parameters in Live 12.4.16
+  (4,403 sets): "12 dB" on Limiter's Input Gain read back "11 dB" (Live
+  keeps a float32, a hair below the edge found), "0.0 %" read "-0.0 %",
+  Operator's Freq<Vel "-50" read "-50.0", "25 lp/bp" on a Filter Morph
+  set "25 no/lp" (its number restarts in each section). Each now reads
+  back as asked. Roar's FB Note takes note names ("F#3"), its Blend
+  splits ("75 / 25"). A level below the lowest a fader shows above −inf
+  ("-80 dB" on a send, "-70 dB" on Compressor's Threshold, lowest −69.7
+  dB) sets −inf, as Live's faders do, and the result says so (`note`);
+  it landed on the lowest number. The crossfader's "25B" sets B (it set
+  A). A value halfway between two displays goes to the larger ("1" on
+  Glue Compressor's Release, between ".8" and "1.2", sets 1.2), with a
+  note. The value set sits in the middle of its display ("C" pan is
+  0.0, not −0.01), and a refused value writes nothing.
+  Resonators' note names with "♯" ("C3" set E4 and reported success),
+  Hybrid Reverb's Ti Rate ("1/32 T", "1 D") and Vintage (Off … Extreme)
+  are read, and "1:4" on Compressor's Ratio is refused (it set 4:1). A
+  result whose display is not what was asked, nor the nearest the
+  parameter shows, is now refused instead of reported as set. A second
+  check set 11 displays of each of 883 parameters (26 effects, 6
+  instruments; 9,713 sets): every one read back as asked.
+- **`{"$ref": <id>}` reaches the object** (Remote Script 2.2.0). An id
+  from an earlier result passed as a bare number ("Unknown root") or as
+  digits now works like `{"$id": N}` and `"id N"`; the error for an
+  unknown root names those forms, and `lom_call_method` mentions `$id`.
+- **Browser searches leave Live half its main thread** (Remote Script
+  2.2.0). Each slice of a walk ran 120 ms, and the next was asked for at
+  once: with a large User Library, `browser_search` and loads by name
+  kept Live unresponsive for minutes. The script now gives a slice no
+  more time than Live had since the last one, and says how long to rest
+  (`rest_ms`); the server asks for 60 ms slices and waits that long. Its
+  time limits (20 s, 3 s after a strong hit) leave those waits out, so a
+  search covers as much ground as before and can take up to twice as
+  long before it reports an unfinished walk. A folder is read item by
+  item instead of copied into a list first.
+  Measured in Live 12.4.16 with a test folder of 100,000 samples in the
+  User Library: with script 2.1.0 a walk of it ran slices of 308 and 413
+  ms and another client's commands waited 396 ms (median, 710 at most);
+  with 2.2.0 a walk of every category (208,705 items, 2.2 s) took 48 % of
+  the main thread and other commands answered in 8 ms (median; 78 ms at
+  the 90th percentile). Listing one folder is still one call in Live
+  (~3 µs an item: 0.33 s for those 100,000), the longest wait left.
+
 ### Added
 
 - **`set_device_parameter_by_name(pad=…)`** reaches a Drum Rack pad's
@@ -271,6 +358,8 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
 
 ### Docs
 
+- CLAUDE.md: parameter displays across Live 12.4.16's devices, the
+  browser's listing costs, and its quit dialog (Cmd+D is Don't Save).
 - The ableton-live skill: read the track's devices before retrying an
   interrupted call (it may have reached Live), and what `ok`, `errors` and
   `renamed` mean; pad chain mixers and devices in racks. The mix-and-master
@@ -293,6 +382,11 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
 
 ### Tests
 
+- The script's display units, unit and range refusals, bare ids in
+  `$ref`, a walk's share of the main thread and folders read by index
+  (all failed on script 2.1.0), other spellings of units ("1.5 sec" is
+  1.5 s), and the server resting between slices without counting the
+  rests against its time limits.
 - `fake_live`: Live 12.4.16's Limiter parameters, Instrument Racks
   (`FakeRack`) and chain mixers, Simpler's reverse as a copy in
   `Processed/Reverse`, tracks named after what loads onto them, the

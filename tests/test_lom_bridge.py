@@ -251,9 +251,470 @@ def test_envelope_writes_clamped_steps(script):
     ("1.50 s", 1500.0), ("50L", -50.0), ("C", 0.0), ("25R", 25.0), ("40 %", 40.0),
     ("-inf dB", float("-inf")), ("Lowpass", None),
     (".6", 0.6), ("-.5 dB", -0.5), ("4.00 : 1", 4.0),
+    # Compressor's expansion and note values, as Live 12.4.16 shows them
+    ("1 : 1.25", 1.25), ("1  / 16", 0.0625), ("5/16", 0.3125), ("8", 8.0),
+    # other spellings
+    ("1.5 sec", 1500.0), ("2 secs", 2000.0), ("1.5 seconds", 1500.0), ("350 msec", 350.0),
+    ("1.2k", 1200.0), ("-6 dBFS", -6.0), ("12 semitones", 12.0), ("11 cents", 11.0),
+    # a minus typed with a space, or as Unicode minus or en dash
+    ("- 6 dB", -6.0), ("\u22126 dB", -6.0), ("\u2212 6 dB", -6.0), ("\u20136 dB", -6.0),
+    ("1/0", None), ("A", None),
+    # Roar's Blend is a split (its first number), FB Note a note (C3 = 60),
+    # Filter Morph a position over its four sections
+    ("100 / 0", 100.0), ("75 / 25", 75.0), ("6 / 94", 6.0), ("0 / 100", 0.0),
+    ("C-1", 12.0), ("F#3", 66.0), ("Bb2", 58.0), ("C5", 84.0), ("C-2", 0.0),
+    ("0 lp/bp", 0.0), ("25 bp/hp", 125.0), ("100 no/lp", 400.0),
+    # Resonators writes sharps as music signs; Hybrid Reverb's Ti Rate has
+    # triplet and dotted values
+    ("C\u266f3", 61.0), ("B\u266d2", 58.0), ("1/128 T", 1 / 192), ("1/32 D", 3 / 64),
+    ("1 T", 2 / 3), ("1 D", 1.5), ("4 D", 6.0), ("1/64", 1 / 64),
 ])
 def test_parse_display_number(script, text, expected):
     assert script.module.parse_display_number(text) == expected
+
+
+@pytest.mark.parametrize("text,unit", [
+    ("800 Hz", "Hz"), ("1.20 kHz", "Hz"), ("-6.0 dB", "dB"), ("-inf dB", "dB"),
+    ("350 ms", "ms"), ("1.50 s", "ms"), ("40 %", "%"), ("0.00", ""), (".6", ""),
+    ("0.50 ", ""), ("1  / 16", ""), ("25L", "pan"), ("C", "pan"), ("4.00 : 1", "ratio"),
+    ("inf : 1", "ratio"), ("1 : 1.25", "expansion"), ("12 st", "st"), ("90\u00b0", "\u00b0"),
+    ("1.5 sec", "ms"), ("2 secs", "ms"), ("350 msec", "ms"), ("-1 dBTP", "dB"),
+    ("-6 dBFS", "dB"), ("12 semitones", "st"), ("1 semitone", "st"), ("11 cents", "ct"),
+    ("75 / 25", ""), ("C-1", "note"), ("G#4", "note"), ("25 bp/hp", "morph"),
+    ("C\u266f3", "note"), ("1/128 T", ""), ("1 D", ""), ("1:4", "expansion"),
+    ("4:1", "ratio"),
+])
+def test_display_unit(script, text, unit):
+    assert script.module.display_unit(text) == unit
+
+
+def _drum_buss(script):
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Drum Buss"])
+    return "live_set tracks 2 devices -1 parameters "
+
+
+def test_param_set_display_refuses_another_unit(script):
+    """Crank: "40 %" on Drum Buss Transients (shown -1.00 to 1.00, no unit)
+    was clamped to 1.00."""
+    params = _drum_buss(script)
+    error = run_error(script, "param_set_display", path=params + "Transients", value="40 %")
+    assert "'40 %' does not fit Transients" in error and "plain numbers" in error
+    assert "-1.00 to 1.00" in error
+    assert run(script, "lom_get", path=params + "Transients", properties=["value"])["value"] == 0
+    assert run(script, "param_set_display", path=params + "Transients", value="0.4")["new"] \
+        == "0.40"
+    assert run(script, "param_set_display", path=params + "Transients", value=".6")["new"] \
+        == "0.60"
+    error = run_error(script, "param_set_display", path=params + "Drive", value="40 dB")
+    assert "does not fit Drive: it shows %" in error
+    assert run(script, "param_set_display", path=params + "Drive", value="40 %")["new"] == "40 %"
+    assert run(script, "param_set_display", path=params + "Drive", value="40")["new"] == "40 %"
+    assert "does not fit" in run_error(script, "param_set_display",
+                                       path="live_set tracks 0 mixer_device panning",
+                                       value="25 %")
+    freq = 'live_set tracks 1 devices 0 parameters "Filter Freq"'
+    assert run(script, "param_set_display", path=freq, value="0.8 kHz")["new"] == "800 Hz"
+    assert "shows Hz or kHz" in run_error(script, "param_set_display", path=freq, value="800 ms")
+
+
+def test_param_set_display_takes_other_spellings_of_a_unit(script):
+    """"1.5 sec" passed the unit check but set 1.5 ms."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Compressor"])
+    release = 'live_set tracks 2 devices -1 parameters "Release"'
+    assert run(script, "param_set_display", path=release, value="1.5 sec")["new"] == "1500.0 ms"
+    assert run(script, "param_set_display", path=release, value="300 msec")["new"] \
+        == "300.0 ms"
+    output = 'live_set tracks 2 devices -1 parameters "Output"'
+    assert run(script, "param_set_display", path=output, value="-6 dBFS")["new"] == "-6.00 dB"
+    # an alias of a unit the parameter does not show is still refused
+    assert "does not fit" in run_error(script, "param_set_display", path=output,
+                                       value="3 semitones")
+
+
+def test_param_set_display_reads_a_minus_however_typed(script):
+    """"- 6 dB" read as +6 dB."""
+    vol = "live_set tracks 0 mixer_device volume"
+    assert run(script, "param_set_display", path=vol, value="- 6 dB")["new"] == "-6.0 dB"
+    assert run(script, "param_set_display", path=vol, value="\u221212 dB")["new"] == "-12.0 dB"
+    assert "Could not read a number" in run_error(
+        script, "param_set_display",
+        path='live_set tracks 1 devices 0 parameters "Filter Freq"', value="1/0")
+
+
+def test_param_set_display_on_glue_release_ending_in_auto(script):
+    """Glue Compressor's Release shows .1 to 1.2 (s), then "A": every
+    number was refused ("is not numeric")."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device",
+        args=["Glue Compressor"])
+    release = 'live_set tracks 2 devices -1 parameters "Release"'
+    assert run(script, "param_set_display", path=release, value=".8")["new"] == ".8"
+    assert run(script, "param_set_display", path=release, value="0.2")["new"] == ".2"
+    assert run(script, "param_set_display", path=release, value="a")["new"] == "A"
+    assert run(script, "param_set_display", path=release, value="1.2")["new"] == "1.2"
+    assert "outside the range of Release, .1 to 1.2" in run_error(
+        script, "param_set_display", path=release, value="3")
+    assert run_error(script, "param_set_display", path=release, value="slow") == \
+        "'slow' is neither a number from .1 to 1.2 nor one of: A"
+    attack = 'live_set tracks 2 devices -1 parameters "Attack"'
+    assert run(script, "param_set_display", path=attack, value="10")["new"] == "10"
+
+
+def test_param_set_display_on_roar_blend_and_fb_note(script):
+    """Roar's Blend ("100 / 0" .. "0 / 100") collapsed to one value: "50 /
+    50" was refused, "25 / 75" set "0 / 100". FB Note shows note names."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Roar"])
+    blend = 'live_set tracks 2 devices -1 parameters "Blend"'
+    for shown in ("50 / 50", "25 / 75", "6 / 94", "100 / 0", "0 / 100", "94 / 6"):
+        assert run(script, "param_set_display", path=blend, value=shown)["new"] == shown
+    note = 'live_set tracks 2 devices -1 parameters "FB Note"'
+    for shown in ("F-1", "F#0", "F#3", "G#4", "C5", "C-1"):
+        assert run(script, "param_set_display", path=note, value=shown)["new"] == shown
+    assert run(script, "param_set_display", path=note, value="Bb2")["new"] == "A#2"
+    assert "outside the range of FB Note, C-1 to C5" in run_error(
+        script, "param_set_display", path=note, value="C6")
+    assert "shows note names (C3)" in run_error(script, "param_set_display", path=note,
+                                               value="40 %")
+
+
+MORPH = ["lp/bp", "bp/hp", "hp/no", "no/lp"]
+
+
+def _morph_display(value):
+    """Simpler's Filter Morph (Live 12.4.16): 0 lp/bp .. 75 no/lp, 100 no/lp."""
+    if value >= 1.0:
+        return "100 no/lp"
+    position = int(value * 16)
+    return "%d %s" % (25 * (position % 4), MORPH[position // 4])
+
+
+def test_param_set_display_on_filter_morph(script):
+    """Filter Morph counts from 0 in each section: it bisected by the number
+    alone ("25 lp/bp" set "25 no/lp")."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("Filter Morph", 0.0, display=_morph_display))
+    path = 'live_set tracks 1 devices 0 parameters "Filter Morph"'
+    for shown in ("25 lp/bp", "0 bp/hp", "0 hp/no", "0 no/lp", "75 no/lp", "100 no/lp"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def _fader_display(value):
+    """Like Live's faders and Compressor's Threshold: -inf dB at the bottom,
+    then -69.7 dB as the lowest number."""
+    return "-inf dB" if value < 0.004 else "%.1f dB" % (-70.0 + 76.0 * value)
+
+
+@pytest.mark.parametrize("name", ["Volume", "Send A", "Threshold"])
+def test_param_set_display_below_a_faders_lowest_level_is_inf(script, name):
+    """Below the lowest level a fader shows is -inf, as on Live's faders:
+    "-80 dB" on a send was refused, which broke set_track_mixer and
+    build_tracks (script 2.1.0 landed it on -69.7 dB)."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam(name, 0.5, display=_fader_display))
+    path = 'live_set tracks 1 devices 0 parameters "%s"' % name
+    for asked in ("-69.9 dB", "-70 dB", "-80 dB", "-100 dB", "-200 dB", "-inf dB"):
+        result = run(script, "param_set_display", path=path, value=asked)
+        assert result["new"] == "-inf dB" and result["raw_value"] == 0.0
+        assert asked == "-inf dB" or "set to -inf dB" in result["note"]
+    for asked, shown in (("-69.7 dB", "-69.7 dB"), ("-69.72 dB", "-69.7 dB"),
+                         ("-12 dB", "-12.0 dB")):
+        result = run(script, "param_set_display", path=path, value=asked)
+        assert result["new"] == shown and "note" not in result
+
+
+class _Float32Param(fake_live.FakeParam):
+    """Keeps its value as Live does, a float32 (here always rounded down)."""
+
+    def __setattr__(self, name, value):
+        if name == "value":
+            import struct
+            stored = struct.unpack("f", struct.pack("f", value))[0]
+            if stored > value:
+                stored = struct.unpack("f", struct.pack("f", value - abs(value) * 1e-7))[0]
+            value = stored
+        fake_live.FakeParam.__setattr__(self, name, value)
+
+
+def test_param_set_display_lands_inside_the_display(script):
+    """Limiter's Input Gain "12 dB" read back "11 dB": the value found at
+    the edge of "12 dB" was stored a hair below it."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(_Float32Param(
+        "Input Gain", 0.5, display=lambda v: "%.0f dB" % (-24.0 + 48.0 * v)))
+    path = 'live_set tracks 1 devices 0 parameters "Input Gain"'
+    for shown in ("12 dB", "11 dB", "21 dB", "-3 dB", "0 dB"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def test_param_set_display_writes_zero_as_asked(script):
+    """"0.0 %" came back "-0.0 %" (a hair below zero)."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam(
+        "Amount", 0.3, -1.0, 1.0, display=lambda v: "%.1f %%" % (100 * v)))
+    path = 'live_set tracks 1 devices 0 parameters "Amount"'
+    assert run(script, "param_set_display", path=path, value="0.0 %")["new"] == "0.0 %"
+
+
+def test_param_set_display_finds_a_display_shown_at_one_value_only(script):
+    """Operator's Freq<Vel (Live 12.4.16) shows "-50" at -50 exactly and
+    "-50.0" next to it: "-50" set "-50.0"."""
+    def show(value):
+        return "%d" % value if value == int(value) else "%.1f" % value
+
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("A Freq<Vel", 0.3, -100.0, 100.0,
+                                                 display=show))
+    path = 'live_set tracks 1 devices 0 parameters "A Freq<Vel"'
+    for shown in ("-50", "0", "50", "12.5", "-37.5"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def _sharp_note_display(value):
+    """Resonators' I Note (Live 12.4.16): sharps as "\u266f" ("C\u266f3")."""
+    return fake_live.note_display(value).replace("#", "\u266f")
+
+
+TI_RATES = ["1/128 T", "1/64 T", "1/64", "1/32 T", "1/32", "1/32 D", "1/8 T", "1/8",
+            "1/8 D", "1/4", "1/4 D", "1 T", "1", "1 D", "2", "2 D", "4 D"]
+
+
+def test_param_set_display_on_resonators_and_hybrid_reverb(script):
+    """"C3" on Resonators' I Note set E4 (its sharps are "\u266f"); Hybrid
+    Reverb's Ti Rate ("1/32 T", "1 D") and Vintage (Off .. Extreme, not
+    quantized) were misread or refused."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters += [
+        fake_live.FakeParam("I Note", 60.0, 12.0, 84.0, display=_sharp_note_display),
+        fake_live.FakeParam("Ti Rate", 0.0, 0.0, len(TI_RATES) - 1.0,
+                            display=lambda v: TI_RATES[min(int(v), len(TI_RATES) - 1)]),
+        fake_live.FakeParam("Vintage", 0.0, 0.0, 4.0, display=lambda v: [
+            "Off", "Subtle", "Old", "Older", "Extreme"][min(int(v), 4)])]
+    path = 'live_set tracks 1 devices 0 parameters "%s"'
+    for asked, shown in (("C3", "C3"), ("E-1", "E-1"), ("C#3", "C\u266f3"),
+                         ("C\u266f3", "C\u266f3"), ("A\u266f0", "A\u266f0"),
+                         ("Bb2", "A\u266f2")):
+        assert run(script, "param_set_display", path=path % "I Note", value=asked)["new"] \
+            == shown
+    for shown in TI_RATES:
+        assert run(script, "param_set_display", path=path % "Ti Rate", value=shown)["new"] \
+            == shown
+    for shown in ("Old", "Off", "Extreme", "subtle"):
+        assert run(script, "param_set_display", path=path % "Vintage", value=shown)["new"] \
+            == shown.title()
+    assert run_error(script, "param_set_display", path=path % "Vintage", value="2") == \
+        "'2' is not one of: Off, Subtle, Old, Older, Extreme"
+
+
+def test_param_set_display_never_reports_a_wrong_value(script):
+    """A display it cannot read (German note names: "H" for B) must not
+    lead it to set another value and report success."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam(
+        "Note", 60.0, 12.0, 84.0, display=lambda v: fake_live.note_display(v).replace("B", "H")))
+    path = 'live_set tracks 1 devices 0 parameters "Note"'
+    for note in range(12, 85):
+        asked = fake_live.note_display(note)
+        response = script._process_command({"type": "param_set_display",
+                                            "params": {"path": path, "value": asked}})
+        if response["status"] == "success":
+            assert response["result"]["new"] == asked.replace("B", "H") or \
+                parse_note_ok(response["result"]["new"], note)
+
+
+def parse_note_ok(shown, note):
+    return shown.replace("H", "B") == fake_live.note_display(note)
+
+
+def test_ratios_and_expansion_are_told_apart(script):
+    """"1:4" on Compressor's Ratio (which shows "4.00 : 1") read as 4 and
+    set 4:1."""
+    ratio = 'live_set tracks 2 devices -1 parameters "Ratio"'
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Compressor"])
+    assert "does not fit Ratio" in run_error(script, "param_set_display", path=ratio,
+                                             value="1:4")
+    assert run(script, "param_set_display", path=ratio, value="4:1")["new"] == "4.00 : 1"
+
+
+def test_param_set_display_on_the_crossfader(script):
+    """The crossfader (Live 12.4.16) shows "50A" .. "0" .. "50B": "50B" set
+    50A, A and B both reading 50."""
+    def show(value):
+        amount = int(round(abs(value) * 50))
+        return "0" if amount == 0 else "%d%s" % (amount, "A" if value < 0 else "B")
+
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("Crossfade", 0.0, -1.0, 1.0, display=show))
+    path = 'live_set tracks 1 devices 0 parameters "Crossfade"'
+    for shown, raw in (("50B", 1.0), ("25B", 0.5), ("0", 0.0), ("25A", -0.5), ("50A", -1.0)):
+        result = run(script, "param_set_display", path=path, value=shown)
+        assert result["new"] == shown and str(result["raw_value"]) == str(raw)
+    assert "crossfader positions" in run_error(script, "param_set_display", path=path,
+                                               value="25L")
+
+
+def test_param_set_display_prefers_the_middle_of_a_display(script):
+    """"C" on a pan landed on -0.01, "25L" off -0.5, "0 dB" off 0."""
+    pan = "live_set tracks 0 mixer_device panning"
+    assert run(script, "param_set_display", path=pan, value="C")["raw_value"] == 0.0
+    assert run(script, "param_set_display", path=pan, value="25L")["raw_value"] == -0.5
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("Gain", 3.0, -15.0, 15.0,
+                                                 display=lambda v: "%.1f dB" % v))
+    gain = 'live_set tracks 1 devices 0 parameters "Gain"'
+    result = run(script, "param_set_display", path=gain, value="0 dB")
+    assert result["raw_value"] == 0.0 and result["new"] == "0.0 dB"
+
+
+def test_param_set_display_takes_an_end_one_display_step_away(script):
+    """Past an end by one step of that end's display sets the end, with a
+    note, however the target is written; further is refused ("6 kHz" set
+    5.50 kHz, "0" set 0.20 silently, while "6.0 kHz" was refused)."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters += [
+        fake_live.FakeParam("Attack", 0.5, display=lambda v: "%.2f ms" % (0.01 + 999.99 * v ** 3)),
+        fake_live.FakeParam("X Over", 0.5, display=lambda v: "%.2f kHz" % (0.5 + 5.0 * v)),
+        fake_live.FakeParam("HiShelf Gain", 0.5, display=lambda v: "%.2f " % (0.2 + 0.8 * v))]
+    path = 'live_set tracks 1 devices 0 parameters "%s"'
+    for asked in ("0 ms", "0.0 ms", "0.00 ms", "0.000 ms"):
+        result = run(script, "param_set_display", path=path % "Attack", value=asked)
+        assert result["new"] == "0.01 ms"
+        assert result["note"] == "Attack's lowest is 0.01 ms: set to 0.01 ms"
+    assert "note" not in run(script, "param_set_display", path=path % "Attack", value="0.01 ms")
+    assert "outside" in run_error(script, "param_set_display", path=path % "Attack", value="-1 ms")
+    high = run(script, "param_set_display", path=path % "X Over", value="5.51 kHz")
+    assert high["new"] == "5.50 kHz" and high["note"] == \
+        "X Over's highest is 5.50 kHz: set to 5.50 kHz"
+    for asked in ("6 kHz", "6.0 kHz", "6000 Hz", "5.9 kHz", "5.52 kHz"):
+        assert "outside the range of X Over, 0.50 kHz to 5.50 kHz" in run_error(
+            script, "param_set_display", path=path % "X Over", value=asked)
+    for asked in ("0", "0.0", "0.18"):
+        assert "outside" in run_error(script, "param_set_display", path=path % "HiShelf Gain",
+                                      value=asked)
+    assert run(script, "param_set_display", path=path % "HiShelf Gain",
+               value="0.19")["note"] == "HiShelf Gain's lowest is 0.20: set to 0.20"
+
+
+def test_param_set_display_end_step_is_the_next_display(script):
+    """The end's step came from the first number of its display: on "1 :
+    2.00" that was 1, so "1:3" set 1 : 2.00; on Ti Rate "1/1000" set the
+    bottom and "7" the "4 D" top."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters += [
+        fake_live.FakeParam("Expansion Ratio", 0.5, display=lambda v: "1 : %.2f" % (1.0 + v)),
+        fake_live.FakeParam("Ti Rate", 0.0, 0.0, len(TI_RATES) - 1.0,
+                            display=lambda v: TI_RATES[min(int(v), len(TI_RATES) - 1)])]
+    path = 'live_set tracks 1 devices 0 parameters "%s"'
+    for asked in ("1:2.6", "1:3", "1:2.01"):
+        assert "outside the range of Expansion Ratio" in run_error(
+            script, "param_set_display", path=path % "Expansion Ratio", value=asked)
+    assert run(script, "param_set_display", path=path % "Expansion Ratio",
+               value="1:2")["new"] == "1 : 2.00"
+    for asked in ("1/256", "1/1000", "7", "8 D"):
+        assert "outside the range of Ti Rate" in run_error(
+            script, "param_set_display", path=path % "Ti Rate", value=asked)
+    assert run(script, "param_set_display", path=path % "Ti Rate", value="4 D")["new"] == "4 D"
+    # as in Live, where each step shows from half a step below (not stepped)
+    device.parameters.append(fake_live.FakeParam(
+        "Ti Rate 2", 0.0, 0.0, len(TI_RATES) - 1.0,
+        display=lambda v: TI_RATES[min(int(round(v)), len(TI_RATES) - 1)]))
+    for asked in ("1/256", "1/1000", "7"):
+        assert "outside the range" in run_error(
+            script, "param_set_display", path=path % "Ti Rate 2", value=asked)
+    # a stepped number takes half its last digit; an end whose neighbour
+    # reads finer still takes one digit of its own ("100 ms" beside "99.9 ms")
+    device.parameters += [
+        fake_live.FakeParam("Oct", 0.0, -3.0, 3.0, display=lambda v: "%+d st" % (v // 1)),
+        fake_live.FakeParam("Env Attack", 0.5, display=lambda v: (
+            "%.0f ms" if 100.0 * v >= 99.95 else "%.1f ms") % (100.0 * v))]
+    assert run(script, "param_set_display", path=path % "Oct", value="3.4")["new"] == "+3 st"
+    assert "outside" in run_error(script, "param_set_display", path=path % "Oct", value="3.6")
+    assert run(script, "param_set_display", path=path % "Env Attack",
+               value="100.4 ms")["new"] == "100 ms"
+    assert "outside" in run_error(script, "param_set_display", path=path % "Env Attack",
+                                  value="101.5 ms")
+
+
+def test_param_set_display_halfway_goes_up(script):
+    """"1" on Glue Compressor's Release lies halfway between ".8" and
+    "1.2": it went down silently; ties go to the larger number, noted."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device",
+        args=["Glue Compressor"])
+    release = 'live_set tracks 2 devices -1 parameters "Release"'
+    result = run(script, "param_set_display", path=release, value="1")
+    assert result["new"] == "1.2"
+    assert result["note"] == "'1' lies halfway between .8 and 1.2: set to 1.2"
+    assert "note" not in run(script, "param_set_display", path=release, value=".9")
+
+
+class _CountingParam(fake_live.FakeParam):
+    """Counts the values written to it."""
+
+    def __setattr__(self, name, value):
+        if name == "value":
+            object.__setattr__(self, "writes", getattr(self, "writes", 0) + 1)
+        fake_live.FakeParam.__setattr__(self, name, value)
+
+
+class _KeptLowParam(fake_live.FakeParam):
+    """Keeps a value a hair low, as Live kept Shifter's 0.25 (0.24999998)."""
+
+    def __setattr__(self, name, value):
+        if name == "value":
+            value = value - 1.5e-8
+        fake_live.FakeParam.__setattr__(self, name, value)
+
+
+def test_param_set_display_keeps_off_a_displays_edge(script):
+    """Shifter's "0.38 st" starts at exactly 0.25, which Live keeps as
+    0.24999998 ("0.37 st"): a rounded value at a display's edge is not
+    taken."""
+    import math
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(_KeptLowParam(
+        "LFO Amt St", 0.0, display=lambda v: "%.2f st" % (math.floor(v * 100 + 1e-12) / 100)))
+    path = 'live_set tracks 1 devices 0 parameters "LFO Amt St"'
+    for shown in ("0.25 st", "0.38 st", "0.50 st", "0.01 st"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def test_a_refused_display_writes_nothing(script):
+    """A refusal after writing put the old value back, which left an undo
+    step the journal did not count (agent_changes(undo=N) one short)."""
+    device = script._song.tracks[1].devices[0]
+    param = _CountingParam("Note", 60.0, 12.0, 84.0,
+                           display=lambda v: fake_live.note_display(v).replace("B", "H"))
+    device.parameters.append(param)
+    object.__setattr__(param, "writes", 0)
+    path = 'live_set tracks 1 devices 0 parameters "Note"'
+    refused = 0
+    for note in range(12, 85):
+        before = param.writes
+        response = script._process_command({"type": "param_set_display", "params": {
+            "path": path, "value": fake_live.note_display(note)}})
+        if response["status"] == "error":
+            refused += 1
+            assert param.writes == before
+        else:
+            assert param.writes == before + 1
+    assert refused
+
+
+def test_param_set_display_refuses_a_value_outside_the_range(script):
+    params = _drum_buss(script)
+    error = run_error(script, "param_set_display", path=params + "Transients", value="1.5")
+    assert error == "'1.5' is outside the range of Transients, -1.00 to 1.00"
+    assert "outside the range of Output, -36.0 dB to 12.0 dB" in run_error(
+        script, "param_set_display", path=params + "Output", value="20 dB")
+    assert "outside" in run_error(script, "param_set_display", path=params + "Output",
+                                  value="-inf dB")
+    assert "outside" in run_error(script, "param_set_display", path=params + "Drive", value=120)
+    # what rounds to the end of the range is still the end
+    assert run(script, "param_set_display", path=params + "Output", value="12.04 dB")["new"] \
+        == "12.0 dB"
+    pan = "live_set tracks 0 mixer_device panning"
+    assert "outside" in run_error(script, "param_set_display", path=pan, value="60R")
+    assert run(script, "param_set_display", path=pan, value="-10")["new"] == "10L"
+    vol = "live_set tracks 0 mixer_device volume"
+    assert run(script, "param_set_display", path=vol, value="-inf dB")["new"] == "-inf dB"
 
 
 def test_param_set_display_finds_values_by_bisection(script):
@@ -359,6 +820,13 @@ def test_tools_mixer_tracks_and_scenes(live_server):
     assert bass.mixer_device.volume.str_for_value(bass.mixer_device.volume.value) == "-6.0 dB"
     assert bass.mixer_device.panning.str_for_value(bass.mixer_device.panning.value) == "30R"
     assert bass.mute is True
+    # a part that fails makes the call an error, naming what did apply
+    with pytest.raises(Exception) as failed:
+        asyncio.run(call.mcp.call_tool("set_track_mixer", {
+            "track": "Bass", "pan": "25 %", "mute": False}))
+    text = str(failed.value)
+    assert "1 of 2 mixer changes failed" in text and "does not fit" in text and "mute" in text
+    assert bass.mute is False
     call("set_track_mixer", track="return A", volume_db=-3)
     assert song.return_tracks[0].mixer_device.volume.str_for_value(
         song.return_tracks[0].mixer_device.volume.value) == "-3.0 dB"
@@ -453,13 +921,23 @@ def test_tools_watch_and_events(live_server):
     assert call("get_live_events")["observers"] == []
 
 
+def test_tools_pass_on_what_was_set_instead(live_server):
+    """A note from param_set_display (the end, -inf, a tie) was dropped by
+    the tools' summaries."""
+    script, call = live_server
+    added = call("add_device", track="Bass", device="Compressor",
+                 settings={"Output": "36.004 dB", "Threshold": "-12 dB"})
+    assert added["notes"] == {"Output": "Output's highest is 36.00 dB: set to 36.00 dB"}
+    mixed = call("set_track_mixer", track="Bass", pan="50.4R")
+    assert mixed["steps"][0]["note"] == "Track Panning's highest is 50R: set to 50R"
+
+
 def test_tool_errors_are_reported_as_tool_errors(live_server):
     from mcp.server.mcpserver.exceptions import ToolError
 
     script, call = live_server
-    result = call("set_track_mixer", track="Nope", mute=True)
-    assert result["ok"] is False
-    assert "No item named 'Nope'" in result["steps"][0]["error"]
+    with pytest.raises(ToolError, match="No item named 'Nope'"):
+        call("set_track_mixer", track="Nope", mute=True)
     # The SDK turns the ToolError into a result with isError=true
     with pytest.raises(ToolError, match="manage_scene: Unknown action 'explode'"):
         call("manage_scene", action="explode", scene=0)
@@ -1205,6 +1683,52 @@ def test_browser_search_walks_in_slices_and_returns_loadable_ids(script):
                                     within=["Drum Hits", "Cowbell"])
 
 
+def test_browser_walk_takes_at_most_half_of_lives_time(script, monkeypatch):
+    """A client that asks for the next slice at once (2.4.3 and earlier)
+    gets a short one, so Live keeps half of its main thread; rest_ms says
+    how long to wait for a whole slice."""
+    clock = [1000.0]  # Live's clock stands still unless the test moves it
+    monkeypatch.setattr(script.module, "time",
+                        types.SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
+    first = run(script, "browser_search", query="a", roots=["drums", "samples"],
+                loadable_only=False, slice_ms=1000, max_results=1)
+    assert not first["done"] and first["rest_ms"] == first["busy_ms"] == 0
+    again = run(script, "browser_search", walk_id=first["walk_id"], slice_ms=1000,
+                max_results=500)
+    assert again["visited"] == first["visited"] + 1  # no rest: one item, no more
+    clock[0] += 0.5  # rested half a second: a slice as long
+    rested = run(script, "browser_search", walk_id=first["walk_id"], slice_ms=1000,
+                 max_results=500)
+    assert rested["done"] and rested["visited"] > again["visited"] + 1
+
+
+class _ItemVector(object):
+    """Like Live's vector of browser items: indexed, never listed whole."""
+
+    def __init__(self, items):
+        self.items = items
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+    def __iter__(self):
+        raise AssertionError("the walk listed a whole folder at once")
+
+
+def test_browser_walk_reads_a_folder_item_by_item(script):
+    browser = script.application().browser
+    big = fake_live.FakeBrowserItem("Big", [fake_live.FakeBrowserItem("Hit %d.wav" % i)
+                                            for i in range(50)])
+    object.__setattr__(big, "children", _ItemVector(big.children))
+    object.__setattr__(browser.samples, "children", _ItemVector([big]))
+    found = run(script, "browser_search", query="hit 4", roots=["samples"])
+    assert found["done"] and found["visited"] == 51
+    assert len(found["results"]) == 14  # Hit 4, 14, 24, 34 and 40 to 49
+
+
 def test_browser_ids_outlast_many_lom_objects(script):
     """A long walk (12,000 samples) used to push its results out of the shared
     4096-entry registry: browser_load then failed with "Unknown id"."""
@@ -1214,6 +1738,19 @@ def test_browser_ids_outlast_many_lom_objects(script):
         script._lom_register(object())
     assert run(script, "lom_get", path=f"id {item_id}", properties=["name"])["name"] == \
         found[0]["name"]
+
+
+def test_ref_takes_a_bare_id(script):
+    """Köprüaltı: {"$ref": <int>} said "Unknown root"; an id alone is an id."""
+    track_id = run(script, "lom_get", path="live_set tracks 2", properties=["name"])["$id"]
+    for ref in (track_id, str(track_id), "id %d" % track_id):
+        run(script, "lom_set", path="live_set view", property="selected_track",
+            value={"$ref": ref})
+        assert script._song.view.selected_track is script._song.tracks[2]
+        script._song.view.selected_track = script._song.tracks[0]
+    assert run(script, "lom_get", path=str(track_id), properties=["name"])["name"] == "Vox"
+    error = run_error(script, "lom_get", path="tracks 0", properties=["name"])
+    assert "Unknown root 'tracks'" in error and '{"$id": N}' in error
 
 
 def test_browser_tools_search_load_and_preview(live_server):
@@ -2664,6 +3201,61 @@ def test_an_exact_name_ends_the_browser_walk(monkeypatch):
     assert len(walks) == 3 and walks[-1] == {"walk_id": 1, "cancel": True}
     assert sent[-1] == ("lom_call", {"path": "live_app browser", "method": "preview_item",
                                      "args": [{"$ref": "id 2"}]})
+
+
+def test_browser_search_rests_between_slices(monkeypatch):
+    """Script 2.2 says how long Live should rest after a slice (rest_ms);
+    the server waits that long (at most 0.5 s) before asking for the next."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    replies = [{"walk_id": 1, "done": False, "visited": 5, "results": [], "rest_ms": 60.0},
+               {"walk_id": 1, "done": False, "visited": 9, "results": [], "rest_ms": 900},
+               {"walk_id": 1, "done": False, "visited": 10, "results": [], "rest_ms": -5},
+               {"walk_id": 1, "done": True, "visited": 12, "results": []}]
+    sent, slept = [], []
+
+    def send(command, params=None, timeout=None):
+        sent.append(params)
+        return replies[len(sent) - 1]
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    monkeypatch.setattr(extended_tools.time, "sleep", slept.append)
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    asyncio.run(mcp.call_tool("browser_search", {"query": "zzz"}))
+    assert slept == [0.06, 0.5, 0.0] and sent[0]["slice_ms"] == 60
+
+
+def test_browser_search_time_limit_leaves_out_the_rests(monkeypatch):
+    """Resting between slices does not make a search cover less ground: its
+    20 s count only the time Live was asked to walk."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    clock = [0.0]
+    walks = []
+
+    def send(command, params=None, timeout=None):
+        if params.get("cancel"):
+            return {}
+        walks.append(params)
+        clock[0] += 1.0  # each slice takes a second
+        return {"walk_id": 1, "done": False, "visited": len(walks), "results": [],
+                "rest_ms": 500}
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    monkeypatch.setattr(extended_tools.time, "sleep", sleep)
+    monkeypatch.setattr(extended_tools.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    asyncio.run(mcp.call_tool("browser_search", {"query": "zzz"}))
+    assert len(walks) == 21  # 20 s of slices; the rests added 10 s more
 
 
 def test_explicit_sound_names_prefer_the_exact_item(live_server):

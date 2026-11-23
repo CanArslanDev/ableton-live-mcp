@@ -105,4 +105,5 @@ Connection refused, timeouts or "older than this server" errors: run
 A call that was interrupted, rejected or timed out may still have reached
 Live: read the track's devices (`get_session_overview()`) before retrying,
 or the retry adds a second device. Results with `ok: false` list what
-failed under `errors`; `renamed` says which parameter a setting went to.
+failed under `errors`; `renamed` says which parameter a setting went to,
+`notes` (`setting_notes` in `build_tracks`) where a value landed instead.
