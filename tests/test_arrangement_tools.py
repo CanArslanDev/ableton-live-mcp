@@ -58,9 +58,11 @@ def played(track_state, start, end):
 
 def test_automation_lands_without_touching_the_notes(sim):
     before = played(sim.state()["tracks"][1], 0, 16)
+    sim.song.current_song_time = 2.0
     result = call("write_arrangement_automation", track="Bass", device="Operator",
                   parameter="Filter Freq", start_bar=2, bars=2, shape="ramp_up")
     assert result["parameter"] == "Filter Freq" and result["notes"] == 8
+    assert sim.song.current_song_time == 2.0  # Live moved it to the copy; put back
     bass = sim.state()["tracks"][1]
     spans = [(c["start_time"], c["end_time"], c["name"]) for c in bass["arrangement_clips"]]
     assert spans == [(0, 4, "Bassline"), (4, 12, "Bassline"), (12, 16, "Bassline")]
@@ -167,3 +169,16 @@ def test_recorded_automation_on_the_main_track(sim):
     call("agent_changes", undo=1)
     state = sim.state()
     assert "automation" not in state["master"] and state["master"]["volume"]["value"] == 0.85
+
+
+def test_undo_brings_covered_clips_back_alive(sim):
+    """A gap laid over the whole bassline replaces it (the clip is gone);
+    agent_changes(undo=1) puts it back, readable as in Live."""
+    before = played(sim.state()["tracks"][1], 0, 16)
+    call("design_transition", kind="gap", at_bar=5, bars=4, tracks=["Bass"])
+    assert played(sim.state()["tracks"][1], 0, 16) == []
+    call("agent_changes", undo=1)
+    bass = sim.state()["tracks"][1]
+    assert [c["name"] for c in bass["arrangement_clips"]] == ["Bassline"]
+    assert played(bass, 0, 16) == before
+    assert sim.song.tracks[1].arrangement_clips[0].end_time == 16.0

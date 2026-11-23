@@ -436,32 +436,38 @@ def create_clip(ctx: Context, track_index: int, clip_index: int, length: float =
         return f"Error creating clip: {str(e)}"
 
 @legacy_tool("core")
-def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str) -> str:
+def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str,
+                      warping: bool | None = None, bars: float | None = None) -> str:
     """
-    Create a new audio clip in an audio track's clip slot by importing a file.
+    Create a new audio clip in an audio track's clip slot by importing a file
+    (Live 12.0.5+). path: absolute path to an audio file; the slot must be empty.
 
-    Requires Ableton Live 12.0.5 or newer — the underlying
-    ClipSlot.create_audio_clip Live API was introduced in 12.0.5 and is not
-    available in earlier 12.0.x releases.
-
-    Parameters:
-    - track_index: The index of the audio track to create the clip in
-    - clip_index: The index of the clip slot to create the clip in
-    - path: Absolute path to a supported audio file (e.g. a .wav). The target
-      track must be an audio track and the clip slot must be empty.
+    Live may warp it at a wrong tempo: the result gives its length in beats
+    and Live's tempo reading, with a warning when they look wrong.
+    warping=false plays the file as recorded; bars warps it to that length.
     """
     try:
+        from .extended_tools import check_fit, fit_audio_clip
+
+        check_fit(warping, bars)  # before the clip is made
         ableton = get_ableton_connection()
         result = ableton.send_command("create_audio_clip", {
             "track_index": track_index,
             "clip_index": clip_index,
             "path": path
         })
-        # Live moves a new clip's start to the file's first transient: back to the file's start
-        from .extended_tools import from_its_start
-        ableton.send_command("batch", {"commands": from_its_start(
-            f"live_set tracks {int(track_index)} clip_slots {int(clip_index)} clip"), "stop_on_error": False})
-        return f"Created audio clip '{result.get('name', 'clip')}' at track {track_index}, slot {clip_index} (length {result.get('length', '?')} beats)"
+        # Live moves a new clip's start to the file's first transient and may
+        # warp it at a wrong tempo: the start goes back, the length is checked
+        made = (f"Created audio clip '{result.get('name', 'clip')}' at track {track_index}, "
+                f"slot {clip_index}")
+        try:
+            report = fit_audio_clip(
+                f"live_set tracks {int(track_index)} clip_slots {int(clip_index)} clip",
+                warping, bars)
+        except Exception as e:  # the clip is there: say so, and what failed
+            logger.error(f"Checking the new audio clip failed: {str(e)}")
+            return f"{made}, but setting it up failed (its start, warping or length): {str(e)}"
+        return f"{made}: " + json.dumps(report, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error creating audio clip: {str(e)}")
         return f"Error creating audio clip: {str(e)}"
@@ -943,27 +949,18 @@ def duplicate_to_arrangement(
     track_index: int,
     clip_index: int,
     destination_time: float,
+    length: float | None = None,
 ) -> str:
     """Copy a Session clip (track_index, clip_index) into the Arrangement on the
-    same track, destination_time beats from the start. build_arrangement lays out
-    whole sections in one call.
+    same track, destination_time beats from the start; length (beats) sizes
+    the copy. Returns where it landed. build_arrangement lays out whole
+    sections in one call.
     """
     try:
-        ableton = get_ableton_connection()
-        result = ableton.send_command(
-            "duplicate_session_clip_to_arrangement",
-            {
-                "track_index": track_index,
-                "clip_index": clip_index,
-                "destination_time": destination_time
-            }
-        )
-        clip_name = result.get("clip_name", "clip")
-        track_name = result.get("track_name", f"track {track_index}")
-        return (
-            f"Duplicated '{clip_name}' from Session slot {clip_index} "
-            f"on '{track_name}' to arrangement at beat {destination_time}"
-        )
+        from .extended_tools import duplicate_session_clip
+
+        return json.dumps(duplicate_session_clip(track_index, clip_index, destination_time,
+                                                 length), separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error duplicating clip to arrangement: {str(e)}")
         return f"Error duplicating clip to arrangement: {str(e)}"

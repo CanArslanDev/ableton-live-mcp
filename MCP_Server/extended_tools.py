@@ -606,8 +606,9 @@ def prepare_clip(track: int | str, clip_index: int | None, length: float,
     if PREVIEW.get():
         return ""
     if arrangement_time is not None:
-        created = send("lom_call", {"path": track_path(track), "method": "create_midi_clip",
-                                    "args": [float(arrangement_time), float(length)]})
+        with playhead_put_back():
+            created = send("lom_call", {"path": track_path(track), "method": "create_midi_clip",
+                                        "args": [float(arrangement_time), float(length)]})
         clip_id = created["result"]["$id"]
         path = f"id {clip_id}"
     else:
@@ -747,12 +748,74 @@ def previewable(fn: Callable) -> Callable:
 def keeping_arms(fn: Callable) -> Callable:
     """Run a tool that creates tracks or lands devices inside arms_put_back:
     Live selects each new track (after the command), so the user's selection
-    and arms are read first and put back at the end."""
+    and arms are read first and put back at the end. The playhead too
+    (playhead_put_back), as these tools make Arrangement clips."""
     @functools.wraps(fn)
     def run(*args: Any, **kwargs: Any) -> Any:
-        with arms_put_back():
+        with arms_put_back(), playhead_put_back():
             return fn(*args, **kwargs)
     return run
+
+
+def keeping_playhead(fn: Callable) -> Callable:
+    """Run a tool that makes Arrangement clips inside playhead_put_back."""
+    @functools.wraps(fn)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        with playhead_put_back():
+            return fn(*args, **kwargs)
+    return run
+
+
+# Set while a playhead_put_back is open: one inside it reads and restores nothing
+PLAYHEAD_KEPT: contextvars.ContextVar[bool] = contextvars.ContextVar("playhead_kept",
+                                                                     default=False)
+
+
+async def keeping_the_playhead(step: Any) -> Any:
+    """Await a step (a coroutine) that makes an Arrangement clip, the
+    playhead put back afterwards (playhead_put_back, for async tools)."""
+    if PLAYHEAD_KEPT.get():
+        return await step
+    try:
+        before = await asend("lom_get", {"path": "live_set",
+                                         "properties": ["current_song_time", "is_playing"]})
+    except BaseException:
+        if asyncio.iscoroutine(step):
+            step.close()  # never started: no "never awaited" warning
+        raise
+    try:
+        return await step
+    finally:
+        if before.get("is_playing") is False:
+            await asend("lom_set", {"path": "live_set", "property": "current_song_time",
+                                    "value": float(before["current_song_time"])})
+
+
+@contextlib.contextmanager
+def playhead_put_back():
+    """Live 12.4.16 moves the stopped playhead to each clip that
+    duplicate_clip_to_arrangement, create_midi_clip or create_audio_clip
+    makes in the Arrangement: it goes back where it was (not while Live
+    plays; no undo step). Inside another, it does nothing."""
+    if PLAYHEAD_KEPT.get():
+        yield
+        return
+    try:
+        before = lom_get("live_set", ["current_song_time", "is_playing"])
+    except Exception as e:  # no Live to ask (tests, previews)
+        logger.debug("No playhead read: %s", e)
+        before = None
+    token = PLAYHEAD_KEPT.set(True)
+    try:
+        yield
+    finally:
+        PLAYHEAD_KEPT.reset(token)
+        if isinstance(before, dict) and before.get("is_playing") is False and not PREVIEW.get():
+            try:
+                send("lom_set", {"path": "live_set", "property": "current_song_time",
+                                 "value": float(before["current_song_time"])})
+            except Exception as e:
+                logger.warning("Could not put the playhead back: %s", e)
 
 
 def song_context(optional: bool = False) -> dict:
@@ -1194,7 +1257,26 @@ def delete_strays(placed: list[dict], before: list[float]) -> list[dict]:
     return out
 
 
-def place_locators(cues: list[tuple[str, float]], zoom: bool = True) -> list[dict]:
+def delete_cues(times: list[float]) -> list[dict]:
+    """Delete the cues at these beats (each: move the playhead there, read
+    back, toggle in the next call); [{name, time}] of those gone. The
+    playhead goes back."""
+    cues = [c for c in lom_get("live_set cue_points", ["name", "time"])["items"]
+            if any(abs(c["time"] - t) < 1e-3 for t in times)]
+    if not cues:
+        return []
+    original = _playhead()
+    for cue in cues:
+        if _move_playhead(float(cue["time"])) is None:
+            send("lom_call", {"path": "live_set", "method": "set_or_delete_cue"})
+    left = [c["time"] for c in lom_get("live_set cue_points", ["time"])["items"]]
+    send("lom_set", {"path": "live_set", "property": "current_song_time", "value": original})
+    return [{"name": c["name"], "time": c["time"]} for c in cues
+            if all(abs(c["time"] - t) > 1e-3 for t in left)]
+
+
+def place_locators(cues: list[tuple[str, float]], zoom: bool = True,
+                   remove: list[float] = ()) -> list[dict]:
     """Create or rename named locators at beat positions.
 
     Song.set_or_delete_cue() toggles a cue at the playhead, and a playhead
@@ -1204,11 +1286,13 @@ def place_locators(cues: list[tuple[str, float]], zoom: bool = True) -> list[dic
     (arrangement_zoomed_in) and a cue Live still put at another beat is
     deleted (delete_strays), its row's error saying where it went; without,
     the caller does both. Existing cues are only renamed, and the playhead
-    goes back where it was.
+    goes back where it was. remove: beats of cues to delete first (with
+    zoom; delete_cues), reported in a last row {"deleted": [...]}.
     """
     if zoom:
-        before = [float(c["time"]) for c in lom_get("live_set cue_points", ["time"])["items"]]
         with arrangement_zoomed_in() as zoom_errors:
+            deleted = delete_cues(list(remove)) if remove else []
+            before = [float(c["time"]) for c in lom_get("live_set cue_points", ["time"])["items"]]
             result = place_locators(cues, zoom=False)
             moved = delete_strays(result, before) if any("error" in r for r in result) else []
         for row in result:
@@ -1220,7 +1304,7 @@ def place_locators(cues: list[tuple[str, float]], zoom: bool = True) -> list[dic
                                  + (", deleted" if went["deleted"] else ", left there"))
             if zoom_errors:
                 row["error"] += f" (zooming the Arrangement in failed: {zoom_errors[0]})"
-        return result
+        return result + ([{"deleted": deleted}] if remove else [])
 
     def current() -> list[dict]:
         return lom_get("live_set cue_points", ["name", "time"])["items"]
@@ -1458,6 +1542,7 @@ def arrangement_notes(track: int | str, start: float, end: float) -> tuple[list[
     return notes, clips
 
 
+@keeping_playhead
 def rewrite_range(track: int | str, start: float, end: float, notes: list[dict],
                   envelopes: list[tuple[str, list[dict]]] = (), name: str | None = None,
                   color_index: int | None = None) -> dict:
@@ -1474,16 +1559,9 @@ def rewrite_range(track: int | str, start: float, end: float, notes: list[dict],
         raise ValueError("This works on MIDI tracks: Live takes envelopes only on Session clips "
                          "and cannot rebuild audio from notes. For automation on an audio track, "
                          "a return or the main track use record_automation")
-    slots = lom_get(f"{tp} clip_slots", ["has_clip"])["items"]
-    free = next((i for i, s in enumerate(slots) if not s.get("has_clip")), None)
-    added_scene = None
-    if free is None:
-        send("lom_call", {"path": "live_set", "method": "create_scene", "args": [-1]})
-        free = added_scene = len(slots)
-    slot = f"{tp} clip_slots {free}"
-    scratch = f"{slot} clip"
-    send("lom_call", {"path": slot, "method": "create_clip", "args": [float(end - start)]})
-    try:
+    with scratch_slot(tp) as slot:
+        scratch = f"{slot} clip"
+        send("lom_call", {"path": slot, "method": "create_clip", "args": [float(end - start)]})
         ops = [op_set(scratch, "name", name)] if name else []
         if color_index is not None:
             ops.append(op_set(scratch, "color_index", int(color_index)))
@@ -1497,11 +1575,476 @@ def rewrite_range(track: int | str, start: float, end: float, notes: list[dict],
                                          "points": steps})
         send("lom_call", {"path": tp, "method": "duplicate_clip_to_arrangement",
                           "args": [ref(scratch), float(start)]})
-    finally:
-        send("lom_call", {"path": slot, "method": "delete_clip"})
-        if added_scene is not None:
-            send("lom_call", {"path": "live_set", "method": "delete_scene", "args": [added_scene]})
     return {"from_beat": start, "to_beat": end, **transitions.summary(notes)}
+
+
+@contextlib.contextmanager
+def scratch_slot(tp: str):
+    """An empty Session slot of the track for a clip to be copied into the
+    Arrangement (a scene is added when none is free); whatever is in it
+    afterwards is deleted, and the scene too."""
+    slots = lom_get(f"{tp} clip_slots", ["has_clip"])["items"]
+    free = next((i for i, s in enumerate(slots) if not s.get("has_clip")), None)
+    added_scene = None
+    if free is None:
+        send("lom_call", {"path": "live_set", "method": "create_scene", "args": [-1]})
+        free = added_scene = len(slots)
+    slot = f"{tp} clip_slots {free}"
+    failure: BaseException | None = None
+    try:
+        yield slot
+    except BaseException as e:
+        failure = e
+        raise
+    finally:
+        problems = []
+        try:
+            if lom_get(slot, ["has_clip"]).get("has_clip"):
+                send("lom_call", {"path": slot, "method": "delete_clip"})
+        except Exception as e:
+            problems.append(f"the scratch clip in {slot} was not deleted: {e}")
+        if added_scene is not None:
+            try:
+                send("lom_call", {"path": "live_set", "method": "delete_scene",
+                                  "args": [added_scene]})
+            except Exception as e:
+                problems.append(f"the scratch scene {added_scene} was not deleted: {e}")
+        if problems:
+            if failure is not None:  # both said, the step's failure first
+                raise RuntimeError("; ".join([str(failure)] + problems)) from failure
+            raise RuntimeError("; ".join(problems))
+
+
+# Beats a MIDI file's last note may end past a bar line without import_midi_file
+# adding a bar for it (a release tail)
+MIDI_TAIL_TOLERANCE = 0.25
+
+# A Session clip's fields that size its copy in the Arrangement
+SIZE_FIELDS = ["name", "length", "looping", "loop_start", "loop_end", "start_marker",
+               "end_marker", "is_midi_clip", "warping"]
+
+
+def sized_copy(tp: str, source: str, at: float, info: dict,
+               length: float | None = None) -> list[dict]:
+    """Steps copying the Session clip at `source` (info: its SIZE_FIELDS)
+    into the track's Arrangement at `at`, `length` beats long (default its
+    own). Live 12.4.16 makes the copy as long as the clip's `length`
+    (loop_end - loop_start, looped or not; an unlooped clip's end_marker
+    does not shorten it), so loop_end is moved for the copy and put back,
+    the markers after it. Not for unwarped audio (trimmed_copies)."""
+    dup = op_call(tp, "duplicate_clip_to_arrangement", ref(source), float(at))
+    own = float(info["length"])
+    if length is None or abs(float(length) - own) < 1e-6 or own <= 0:
+        return [dup]
+    loop_start, loop_end = float(info["loop_start"]), float(info["loop_end"])
+    return [op_set(source, "loop_end", loop_start + float(length)), dup,
+            op_set(source, "loop_end", loop_end),
+            op_set(source, "start_marker", float(info["start_marker"])),
+            op_set(source, "end_marker", float(info["end_marker"]))]
+
+
+def unwarped(info: dict) -> bool:
+    return info.get("is_midi_clip") is False and info.get("warping") is False
+
+
+def trimmed_copies(jobs: list[tuple[str, str, float, float, float]],
+                   tempo: float) -> list[dict]:
+    """Copies of unwarped Session audio clips, each (track path, clip path,
+    at, length in beats, the clip's own length): such a clip keeps the
+    length its warp tempo guess gave it whatever its loop (Live 12.4.16), so
+    each is copied past everything on its track (each copy past the one
+    before: a copy laid over another replaces it), trimmed there (an
+    unlooped Arrangement clip ends at its loop_end, in seconds), copied from
+    there, and the scratch copies are deleted whatever fails. Three
+    commands: Live updates a trimmed clip's span only after the command that
+    trims it. One result per job, in order: the final copy's duplicate step,
+    or an error step; never raises."""
+    if not jobs:
+        return []
+    scratch: list[tuple[int, str, int]] = []
+    failed: list[dict | None] = [None] * len(jobs)
+    out: list[dict] = []
+    try:
+        cursor: dict[str, float | None] = {}
+        for tp in dict.fromkeys(tp for tp, *_rest in jobs):  # one read per track
+            try:
+                cursor[tp] = past_the_end(tp, 0.0)
+            except Exception as e:
+                cursor[tp] = None
+                for k, job in enumerate(jobs):
+                    if job[0] == tp:
+                        failed[k] = {"status": "error", "message": f"no scratch place: {e}"}
+        places: list[float | None] = []
+        for tp, _source, _at, _length, own in jobs:
+            places.append(cursor[tp])
+            if cursor[tp] is not None:
+                cursor[tp] += (int(max(float(own), 0.0) // 16) + 2) * 16
+        todo = [k for k, at in enumerate(places) if at is not None]
+        made = batch([op_call(jobs[k][0], "duplicate_clip_to_arrangement", ref(jobs[k][1]),
+                              places[k]) for k in todo], stop_on_error=False)["results"] \
+            if todo else []
+        first: list[dict] = [failed[k] or {} for k in range(len(jobs))]
+        for k, step in zip(todo, made):
+            first[k] = step
+        ids: list[int | None] = []
+        for k, ((tp, *_rest), step) in enumerate(zip(jobs, first)):
+            cid = ((step.get("result") or {}).get("result") or {}).get("$id") \
+                if step.get("status") == "success" else None
+            ids.append(cid)
+            if cid is None:
+                failed[k] = failed[k] or step or {"status": "error", "message": "no copy made"}
+            else:
+                scratch.append((k, tp, cid))
+        rows = lom_get_many([f"id {cid}" for cid in ids if cid is not None], ["loop_start"])
+        trims, live = [], iter(rows)
+        for k, ((_tp, _source, _at, length, _own), cid) in enumerate(zip(jobs, ids)):
+            if cid is None:
+                continue
+            loop_start = next(live).get("loop_start")
+            if not isinstance(loop_start, (int, float)) or isinstance(loop_start, bool):
+                failed[k] = {"status": "error", "message": f"Live lost the scratch copy: {loop_start}"}
+                ids[k] = None
+                continue
+            trims.append((k, op_set(f"id {cid}", "loop_end",
+                                    float(loop_start) + float(length) * 60.0 / tempo)))
+        if trims:
+            for (k, _op), step in zip(trims, batch([op for _k, op in trims],
+                                                   stop_on_error=False)["results"]):
+                if step.get("status") == "error":
+                    failed[k], ids[k] = step, None
+        wanted = [(k, op_call(tp, "duplicate_clip_to_arrangement", ref(f"id {ids[k]}"), float(at)))
+                  for k, (tp, _source, at, *_rest) in enumerate(jobs) if ids[k] is not None]
+        done = batch([op for _k, op in wanted], stop_on_error=False)["results"] if wanted else []
+        for (k, _op), step in zip(wanted, done):
+            failed[k] = step
+        out = [step or {"status": "error", "message": "no copy made"} for step in failed]
+    except Exception as e:  # a lost connection, say: each job not done says so
+        out = [step if step and step.get("status") == "error"
+               else {"status": "error", "message": str(e)} for step in failed]
+    # the scratch copies go whatever happened; one left behind is an error of its job
+    try:
+        gone = batch([op_call(tp, "delete_clip", ref(f"id {cid}")) for _k, tp, cid in scratch],
+                     stop_on_error=False)["results"] if scratch else []
+    except Exception as e:
+        gone = [{"status": "error", "message": str(e)}] * len(scratch)
+    for (k, _tp, cid), step in zip(scratch, gone):
+        if step.get("status") == "error":
+            out[k] = {"status": "error", "message": f"a scratch copy (id {cid}) is left past "
+                      f"the end of the track: {step.get('message')}"}
+    return out
+
+
+def lom_get_many(paths: list[str], properties: list[str]) -> list[dict]:
+    """Several objects' properties in one round trip ({} for one that
+    fails; a property Live could not read is left out: Live answers a
+    deleted object's properties with {"$error": …})."""
+    if not paths:
+        return []
+    result = batch([{"type": "lom_get", "params": {"path": p, "properties": properties}}
+                    for p in paths], stop_on_error=False)
+    return [{k: v for k, v in step["result"].items()
+             if not (isinstance(v, dict) and "$error" in v)}
+            if step.get("status") != "error" and isinstance(step.get("result"), dict) else {}
+            for step in result["results"]]
+
+
+def past_the_end(tp: str, at: float) -> float:
+    """A beat after every clip in the track's Arrangement and after `at`
+    (whole bars of 4/4 beyond), for a scratch copy (sized_copy)."""
+    ends = [c["end_time"] for c in lom_get(f"{tp} arrangement_clips", ["end_time"])["items"]]
+    return float((int(max(ends + [at]) // 16) + 64) * 16)
+
+
+def copy_warnings(info: dict, tempo: float, length: float | None = None,
+                  takes_length: bool = True) -> list[str]:
+    """What a Session clip's copy will get wrong, from its SIZE_FIELDS: an
+    unlooped clip whose end_marker is before its loop_end (Live copies to
+    loop_end), an unwarped audio clip whose length in beats (Live's warp
+    tempo guess) is not its loop's seconds at the set's tempo. takes_length:
+    the caller has a length to pass (duplicate_to_arrangement)."""
+    passing = "pass the length or " if takes_length else ""
+    out = []
+    name = info.get("name") or "The clip"
+    span = float(info["loop_end"]) - float(info["loop_start"])
+    if info.get("is_midi_clip") is False and info.get("warping") is False:
+        real = span * tempo / 60.0  # unwarped: loop times are seconds
+        if length is None and abs(real - float(info["length"])) > max(0.05, 0.005 * real):
+            out.append(f"{name} is unwarped: Live copies it as {float(info['length']):g} beats "
+                       f"(its warp tempo guess), but it plays {real:g} beats at {tempo:g} BPM; "
+                       f"{passing}recreate it with create_audio_clip(warping=false)")
+    elif info.get("looping") is False and length is None \
+            and float(info["end_marker"]) < float(info["loop_end"]) - 1e-6:
+        out.append(f"{name} is unlooped with end_marker {float(info['end_marker']):g} before "
+                   f"loop_end {float(info['loop_end']):g}: Live copies it to loop_end "
+                   f"({span:g} beats); {passing}set loop_end")
+    return out
+
+
+def duplicate_session_clip(track: int | str, clip_index: int, at: float,
+                           length: float | None = None) -> dict:
+    """Copy a Session clip into the track's Arrangement at `at` (sized_copy)
+    and say where it landed: start_time, end_time, and warnings when that is
+    not what was asked or the copy is not what the clip plays (copy_warnings)."""
+    if length is not None and float(length) <= 0:
+        raise ValueError(f"length must be more than 0 beats (got {length})")
+    tp = track_path(track)
+    source = f"{tp} clip_slots {int(clip_index)} clip"
+    if not lom_get(f"{tp} clip_slots {int(clip_index)}", ["has_clip"]).get("has_clip"):
+        raise ValueError(f"No clip in slot {clip_index}")
+    info = lom_get(source, SIZE_FIELDS)
+    tempo = float(lom_get("live_set", ["tempo"])["tempo"])
+    with playhead_put_back():
+        if unwarped(info) and length is not None:
+            steps = trimmed_copies([(tp, source, float(at), float(length),
+                                     float(info["length"]))], tempo)
+        else:  # the loop is put back whatever happens
+            steps = batch(sized_copy(tp, source, float(at), info, length),
+                          stop_on_error=False)["results"]
+    dup = next((s for s in steps if s.get("type") == "lom_call" and isinstance(s.get("result"), dict)
+                and s["result"].get("method") == "duplicate_clip_to_arrangement"), None)
+    if dup is None or any(s.get("status") == "error" for s in steps):
+        raise RuntimeError("; ".join(s.get("message", "") for s in steps
+                                     if s.get("status") == "error") or "Live made no copy")
+    held = lom_get(f"id {dup['result']['result']['$id']}", ["name", "start_time", "end_time"])
+    want = float(at) + float(length if length is not None else info["length"])
+    result: dict[str, Any] = {"clip": held.get("name"), "start_time": held["start_time"],
+                              "end_time": held["end_time"]}
+    warnings = copy_warnings(info, tempo, length)
+    if abs(held["start_time"] - float(at)) > 1e-6 or abs(held["end_time"] - want) > 1e-6:
+        warnings.append(f"Live placed it at beats {held['start_time']:g}-{held['end_time']:g}, "
+                        f"not {float(at):g}-{want:g}")
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+@keeping_playhead
+def cut_ranges(track: int | str, ranges: list[tuple[float, float]]) -> dict:
+    """Leave nothing in the track's Arrangement between each (start, end):
+    clips inside go (Track.delete_clip), clips across a boundary are split
+    there first by laying a short copy over it and deleting the copy (a copy
+    laid over a clip splits it, MIDI and audio alike, Live 12.4.16). The
+    copy comes from a scratch Session clip: an empty MIDI clip, or an audio
+    clip of a file a clip there plays, looped to its first beat.
+    {"clips_removed": n, "clips_trimmed": n (cut at an edge), "left": [...]}
+    (left: clips still in a range)."""
+    tp = track_path(track)
+    ranges = [(float(a), float(b)) for a, b in ranges if b - a > 1e-6]
+
+    def clips() -> list[dict]:
+        return lom_get(f"{tp} arrangement_clips", ["start_time", "end_time", "is_midi_clip"])["items"]
+
+    def inside(c: dict) -> bool:
+        return any(c["start_time"] >= a - 1e-6 and c["end_time"] <= b + 1e-6 for a, b in ranges)
+
+    def across(c: dict) -> bool:
+        return any(c["start_time"] < b - 1e-6 and c["end_time"] > a + 1e-6 for a, b in ranges) \
+            and not inside(c)
+
+    now = clips()
+    removed = sum(1 for c in now if inside(c))
+    trimmed = sum(1 for c in now if across(c))
+    if not removed and not trimmed:
+        return {"clips_removed": 0, "clips_trimmed": 0}
+    width = min([1.0] + [b - a for a, b in ranges])
+
+    def over(c: dict, edge: float) -> bool:  # across the edge, not just touching it
+        return c["start_time"] < edge - 1e-6 and c["end_time"] > edge + 1e-6
+
+    cuts = [(a, c) for a, b in ranges for c in now if over(c, a)] \
+        + [(b - width, c) for a, b in ranges for c in now if over(c, b)]
+    at = sorted({t for t, _c in cuts})
+    if at:
+        audio = next((c for _t, c in cuts if c.get("is_midi_clip") is False), None)
+        with scratch_slot(tp) as slot:
+            if audio is None:  # the clips are MIDI, so is the track
+                send("lom_call", {"path": slot, "method": "create_clip", "args": [width]})
+            else:
+                file = lom_get(f"id {audio['$id']}", ["file_path"])["file_path"]
+                send("lom_call", {"path": slot, "method": "create_audio_clip", "args": [file]})
+                # Live may leave a new clip unwarped (Auto-Warp Long Samples off):
+                # warped again, its loop is in beats (Live 12.4.16)
+                batch([op_set(f"{slot} clip", "warping", True),
+                       op_set(f"{slot} clip", "looping", True),
+                       op_set(f"{slot} clip", "loop_start", 0.0),
+                       op_set(f"{slot} clip", "loop_end", width)])
+            batch([op_call(tp, "duplicate_clip_to_arrangement", ref(f"{slot} clip"), t)
+                   for t in at])
+        now = clips()
+    doomed = [c for c in now if inside(c)]
+    if doomed:
+        batch([op_call(tp, "delete_clip", ref(f"id {c['$id']}")) for c in doomed],
+              stop_on_error=False)
+    result: dict[str, Any] = {"clips_removed": removed, "clips_trimmed": trimmed}
+    left = [c for c in clips() if inside(c) or across(c)]
+    if left:
+        result["left"] = [[c["start_time"], c["end_time"]] for c in left]
+    return result
+
+
+def audio_seconds(info: dict) -> float | None:
+    """A clip's file length in seconds from sample_length and sample_rate."""
+    frames, rate = info.get("sample_length"), info.get("sample_rate")
+    if isinstance(frames, (int, float)) and isinstance(rate, (int, float)) and rate > 0:
+        return float(frames) / float(rate)
+    return None
+
+
+def clip_read(step: dict) -> bool:
+    """Whether a batch step read a clip (a missing clip answers with errors)."""
+    result = step.get("result")
+    return step.get("status") != "error" and isinstance(result, dict) \
+        and isinstance(result.get("length"), (int, float))
+
+
+def check_fit(warping: bool | None, bars: float | None) -> None:
+    """fit_audio_clip's options, refused before a clip is made."""
+    if bars is not None and warping is False:
+        raise ValueError("bars warps the file to that length: it cannot go with warping=false "
+                         "(unwarped, a file plays as long as it is)")
+    if bars is not None and float(bars) <= 0:
+        raise ValueError(f"bars must be more than 0 (got {bars})")
+
+
+AUDIO_FIELDS = ["length", "warping", "looping", "loop_start", "loop_end", "end_marker",
+                "sample_length", "sample_rate", "is_arrangement_clip", "start_time", "end_time"]
+
+
+def fit_audio_clip(clip: str, warping: bool | None = None, bars: float | None = None,
+                   start: float = 0.0, loop_start: float | None = None) -> dict:
+    """Settle a new audio clip: its start back at `start` (from_its_start),
+    and what it lasts checked against the file at the set's tempo.
+
+    Live 12.4.16 warps a new clip at the tempo its analysis guesses (a 40 s
+    file made at 120 BPM came in as 96 BPM, 64 beats instead of 80), and an
+    unwarped Session clip keeps that guess as its length. With `bars` (in the
+    set's meter) the file is warped straight to that many bars; with
+    warping=False it is first warped to its length at the set's tempo, then
+    unwarped, so copies of it last as long as it plays. Each: inner warp
+    markers removed, the last moved (move_warp_marker), end_marker and
+    loop_end set (an Arrangement clip unlooped, so it ends there).
+    Returns what Live holds: length_beats, warping, warp_markers,
+    live_guess_bpm (Live's first reading), warp_bpm (warped clips: the
+    file's tempo by its warp markers after the fit; the set's tempo when
+    it plays as recorded),
+    set_bpm, errors (failed steps), notes (what was left
+    undone, and why), and a warning when the length is not what
+    was asked (bars, warping=False) or, the file lasting whole bars at the
+    set's tempo (rendered from a song), not that."""
+    check_fit(warping, bars)
+    song = lom_get("live_set", ["tempo", "signature_numerator", "signature_denominator"])
+    tempo = float(song["tempo"])
+    bar = music.beats_per_bar(song["signature_numerator"], song["signature_denominator"])
+    read = batch([{"type": "lom_get", "params": {"path": clip, "properties": AUDIO_FIELDS}},
+                  {"type": "lom_get", "params": {"path": f"{clip} warp_markers",
+                                                 "properties": ["beat_time", "sample_time"]}}],
+                 stop_on_error=False)["results"]
+    if not clip_read(read[0]):
+        return {"errors": [f"Live did not answer for the clip: "
+                           f"{read[0].get('message') or read[0].get('result')}"]}
+    info = read[0]["result"]
+    markers = read[1].get("result", {}).get("items", []) if read[1].get("status") != "error" else []
+    notes: list[str] = []
+    errors: list[str] = []
+    left_unwarped = bars is not None and info.get("warping") is False
+    if left_unwarped:
+        # Live left it unwarped (Auto-Warp Long Samples off). Warped again, a
+        # clip keeps no marker at the file's end (Live 12.4.16: only the start
+        # and the shadow marker, end_marker moved), so there is nothing to fit
+        # by, and the clip would be changed for nothing: it is left as it is
+        notes.append("Live has it unwarped, and warping it again would drop its warp marker "
+                     "at the file's end, so it was not fitted to bars; it is left unwarped")
+    real = markers[:-1]  # the last is Live's shadow marker, 1/32 beat on
+    seconds = audio_seconds(info)
+    live_guess = None
+    if len(real) >= 2 and real[-1]["sample_time"] > real[0]["sample_time"]:
+        live_guess = 60.0 * (real[-1]["beat_time"] - real[0]["beat_time"]) / (
+            real[-1]["sample_time"] - real[0]["sample_time"])
+    at_tempo = seconds * tempo / 60.0 if seconds else None
+    target = float(bars) * bar if bars is not None and warping is not False else at_tempo \
+        if warping is False else None
+    ops: list[dict] = []
+    warped, arranged = info.get("warping") is True, info.get("is_arrangement_clip") is True
+    if target and warped and len(real) >= 2 \
+            and abs(real[-1]["beat_time"] - real[0]["beat_time"] - target) > 1e-6:
+        ops += [op_call(clip, "remove_warp_marker", m["beat_time"]) for m in reversed(real[1:-1])]
+        ops.append(op_call(clip, "move_warp_marker", real[-1]["beat_time"],
+                           real[0]["beat_time"] + target - real[-1]["beat_time"]))
+    if target and warped and len(real) < 2:  # no marker at the file's end to fit by
+        errors.append("its warp markers could not be read, so it was not fitted")
+    elif target and warped:
+        end = real[0]["beat_time"] + target
+        if arranged:
+            ops.append(op_set(clip, "looping", False))
+        markers_first = end > float(info["end_marker"])
+        pair = [op_set(clip, "end_marker", end), op_set(clip, "loop_end", end)]
+        ops += pair if markers_first else pair[::-1]
+    elif target and not notes:
+        notes.append("Live had it unwarped already, so it was not fitted")
+    if warping is False:  # the start back first: the length it has now is what it keeps
+        ops += from_its_start(clip, 0.0)
+    if warping is not None and not left_unwarped:  # one left unwarped stays as it is
+        ops.append(op_set(clip, "warping", bool(warping)))
+    ops += from_its_start(clip, start, loop_start)
+    done = batch(ops, stop_on_error=False)
+    errors += [s.get("message") for s in done["results"] if s.get("status") == "error"]
+    after = batch([{"type": "lom_get", "params": {"path": clip, "properties": AUDIO_FIELDS}},
+                   {"type": "lom_get", "params": {"path": f"{clip} warp_markers",
+                                                  "properties": ["beat_time", "sample_time"]}}],
+                  stop_on_error=False)["results"]
+    if not clip_read(after[0]):
+        return {"errors": errors + [f"Live did not answer for the clip afterwards: "
+                                    f"{after[0].get('message') or after[0].get('result')}"],
+                **({"notes": notes} if notes else {})}
+    held = after[0]["result"]
+    count = len(after[1].get("result", {}).get("items", [])) if after[1].get("status") != "error" \
+        else None
+    length = float(held["end_time"] - held["start_time"]) if arranged \
+        else float(held["length"])
+    report: dict[str, Any] = {"length_beats": round(length, 4), "warping": held.get("warping"),
+                              "warp_markers": count, "set_bpm": tempo}
+    if seconds:
+        report["file_seconds"] = round(seconds, 4)
+    if live_guess:  # Live's first reading of the file's tempo, before any fit
+        report["live_guess_bpm"] = round(live_guess, 2)
+    now_real = (after[1].get("result") or {}).get("items", [])[:-1] \
+        if after[1].get("status") != "error" else []
+    if held.get("warping") is True and len(now_real) >= 2 \
+            and now_real[-1]["sample_time"] > now_real[0]["sample_time"]:
+        # the file's tempo by its warp markers now: the set's, the file plays as recorded
+        report["warp_bpm"] = round(60.0 * (now_real[-1]["beat_time"] - now_real[0]["beat_time"])
+                                   / (now_real[-1]["sample_time"] - now_real[0]["sample_time"]), 2)
+    expected = float(bars) * bar if bars is not None else at_tempo
+    # Without bars, Live's own reading stands (a 90 BPM loop warped to 120 is
+    # right) unless the file lasts whole bars at the set's tempo, as a file
+    # rendered from a song does: then a length that differs is Live's guess
+    # gone wrong (a 20-bar file read at 104 BPM)
+    whole = bool(at_tempo) and abs(at_tempo - round(at_tempo / bar) * bar) <= 0.125 \
+        and round(at_tempo / bar) >= 1
+    checked = bars is not None or warping is False or whole
+    if expected and checked and start == 0.0 \
+            and abs(length - expected) > max(0.05, 0.005 * expected):
+        what = f"{float(bars):g} bars ({expected:g} beats)" if bars is not None else \
+            f"{expected:g} beats, the file's {seconds:g} s at {tempo:g} BPM"
+        hint = "" if bars is not None or warping is False else \
+            (f" (Live warped it at {live_guess:.1f} BPM)" if live_guess else "") + \
+            f", {round(at_tempo / bar):g} bars at the set's tempo; pass bars to fit it, " \
+            "or warping=false to play it as recorded"
+        if held.get("warping") is False:  # it plays the file; its length is what copies take
+            plays = f"; the file plays {at_tempo:g} beats" if at_tempo else ""
+            report["warning"] = (f"Live keeps it {length:g} beats long (copies last that), "
+                                 f"not {what}{plays}")
+        else:
+            report["warning"] = f"Live made it {length:g} beats, not {what}{hint}"
+    if bars is not None and warping is not False and at_tempo and "warning" not in report \
+            and abs(at_tempo / expected - 1) > 0.02:
+        report["warning"] = (f"{float(bars):g} bars play the file at {at_tempo / expected:.2f}x "
+                             f"its speed at {tempo:g} BPM")
+    if errors:
+        report["errors"] = errors
+    if notes:  # what was left undone on purpose, and why
+        report["notes"] = notes
+    return report
 
 
 # ── Registration ─────────────────────────────────────────────────────────────
@@ -1569,6 +2112,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         "live_set tracks -1", "property": "name", "value": "Pad"}},
         {"type": "param_set_display", "params": {"path": "live_set tracks 0 devices 0
         parameters 1", "value": "-6 dB"}}]
+        A moved playhead takes effect after the batch (set_or_delete_cue toggles
+        at the old one).
         """
         check_batch(commands)
         return to_json(batch(commands, stop_on_error))
@@ -2536,7 +3081,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                          clip_index: int | None = 0, arrangement_time: float | None = None,
                          midi_track: int | str | None = None, channel: int | None = None,
                          transpose: int = 0, replace: bool = True,
-                         clip_name: str | None = None) -> str:
+                         clip_name: str | None = None,
+                         length_bars: float | None = None) -> str:
         """Import the notes of a .mid file into a MIDI clip (created if missing).
 
         Without `track`, nothing is imported: the file's tracks, channels, note
@@ -2544,8 +3090,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         - midi_track: index or name of one track in the file (default: all
           tracks merged); channel: 1-16 to take one channel only
         - clip_index (Session slot) or arrangement_time (beats, Live 12+)
-        - The clip is rounded up to whole bars of the set's time signature.
-          The file's tempo is reported, not applied to the set.
+        - length_bars: the clip's length (default: whole bars to the last
+          note). The file's tempo is reported, not applied to the set.
         """
         from . import midi_files
 
@@ -2562,14 +3108,26 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             n["pitch"] = min(127, max(0, n["pitch"] + transpose))
             n.pop("channel", None)
         bar = song_context()["beats_per_bar"]
-        end = max(n["start_time"] + n["duration"] for n in notes)
-        length = max(1, -(-end // bar)) * bar
+        if length_bars is not None:
+            if float(length_bars) <= 0:
+                raise ValueError("length_bars must be more than 0")
+            length = float(length_bars) * bar
+        else:  # a release tail just past a bar line is not another bar; a note in it is
+            end = max(n["start_time"] + n["duration"] for n in notes)
+            last = max(n["start_time"] for n in notes)
+            length = max(1, -(-(end - MIDI_TAIL_TOLERANCE) // bar),
+                         -(-(last + 1e-6) // bar)) * bar
+        dropped = sum(1 for n in notes if n["start_time"] >= length - 1e-9)
+        notes = [dict(n, duration=min(n["duration"], length - n["start_time"]))
+                 for n in notes if n["start_time"] < length - 1e-9]
         name = clip_name or Path(info["file"]).stem
         clip = prepare_clip(track, clip_index, length, arrangement_time, name)
         written = write_notes(clip, notes, "replace" if replace else "add")
-        return generated_result(clip, notes, written, {
-            "file": info["file"], "length_beats": length, "file_tempo_bpm": info["tempo_bpm"],
-            "file_time_signature": info["time_signature"]})
+        extra = {"file": info["file"], "length_beats": length, "file_tempo_bpm": info["tempo_bpm"],
+                 "file_time_signature": info["time_signature"]}
+        if dropped:
+            extra["notes_after_the_end"] = dropped
+        return generated_result(clip, notes, written, extra)
 
     @tool
     def export_clip_to_midi(track: int | str, clip_index: int | None = None,
@@ -2783,8 +3341,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             label = f"{source['name']} {name.replace('_', ' ')}"
             await asend("lom_set", {"path": tp, "property": "name", "value": label})
             if source.get("start_time") is not None:
-                clip = await asend("lom_call", {"path": tp, "method": "create_audio_clip",
-                                                "args": [file, float(source["start_time"])]})
+                clip = await keeping_the_playhead(asend("lom_call", {
+                    "path": tp, "method": "create_audio_clip",
+                    "args": [file, float(source["start_time"])]}))
                 where = {"arrangement_time": source["start_time"]}
             else:
                 row = source.get("clip_index") or 0
@@ -2792,18 +3351,18 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                                 "method": "create_audio_clip", "args": [file]})
                 where = {"clip_index": row}
             clip_ref = clip.get("result") or {}
-            if clip_ref.get("$id"):
-                cid, steps = f"id {clip_ref['$id']}", []
-                if source.get("warping") is False:
-                    # The source plays the file at its own speed; so must its stems
-                    steps.append(op_set(cid, "warping", False))
-                if source.get("warping") is not True:
-                    # From where the source plays (seconds, unwarped), or the file's start, not
-                    # where Live's warp analysis put it. A warped source's beats are its own.
-                    steps += from_its_start(cid, float(source.get("start_marker") or 0.0),
-                                            source.get("loop_start"))
-                await asend("batch", {"commands": steps, "stop_on_error": False})
-            placed.append({"track": label, **where})
+            row = {"track": label, **where}
+            if clip_ref.get("$id") and source.get("warping") is not True:
+                # The source plays the file at its own speed (unwarped): so must its stems,
+                # from where it plays (seconds), not where Live's warp analysis put the start.
+                # A warped source's beats are its own: its stems are left as Live made them
+                unwarped = source.get("warping") is False
+                fitted = await asyncio.to_thread(
+                    fit_audio_clip, f"id {clip_ref['$id']}", False if unwarped else None, None,
+                    float(source.get("start_marker") or 0.0) if unwarped else 0.0,
+                    source.get("loop_start") if unwarped else None)
+                row.update({k: fitted[k] for k in ("warning", "errors", "notes") if k in fitted})
+            placed.append(row)
         return placed
 
     async def warped_beats(source: dict, seconds: list[float]) -> dict[float, float] | None:
@@ -3311,7 +3870,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         An audio track: {"name": "REF drums", "kind": "audio",
           "audio_clips": [{"file": "/abs/drums.wav", "start": 0, "warping": false}]}
           (the clip starts at the file's start: Live's warp analysis otherwise
-          moves it to the first transient).
+          moves it to the first transient; with "warping": true, "bars" fits it).
         Simplers and pads also take playback_mode (classic | one_shot | slicing)
         and start_marker (sample frames); pads take choke_group (0 none, 1-16).
         sample_path loads the file itself (Live 12.4+, read back); on older Live,
@@ -3327,6 +3886,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if len(set(names)) != len(names):
             raise ValueError("Track names must be unique")
         check_samplers(tracks)
+        for spec in tracks:  # before anything is built
+            for clip in spec.get("audio_clips") or []:
+                if clip.get("bars") is not None and clip.get("warping") is not True:
+                    raise ValueError(f"{spec['name']}: an audio clip's bars needs "
+                                     "\"warping\": true (unwarped, a file plays as long as it is)")
+                try:
+                    check_fit(clip.get("warping"), clip.get("bars"))
+                except ValueError as e:
+                    raise ValueError(f"{spec['name']}: {e}") from e
         if signature is not None:
             numerator, denominator = parse_signature(signature)
             batch([op_set("live_set", "signature_numerator", numerator),
@@ -3481,15 +4049,19 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 made = send("lom_call", {"path": tp, "method": "create_audio_clip",
                                          "args": [str(clip["file"]), float(clip.get("start", 0.0))]})
                 cp = f"id {made['result']['$id']}"
-                steps = []
-                if clip.get("warping", False) is False:
-                    steps.append(op_set(cp, "warping", False))
-                # back to the file's start (loop_start carries start_marker)
-                steps += [op_set(cp, "loop_start", 0.0), op_set(cp, "start_marker", 0.0)]
-                done = batch_summary(batch(steps, stop_on_error=False))
-                row["problems"] += [f"audio clip {Path(str(clip['file'])).name}: {step['error']}"
-                                    for step in done["steps"] if isinstance(step, dict) and "error" in step]
+                # back to the file's start, its length checked (and fitted: warping, bars)
+                fitted = fit_audio_clip(cp, False if clip.get("warping", False) is False
+                                        else None, clip.get("bars"))
+                row["problems"] += [f"audio clip {Path(str(clip['file'])).name}: {error}"
+                                    for error in fitted.get("errors", [])]
+                if fitted.get("notes"):
+                    row.setdefault("notes", []).extend(
+                        f"audio clip {Path(str(clip['file'])).name}: {n}" for n in fitted["notes"])
+                if fitted.get("warning"):
+                    row.setdefault("warnings", []).append(
+                        f"audio clip {Path(str(clip['file'])).name}: {fitted['warning']}")
                 held = lom_get(cp, ["start_time", "end_time", "start_marker", "warping"])
+                held["warp_markers"] = fitted.get("warp_markers")
                 if clip.get("warping", False) is False and held.get("warping"):
                     row["problems"].append(f"audio clip {Path(str(clip['file'])).name}: Live left it warped")
                 if abs(float(held.get("start_time", 0.0)) - float(clip.get("start", 0.0))) > 1e-6:
@@ -4469,14 +5041,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
 
     # ── Song structure ───────────────────────────────────────────────────────
 
-    def session_clips() -> tuple[list[str], list[dict[int, dict]], list[str]]:
-        """Track names, each track's Session clips by slot, and scene names."""
+    def session_clips() -> tuple[list[str], list[dict[int, dict]], list[str], set[int]]:
+        """Track names, each track's Session clips by slot, scene names and
+        the indexes of group tracks (they hold no clips)."""
         listing = run_steps([
-            {"type": "lom_get", "params": {"path": "live_set tracks", "properties": ["name"],
-                                           "ids": False}},
+            {"type": "lom_get", "params": {"path": "live_set tracks",
+                                           "properties": ["name", "is_foldable"], "ids": False}},
             {"type": "lom_get", "params": {"path": "live_set scenes", "properties": ["name"],
                                            "ids": False}}])
         names = [t.get("name") for t in listing[0]["result"]["items"]]
+        groups = {i for i, t in enumerate(listing[0]["result"]["items"])
+                  if t.get("is_foldable") is True}
         scenes = [s.get("name") for s in listing[1]["result"]["items"]]
         slots = run_steps([{"type": "lom_get", "params": {
             "path": f"live_set tracks {i} clip_slots", "properties": ["has_clip"], "ids": False}}
@@ -4486,31 +5061,34 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                   if slot.get("has_clip")]
         details = run_steps([{"type": "lom_get", "params": {
             "path": f"live_set tracks {i} clip_slots {k} clip", "ids": False,
-            "properties": ["name", "length", "loop_start", "is_midi_clip"]}}
+            "properties": SIZE_FIELDS}}
             for i, k in wanted])
         clips: list[dict[int, dict]] = [{} for _ in names]
         for (i, k), step in zip(wanted, details):
             if step.get("status") == "success":
                 clips[i][k] = step["result"]
-        return names, clips, scenes
+        return names, clips, scenes, groups
 
     @tool(destructive=True)
+    @keeping_playhead
     def build_arrangement(sections: list[dict], start_bar: int = 1,
-                          locators: bool = True) -> str:
+                          locators: bool = True, clear_others: bool = True,
+                          clear_locators: bool = True) -> str:
         """Lay Session clips out in the Arrangement as a song, in one call.
 
         sections, in order, each {"name", "bars"} plus what plays:
         - "scene": index or name, every track plays its clip there; "except": ["Drums"]
           leaves tracks out
-        - "clips": {"Drums": 0, "Bass": "Bass B"}: slot index or clip name per track;
-          other tracks are silent
-        Shorter clips repeat; MIDI clips are cut at the section end, audio clips may run
-        over. locators: a named locator at each section start. Overwrites those bars (one
-        undo step). e.g. [{"name": "Intro", "bars": 8, "scene": 0, "except": ["Drums"]},
-        {"name": "Drop", "bars": 16, "scene": 1}]
+        - "clips": {"Drums": 0, "Bass": "Bass B"}: slot index or clip name per track
+        Clips repeat, the last copy cut to fit. A track not playing in a section is
+        cleared there (clear_others); one with no Session clips only where a section
+        names it ({"Vox": None}, except). locators: one per section start;
+        clear_locators deletes others in the built bars. e.g. [{"name": "Intro",
+        "bars": 8, "scene": 0, "except": ["Drums"]}, {"name": "Drop", "bars": 16, "scene": 1}]
         """
         bar = song_context()["beats_per_bar"]
-        names, clips, scenes = session_clips()
+        tempo = float(lom_get("live_set", ["tempo"])["tempo"])
+        names, clips, scenes, groups = session_clips()
 
         def track_index(track: int | str) -> int:
             if isinstance(track, int) or re.fullmatch(r"-?\d+", str(track).strip()):
@@ -4533,10 +5111,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     return slot
             raise ValueError(f"Track {names[index]!r} has no clip named {clip!r}")
 
-        place, partial, report, warnings, cues = [], [], [], [], []
-        position = (int(start_bar) - 1) * bar
+        place, report, warnings, cues, spans = [], [], [], [], []
+        place_where: list[str] = []  # each step's section and track, for its error
+        trim_where: list[str] = []
+        warned: set[tuple[int, int]] = set()
+        first = position = (int(start_bar) - 1) * bar
+        trims: list[tuple[str, str, float, float, float]] = []
         for number, section in enumerate(sections, start=1):
             label = str(section.get("name") or f"Section {number}")
+            named: set[int] = set()  # the tracks this section names (clips, except)
             length = float(section.get("bars", 8)) * bar
             plays: dict[int, int] = {}
             if section.get("scene") is not None:
@@ -4546,9 +5129,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 if row is None:
                     raise ValueError(f"{label}: no scene {section['scene']!r}")
                 left_out = {track_index(t) for t in section.get("except") or []}
+                named |= left_out
                 plays = {i: row for i in range(len(names)) if row in clips[i]
                          and i not in left_out}
             for track, clip in (section.get("clips") or {}).items():
+                named.add(track_index(track))
                 if clip is None:
                     plays.pop(track_index(track), None)
                 else:
@@ -4557,61 +5142,94 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 info = clips[i][slot]
                 clip_length = float(info["length"]) or length
                 repeats = int(length // clip_length + 1e-9)
-                source = f"live_set tracks {i} clip_slots {slot} clip"
+                tp, source = f"live_set tracks {i}", f"live_set tracks {i} clip_slots {slot} clip"
+                where = f"{label}: {names[i]}"
                 for k in range(repeats):
-                    place.append(op_call(f"live_set tracks {i}", "duplicate_clip_to_arrangement",
+                    place.append(op_call(tp, "duplicate_clip_to_arrangement",
                                          ref(source), position + k * clip_length))
                 rest = length - repeats * clip_length
-                if rest > 1e-6:
-                    at = position + repeats * clip_length
-                    if info.get("is_midi_clip"):
-                        partial.append((i, slot, at, rest, float(info.get("loop_start", 0.0))))
-                    else:
-                        place.append(op_call(f"live_set tracks {i}",
-                                             "duplicate_clip_to_arrangement", ref(source), at))
-                        warnings.append(f"{label}: {names[i]}'s audio clip runs "
-                                        f"{clip_length - rest:g} beats past the section end")
+                if rest > 1e-6 and unwarped(info):
+                    trims.append((tp, source, position + repeats * clip_length, rest,
+                                  clip_length))
+                    trim_where.append(where)
+                elif rest > 1e-6:  # the rest at its own length, envelopes and all
+                    place += sized_copy(tp, source, position + repeats * clip_length, info, rest)
+                place_where += [where] * (len(place) - len(place_where))
+                if (i, slot) not in warned:
+                    warned.add((i, slot))
+                    warnings += [f"{label}: {names[i]}: {w}" for w in copy_warnings(info, tempo,
+                                                                            takes_length=False)]
             if locators:
                 cues.append((label, position))
+            spans.append((position, position + length, set(plays), named))
             report.append({"section": label, "bar": int(position // bar) + 1,
                            "bars": length / bar,
                            "tracks": {names[i]: clips[i][s].get("name") for i, s in
                                       sorted(plays.items())}})
             position += length
-        placed = batch(place, stop_on_error=False) if place else {"results": []}
-        errors = [s.get("message") for s in placed["results"] if s.get("status") == "error"]
-        if cues:
-            errors += [f"locator {c['name']!r}: {c['error']}" for c in place_locators(cues)
-                       if "error" in c]
-        if partial:
-            created = run_steps([op_call(f"live_set tracks {i}", "create_midi_clip", at, rest)
-                                 for i, _slot, at, rest, _start in partial])
-            writes = []
-            for (i, slot, at, rest, loop_start), step in zip(partial, created):
-                new_clip = ((step.get("result") or {}).get("result") or {}).get("$id")
-                if step.get("status") != "success" or new_clip is None:
-                    errors.append(f"{names[i]} at beat {at:g}: {step.get('message')}")
+        errors: list[str] = []
+        cleared: dict[str, dict] = {}
+        kept: dict[str, int] = {}
+        if clear_others:  # what a track does not play in a section is not heard there
+            for i, name in enumerate(names):
+                if i in groups:  # a group track has no clips of its own
                     continue
-                notes = []
-                for note in read_notes(f"live_set tracks {i} clip_slots {slot} clip").get(
-                        "notes", []):
-                    offset = note["start_time"] - loop_start
-                    if 0 <= offset < rest:
-                        notes.append(dict({k: v for k, v in note.items() if k != "note_id"},
-                                          start_time=offset,
-                                          duration=min(note["duration"], rest - offset)))
-                writes.append({"type": "clip_write_notes", "params": {
-                    "clip_path": f"id {new_clip}", "notes": notes, "mode": "replace"}})
-                writes.append(op_set(f"id {new_clip}", "name", clips[i][slot].get("name") or ""))
-            errors += [s.get("message") for s in run_steps(writes) if s.get("status") == "error"]
-        result: dict[str, Any] = {"ok": not errors, "sections": report,
-                                  "end_bar": int(position // bar) + 1,
+                # a track without Session clips (not part of the layout) is cleared
+                # only in the sections that name it, and left alone in the others
+                ranges = [(a, b) for a, b, playing, named in spans
+                          if i not in playing and (clips[i] or i in named)]
+                alone = [(a, b) for a, b, playing, named in spans
+                         if i not in playing and not clips[i] and i not in named]
+                if ranges:
+                    try:
+                        cut = cut_ranges(i, ranges)
+                    except Exception as e:  # said, and the rest of the build still runs
+                        errors.append(f"{name}: not cleared: {e}")
+                        continue
+                    done = {k: cut[f"clips_{k}"] for k in ("removed", "trimmed")
+                            if cut.get(f"clips_{k}")}
+                    if done:
+                        cleared[name] = done
+                    if cut.get("left"):
+                        errors.append(f"{name}: clips left at {cut['left']}")
+                if alone:  # what is left there after the cuts
+                    try:
+                        there = [c for c in lom_get(f"live_set tracks {i} arrangement_clips",
+                                                    ["start_time", "end_time"])["items"]
+                                 if any(c["start_time"] < b - 1e-6 and c["end_time"] > a + 1e-6
+                                        for a, b in alone)]
+                    except Exception as e:
+                        logger.debug("No Arrangement read on %s: %s", name, e)
+                        there = []
+                    if there:
+                        kept[name] = len(there)
+        placed = batch(place, stop_on_error=False) if place else {"results": []}
+        errors += [f"{place_where[k]}: {s.get('message')}"
+                   for k, s in enumerate(placed["results"]) if s.get("status") == "error"]
+        if trims:
+            errors += [f"{trim_where[k]}: {s.get('message')}"
+                       for k, s in enumerate(trimmed_copies(trims, tempo))
+                       if s.get("status") == "error"]
+        result: dict[str, Any] = {"sections": report, "end_bar": int(position // bar) + 1,
                                   "time_signature": song_context()["time_signature"]}
+        if cleared:
+            result["cleared"] = cleared
+        if kept:  # Arrangement clips of tracks with no Session clips, not named
+            result["kept"] = kept
+        if cues:
+            starts = [at for _label, at in cues]
+            remove = [c["time"] for c in lom_get("live_set cue_points", ["time"])["items"]
+                      if first - 1e-3 < c["time"] < position - 1e-3
+                      and all(abs(c["time"] - t) > 1e-3 for t in starts)] if clear_locators else []
+            rows = place_locators(cues, remove=remove)
+            if remove:
+                result["locators_deleted"] = rows.pop()["deleted"]
+            errors += [f"locator {c['name']!r}: {c['error']}" for c in rows if "error" in c]
         if warnings:
             result["warnings"] = warnings
         if errors:
             result["errors"] = errors[:20]
-        return to_json(result)
+        return to_json({"ok": not errors, **result})
 
     # ── Generated audio (MusicGen) ───────────────────────────────────────────
 
@@ -4666,10 +5284,14 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                                       arrangement_time, drum_pad)
         return to_json(payload)
 
-    async def from_the_files_start(made: dict) -> None:
+    async def from_the_files_start(made: dict) -> dict:
+        """The new clip's start back at the file's, its length checked
+        (fit_audio_clip): its warning, if any."""
         clip_id = ((made or {}).get("result") or {}).get("$id")
-        if clip_id:
-            await asend("batch", {"commands": from_its_start(f"id {clip_id}"), "stop_on_error": False})
+        if not clip_id:
+            return {}
+        fitted = await asyncio.to_thread(fit_audio_clip, f"id {clip_id}")
+        return {k: fitted[k] for k in ("warning",) if k in fitted}
 
     async def place_generated(track: int | str, file: str, clip_index: int | None,
                               arrangement_time: float | None, drum_pad: int | str | None) -> dict:
@@ -4678,10 +5300,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         info = await asend("lom_get", {"path": tp, "properties": ["name", "has_audio_input"]})
         if info.get("has_audio_input"):
             if arrangement_time is not None:
-                made = await asend("lom_call", {"path": tp, "method": "create_audio_clip",
-                                                "args": [file, float(arrangement_time)]})
-                await from_the_files_start(made)
-                return {"track": info["name"], "arrangement_time": arrangement_time}
+                made = await keeping_the_playhead(asend("lom_call", {
+                    "path": tp, "method": "create_audio_clip",
+                    "args": [file, float(arrangement_time)]}))
+                return {"track": info["name"], "arrangement_time": arrangement_time,
+                        **await from_the_files_start(made)}
             slots = (await asend("lom_get", {"path": f"{tp} clip_slots",
                                              "properties": ["has_clip"]}))["items"]
             row = clip_index if clip_index is not None else next(
@@ -4693,8 +5316,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 raise ValueError(f"Slot {row} already holds a clip")
             made = await asend("lom_call", {"path": f"{tp} clip_slots {int(row)}",
                                             "method": "create_audio_clip", "args": [file]})
-            await from_the_files_start(made)
-            return {"track": info["name"], "clip_index": row}
+            return {"track": info["name"], "clip_index": row, **await from_the_files_start(made)}
         # A MIDI track: through Live's browser, which lists the file after a moment
         name = Path(file).stem
         for _attempt in range(30):
@@ -4904,8 +5526,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
           "Reverse Cymbal" track, swelling into the downbeat (`bars`, 2, at most)
         - drum_fill: the drum track's last `bars` (1) become a fill: fill =
           snare_roll | toms | build; track: default the first with a Drum Rack
-        - gap: silence on MIDI tracks for the last `bars` (1/4 bar), the drop's
-          breath; tracks: default every MIDI track with notes there
+        - gap: silence for the last `bars` (1/4 bar) on `tracks` (default:
+          MIDI tracks with notes there; audio tracks are cut); returns the
+          clips around it
         - filter_sweep: a high-pass Auto Filter on each MIDI track in `tracks`
           (default: those playing) sweeping up over the last `bars` (4), open
           again on the downbeat (record_automation for audio tracks or the
@@ -5036,11 +5659,24 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                           color_index=first.get("color_index")))
         elif kind == "gap":
             chosen = list(tracks) if tracks else midi_tracks_playing(start, at)
-            names = []
+            names, around = [], {}
             for t in chosen:
-                rewrite_range(t, start, at, [], name="Gap")
-                names.append(lom_get(track_path(t), ["name"])["name"])
+                tp = track_path(t)
+                info = lom_get(tp, ["name", "has_midi_input"])
+                if info.get("has_midi_input"):
+                    rewrite_range(t, start, at, [], name="Gap")
+                else:  # audio: the clips there are cut out (cut_ranges)
+                    cut_ranges(t, [(start, at)])
+                name = lom_get(tp, ["name"])["name"]  # Live may rename it as clips go
+                names.append(name)
+                around[name] = [
+                    {"arrangement_clip_index": i, "name": c.get("name"),
+                     "start_time": c["start_time"], "end_time": c["end_time"]}
+                    for i, c in enumerate(lom_get(f"{tp} arrangement_clips", [
+                        "name", "start_time", "end_time"])["items"])
+                    if c["end_time"] > start - bar and c["start_time"] < at + bar]
             result["tracks"] = names
+            result["clips"] = around
         else:  # filter_sweep
             chosen = list(tracks) if tracks else midi_tracks_playing(start, at)
             if not chosen:

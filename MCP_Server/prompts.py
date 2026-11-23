@@ -118,8 +118,9 @@ structure (lengths in bars): {structure}.
    without drums or bass). Show the plan as a table and wait for approval.
 2. build_arrangement with one entry per section: a scene plus "except" for
    the tracks that sit out, or explicit "clips" per track. It repeats loops to
-   fill each section, cuts MIDI clips exactly and puts a named locator at
-   every section start.
+   fill each section, copies the rest of a loop at its length, clears what
+   tracks left out of a section played there before, and puts a named
+   locator at every section start.
 3. Add movement at transitions: draw filter or volume ramps with
    write_clip_automation on a Session copy of the clip that leads into a
    drop, then duplicate_to_arrangement that copy over the transition

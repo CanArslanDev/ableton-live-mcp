@@ -103,6 +103,56 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   `type`, with `params` that are not an object, or a `lom_get`/`lom_set`/
   `lom_call`/`param_set_display`/`observe` step without `params.path` is
   refused, naming the step (it ran and answered "Empty path").
+- **`build_arrangement` silences what does not play in a section.** Old
+  Arrangement clips on tracks left out of a section kept playing there
+  (old drums in a rebuilt intro). Clips inside a section's bars on such
+  tracks are deleted, and clips across its edges are cut there first by
+  laying a short copy over them and deleting it (a copy laid over a clip
+  splits it, MIDI and audio alike, in Live 12.4.16). A track with Session
+  clips is cleared wherever it doesn't play; one without (Arrangement-only
+  material such as recorded vocals) only in the sections that name it.
+  Group tracks are skipped; a track that could not be cleared is an error
+  ("Drums: not cleared: …").
+- **`build_arrangement` replaces the old locators**: locators inside the
+  built bars that are not at a section start are deleted.
+- **A clip longer than what is left of a section lands at that length.**
+  Live makes a copy as long as the clip's loop (`loop_end - loop_start`),
+  so loop_end is moved for the copy and put back. An audio clip used to be
+  placed whole (a 16-bar file ran 48 beats past a 4-bar outro), and the
+  rest of a MIDI section was rebuilt from notes only, losing its clip
+  envelopes; both are now copies of the Session clip, envelopes and all.
+  An unwarped audio clip keeps the length Live's warp tempo guess gave it
+  whatever its loop, so its copy is trimmed in the Arrangement instead
+  (each scratch copy past everything on the track, at a place of its own,
+  and deleted whatever fails; one left behind is an error).
+  `build_arrangement`'s errors name the section and track.
+- **`import_midi_file` no longer adds a bar for a release tail**: a last
+  note ending less than 1/4 beat past a bar line made a 9-bar clip of an
+  8-bar file (a note starting on that bar line still keeps the bar).
+- **New audio clips are checked against the file.** Live 12.4.16 warps a
+  new clip at the tempo it guesses (a 40 s click track made at 120 BPM
+  came in as 96 BPM, 64 beats instead of 80), and an unwarped Session clip
+  keeps that guess as its length, so its copies were cut short. The legacy
+  `create_audio_clip`, `build_tracks`' `audio_clips`, `generate_audio` and
+  `separate_stems(to_tracks=True)` (stems of an unwarped source; a warped
+  source's stems are left as Live makes them) report the length in beats,
+  Live's first reading of the file's tempo (`live_guess_bpm`), the tempo
+  its warp markers give it now (`warp_bpm`, warped clips) and the warp
+  markers. A `warning` comes when the length is not
+  what was asked, or when the file lasts whole bars at the set's tempo (as
+  one rendered from a song does) and Live made it another length; a loop
+  made at another tempo is left to Live.
+- **Tools that make Arrangement clips put the playhead back.** Live
+  12.4.16 moves the stopped playhead to every clip that
+  `duplicate_clip_to_arrangement`, `create_midi_clip` or
+  `create_audio_clip` makes in the Arrangement, so `build_arrangement`
+  left it at the last section and `place_locators` restored it there. It
+  goes back after `build_arrangement`, `duplicate_to_arrangement`,
+  `build_tracks`, `build_from_blueprint`, `design_transition`,
+  `write_arrangement_automation`, the generators, `import_midi_file`,
+  `import_from_live_set`, `audio_to_midi` and `manage_clip` with an
+  Arrangement time, and `generate_audio` / `separate_stems` placing audio
+  in the Arrangement.
 
 ### Added
 
@@ -114,6 +164,31 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
 - **Settings say which parameter they set**: `renamed` in `add_device` and
   `apply_device_chain`, `asked` and `parameter` in
   `set_device_parameter_by_name`, when a name was mapped to another.
+- **`build_arrangement` options and reports**: `clear_others=False`
+  keeps every track as it is, `clear_locators=False` the old locators;
+  `cleared` gives per track the clips `removed` and `trimmed`, `kept` the
+  Arrangement-only clips left in sections that don't name their track,
+  `locators_deleted` the locators that went.
+- **`duplicate_to_arrangement(length=…)`** sizes the copy, and the result
+  says where it landed (`start_time`, `end_time`), warning when that is
+  not what was asked, when an unlooped clip's end_marker is before its
+  loop_end (Live copies to loop_end), and when an unwarped clip's length
+  is Live's warp guess rather than what it plays. A `length` of 0 or less
+  is refused.
+- **`import_midi_file(length_bars=…)`** sets the clip's length; notes are
+  cut at its end (`notes_after_the_end` counts those left out).
+- **`create_audio_clip(warping=…, bars=…)`**: `warping=false` plays the
+  file as recorded (it is first warped to its length at the set's tempo,
+  so copies last as long as it plays); `bars` warps the file straight to
+  that length, with a warning when that changes its speed. `bars` with
+  `warping=false` is refused before the clip is made; a clip Live left
+  unwarped is left as it is and the result says so under `notes` (warping
+  it again would drop its end marker). `build_tracks` audio clips take
+  `bars` with `"warping": true`, and file such notes under `notes`.
+- **`design_transition(kind="gap")` cuts audio tracks too** (named in
+  `tracks`; MIDI tracks still get an empty "Gap" clip) and returns each
+  track's clips around the gap (`clips`: `arrangement_clip_index`, start,
+  end), so they need not be read again.
 
 ### Docs
 
@@ -123,6 +198,11 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   skill: check `errors` after `add_device`. CLAUDE.md: Limiter's 12.4
   parameters, racks and chain mixers, track names following the
   instrument, and Simpler's reverse, as measured in Live 12.4.16.
+- `run_batch`: a playhead moved in a batch takes effect after it
+  (`set_or_delete_cue` in the same batch toggles at the old position).
+  CLAUDE.md: how Live 12.4.16 sizes copies into the Arrangement, warps and
+  unwarps new audio clips, trims and deletes Arrangement clips, moves the
+  playhead, and names audio tracks after their first clip.
 
 ### Tests
 
@@ -132,6 +212,15 @@ The Remote Script is unchanged: no reinstall or Live restart needed.
   browser loading onto a Drum Rack inside a rack, an "FX Hit" folder that
   lists "Impact Layered Reversed" first and a "Crash Reverse Swell" listed
   before "Crash 505". Tests for each fix above.
+- `fake_live`: a clip's length is its loop (copies take it), unlooped
+  Arrangement clips end at loop_end, warping off turns the loop off and
+  keeps times in seconds (an unwarped Session clip keeping its length),
+  warp markers with Live's shadow marker, `move_warp_marker`,
+  `remove_warp_marker`, the tempo Live reads a file at (`FILE_TEMPOS`, WAV
+  length read from the file), `Track.delete_clip`, copies replacing the
+  clips they cover (a covered or deleted clip can no longer be read or
+  changed, until undo brings it back), and the playhead following new
+  Arrangement clips.
 
 ## 2.4.3 — 2026-11-16
 

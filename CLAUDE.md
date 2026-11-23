@@ -48,7 +48,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
-| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, Instrument Racks and chain mixers, `replace_sample`, Simpler's reverse, Live's version: 12.4.16). Tests and the simulator use it. |
+| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, Instrument Racks and chain mixers, `replace_sample`, Simpler's reverse, clip lengths, warp markers and unwarped clips as Live sizes them, Live's version: 12.4.16). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
 | `evals/` | `claude plugin eval` suite: 33 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
@@ -524,6 +524,60 @@ reference-dissector's `live-build`, which builds a plan through
 - The Remote Script served 4 clients; the build's connection was not
   refused.
 
+Measured on 2026-11-23 (Live 12.4.16 Trial, empty set, click tracks made
+at 48 kHz) for the Arrangement and audio clip tools:
+
+- **Copies into the Arrangement** (`duplicate_clip_to_arrangement`) are as
+  long as the clip's `length`, which is `loop_end - loop_start` looped or
+  not: an unlooped Session clip with end_marker 16 and loop_end 64 was
+  copied 64 beats long. With the loop off, start_marker follows
+  loop_start (set alone it stayed) and end_marker is independent (turning
+  the loop off copies loop_end into it). loop_end set to 6, the copy made
+  and loop_end put back, all in one batch, gave a 6-beat copy keeping that
+  loop (`sized_copy`). An Arrangement clip works as the source (its span).
+  A copy covering a clip replaces it; one laid over part of an audio clip
+  splits it like a MIDI one (later parts' start_marker 17, 32).
+  `Track.delete_clip(clip)` deletes an Arrangement clip. `cut_ranges`,
+  `build_arrangement` and the gap transition build on these.
+- **An unlooped Arrangement clip ends at its loop_end** (16 → 10 ended it 6
+  beats earlier; an unwarped one's loop_end is in seconds, 40 → 4 made 80
+  beats 8); a looped one keeps its span (loop_end changes only the loop),
+  and turning its loop off keeps the span (loop_end becomes its end). The
+  span changes after the command: a copy of a clip trimmed in the same
+  batch took its old length (`trimmed_copies` uses three commands).
+- **The playhead follows new Arrangement clips**: while stopped,
+  `duplicate_clip_to_arrangement`, `create_midi_clip` and
+  `Track.create_audio_clip` move `current_song_time` to the new clip's
+  start (deleting a clip leaves it). `playhead_put_back` /
+  `keeping_playhead` put it back.
+- **New audio clips are warped at a guessed tempo**: looped, with three
+  warp markers (`beat_time`, `sample_time` in seconds): the file's start,
+  its end, and a shadow marker 1/32 beat later that `move_warp_marker`
+  refuses ("The shadow marker can't be moved."). Click tracks of 8 s and
+  19.2 s made at 120 and 100 BPM came in right (16, 32 beats), a 40 s one
+  at 120 BPM as 96 BPM (64 beats), and a 32 s one (8 s of clicks, then
+  silence) right. `move_warp_marker(64, 16)` moved the end marker to beat
+  80 (the file at 120 BPM) without touching the loop or markers; setting
+  end_marker and loop_end to 80 then gave an 80-beat clip.
+  `remove_warp_marker(beat_time)` works; `add_warp_marker` wants a
+  WarpMarker object (a dict is refused), so the script cannot add one.
+- **Warping off** turns the loop off and puts loop times in seconds
+  (loop_end 40). A Session clip keeps the length it had (64 beats, from
+  the guess; loop_end 40 → 39 → 40 left it 64), so its copies last 64 beats
+  (32 s of the 40 s file); an Arrangement clip ends at the file's length
+  at the set's tempo (80 beats), read back from the next command on.
+  Warped straight to 80 beats first, then unwarped in the same batch, the
+  Session clip was 80 beats and so was its copy (`fit_audio_clip`).
+  Warping turned back on left only the start and shadow markers (the
+  guessed tempo kept, end_marker 102.4), so nothing can move the file's
+  end: such a clip cannot be fitted (`fit_audio_clip` says so).
+- **Audio tracks take their first clip's name**: a track still named as
+  Live named it ("4-Audio") became "4-click16_120" when an audio clip
+  landed on it (Session or Arrangement), kept that while a clip was there
+  and got "4-Audio" back when the last went; a name set by the user stays.
+  Setting the name to "" gives Live's naming back. Address such tracks by
+  index or id.
+
 Not verified in Live (check each in a scratch set before claiming it):
 
 - The start put back on stems by `separate_stems(to_tracks=True)` (the
@@ -543,6 +597,11 @@ Not verified in Live (check each in a scratch set before claiming it):
   unwarped clip `start_marker` in seconds; `Clip.sample_rate`, else the
   file's rate.
 - A 44.1 kHz audio device: every recording ran at 48 kHz.
+- `fit_audio_clip` on a clip Live warped with inner markers (the remake
+  sessions saw 17 on a padded file): it removes them with
+  `remove_warp_marker` before moving the last; only three-marker clips
+  were measured. That clip envelopes play in a shortened copy rests on
+  the copy keeping them (Arrangement envelopes cannot be read back).
 
 ## Live Set files (.als), as read from Live 12.4's own sets
 
@@ -627,7 +686,8 @@ Not verified in Live (check each in a scratch set before claiming it):
   analysis is done (the .asd written, ~12 s for a 150 s file); warping
   turned off after that analysis moved the start (0 to 0.53), turned off
   with the start reset in the same batch it stayed at 0 after the analysis.
-  Every path that creates one puts it back (`from_its_start`: loop_start,
+  Every path that creates one puts it back (`from_its_start`, inside
+  `fit_audio_clip`: loop_start,
   then start_marker, after warping); the fake moves it at once
   (`FIRST_TRANSIENT`), a stricter Live, so a path that forgets is caught.
 - Tools that wait (recording, long-polling) are `async` and use `asend()` so

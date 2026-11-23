@@ -15,6 +15,7 @@ import re
 import sys
 import time
 import types
+import wave
 import weakref
 
 from .journal import NO_UNDO_PROPERTIES, PARAMETER_PROPERTIES
@@ -155,14 +156,114 @@ class FakeNote(FakeObj):
 class FakeClip(FakeObj):
     def __init__(self, name="Clip", length=4.0, midi=True):
         super(FakeClip, self).__init__(
-            name=name, length=length, loop_start=0.0, loop_end=length, start_marker=0.0,
+            name=name, loop_start=0.0, loop_end=length, start_marker=0.0,
             end_marker=length, looping=True, is_midi_clip=midi, is_audio_clip=not midi,
             is_playing=False, is_recording=False, warp_mode=WarpMode(0), muted=False,
-            color_index=0, file_path=None)
+            color_index=0, file_path=None, is_arrangement_clip=False)
         object.__setattr__(self, "_notes", [])
         object.__setattr__(self, "_next_id", 1)
         object.__setattr__(self, "envelopes", {})
         object.__setattr__(self, "calls", [])
+
+    # A clip deleted or replaced (a copy laid over it) is gone: Live 12.4.16
+    # answers reads of it with an error, and refuses to change or copy it
+    def __getattribute__(self, name):
+        if not name.startswith("_") and object.__getattribute__(self, "__dict__").get("_gone"):
+            raise RuntimeError("Object of type Clip no longer exists")
+        return object.__getattribute__(self, name)
+
+    # Live 12.4.16 (2026-11-23): a clip's length is loop_end - loop_start,
+    # looped or not (end_marker does not shorten an unlooped one), and a copy
+    # into the Arrangement takes that length. Unwarped audio keeps its loop in
+    # seconds: a Session clip's length is that at the tempo its warp markers
+    # give (Live's guess, 64 beats for a 40 s file read as 96 BPM), an
+    # Arrangement clip's at the set's tempo.
+    def _seconds_per_beat(self):
+        if not self.is_audio_clip or vars(self).get("warping", True):
+            return 1.0
+        if vars(self).get("start_time") is not None:
+            return 60.0 / _tempo()
+        return 60.0 / self._marker_bpm()
+
+    def _marker_bpm(self):
+        real = vars(self).get("warp_markers", [])[:-1]
+        if len(real) >= 2 and real[-1].sample_time > real[0].sample_time:
+            return 60.0 * (real[-1].beat_time - real[0].beat_time) / (
+                real[-1].sample_time - real[0].sample_time)
+        return _tempo()
+
+    @property
+    def length(self):
+        frozen = vars(self).get("_unwarped_length")
+        if frozen is not None and vars(self).get("start_time") is None \
+                and vars(self).get("warping") is False:
+            # an unwarped Session clip keeps the length it had when warping
+            # went off, whatever its loop (40 s → 39 s → 40 s left 64 beats)
+            return frozen
+        return (self.loop_end - self.loop_start) / self._seconds_per_beat()
+
+    @length.setter
+    def length(self, value):
+        self.loop_end = self.loop_start + value * self._seconds_per_beat()
+
+    def __setattr__(self, name, value):
+        if vars(self).get("_gone"):
+            raise RuntimeError("Object of type Clip no longer exists")
+        arranged = vars(self).get("start_time") is not None
+        if name == "looping" and not value and vars(self).get("looping"):
+            if arranged:  # an Arrangement clip keeps its span: loop_end becomes its end
+                object.__setattr__(self, "loop_end", self.loop_start + (
+                    self.end_time - self.start_time) * self._seconds_per_beat())
+            else:  # a Session clip's end marker moves to its loop end
+                object.__setattr__(self, "end_marker", self.loop_end)
+        if name == "warping" and self.is_audio_clip and bool(value) != vars(self).get("warping"):
+            # Live turns the loop off with warping, and its times go to
+            # seconds (back to beats warped), at the markers' tempo
+            to_seconds = 60.0 / self._marker_bpm()
+            factor = to_seconds if not value else 1.0 / to_seconds
+            object.__setattr__(self, "_unwarped_length", None if value else self.length)
+            markers = vars(self).get("warp_markers")
+            if value and markers:  # warped again: Live keeps only the first marker
+                first, beat = markers[0], 1 / 32.0
+                markers[:] = [first, FakeObj(beat_time=first.beat_time + beat,
+                                             sample_time=first.sample_time + beat * to_seconds)]
+            for key in ("loop_start", "loop_end", "start_marker"):
+                object.__setattr__(self, key, vars(self)[key] * factor)
+            FakeObj.__setattr__(self, name, value)
+            if not value:
+                object.__setattr__(self, "looping", False)
+                if arranged:  # unwarped it plays the file at its own speed
+                    object.__setattr__(self, "end_time", self.start_time + self.length)
+            return
+        FakeObj.__setattr__(self, name, value)
+        if name in ("loop_start", "loop_end") and arranged and not self.looping:
+            # an unlooped Arrangement clip ends where its loop_end says
+            object.__setattr__(self, "end_time", self.start_time + self.length)
+
+    def move_warp_marker(self, beat_time, beat_time_distance):
+        """Live 12.4.16: moves a warp marker (not the shadow marker Live keeps
+        1/32 beat after the last one) by a distance in beats; the loop and the
+        markers stay where they were."""
+        markers = self.warp_markers
+        for index, marker in enumerate(markers[:-1]):
+            if abs(marker.beat_time - beat_time) < 1e-9:
+                marker.beat_time = beat_time + beat_time_distance
+                if index == len(markers) - 2:
+                    markers[-1].beat_time = marker.beat_time + 1 / 32.0
+                return
+        if markers and abs(markers[-1].beat_time - beat_time) < 1e-9:
+            raise RuntimeError("The shadow marker can't be moved.")
+        raise RuntimeError("The specified warp marker doesn't exist")
+
+    def remove_warp_marker(self, beat_time):
+        markers = self.warp_markers
+        for marker in markers[:-1]:
+            if abs(marker.beat_time - beat_time) < 1e-9:
+                markers.remove(marker)
+                last = markers[-2] if len(markers) > 1 else markers[0]
+                markers[-1].beat_time = last.beat_time + 1 / 32.0
+                return
+        raise RuntimeError("The specified warp marker doesn't exist")
 
     def get_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
         return [n for n in self._notes
@@ -211,8 +312,7 @@ class FakeClip(FakeObj):
         self.calls.append(("quantize", str(grid), amount))
 
     def duplicate_loop(self):
-        self.length = self.length * 2
-        self.loop_end = self.length
+        self.loop_end = self.loop_start + self.length * 2
 
     def sample_to_beat_time(self, sample_time):
         """A warped audio clip's beat at a sample frame of its file: here a
@@ -228,6 +328,13 @@ def _copy_clip(clip):
     for key in ("loop_start", "loop_end", "start_marker", "end_marker", "looping",
                 "color_index", "file_path"):
         object.__setattr__(copy, key, getattr(clip, key))
+    for key in ("warping", "sample_rate", "sample_length"):
+        if key in vars(clip):
+            object.__setattr__(copy, key, vars(clip)[key])
+    if "warp_markers" in vars(clip):
+        object.__setattr__(copy, "warp_markers", [FakeObj(beat_time=m.beat_time,
+                                                          sample_time=m.sample_time)
+                                                  for m in clip.warp_markers])
     for note in clip._notes:
         copy._notes.append(FakeNote(**{k: v for k, v in vars(note).items() if k != "_listeners"}))
     object.__setattr__(copy, "_next_id", clip._next_id)
@@ -253,6 +360,8 @@ class FakeClipSlot(FakeObj):
         super(FakeClipSlot, self).__init__(clip=clip, has_clip=clip is not None)
 
     def create_clip(self, length):
+        if vars(self).get("_midi") is False:
+            raise RuntimeError("MIDI clips can only be created on MIDI tracks")
         self.clip = FakeClip(length=length)
         self.has_clip = True
 
@@ -269,14 +378,52 @@ class FakeClipSlot(FakeObj):
         target.has_clip = True
 
     def create_audio_clip(self, path):
-        clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
-        object.__setattr__(clip, "file_path", path)
-        object.__setattr__(clip, "warping", True)
-        object.__setattr__(clip, "sample_rate", 44100.0)
-        _at_first_transient(clip)
+        clip = _new_audio_clip(path)
         self.clip = clip
         self.has_clip = True
         return clip
+
+
+# The tempo Live's warp analysis reads a file at, by path; others are read
+# at the set's tempo. Live 12.4.16 (2026-11-23) read a 40 s click track made
+# at 120 BPM as 96 BPM (64 beats, three warp markers) and an 8 s one at
+# 120 and a 100 BPM one right.
+FILE_TEMPOS = {}
+
+
+def _tempo():
+    for song in (ref() for ref in reversed(_SONGS)):
+        if song is not None:
+            return float(vars(song).get("tempo", 120.0))
+    return 120.0
+
+
+def _file_seconds(path):
+    """(seconds, sample rate) of a PCM WAV; 4 s at 44.1 kHz for anything else."""
+    try:
+        with wave.open(str(path)) as w:
+            return w.getnframes() / float(w.getframerate()), float(w.getframerate())
+    except Exception:
+        return 4.0, 44100.0
+
+
+def _new_audio_clip(path):
+    """A new audio clip as Live 12.4.16 makes it: warped and looped at the
+    tempo its analysis reads (FILE_TEMPOS), warp markers at the file's start
+    and end plus the shadow marker 1/32 beat later, sample_length in frames."""
+    seconds, rate = _file_seconds(path)
+    bpm = FILE_TEMPOS.get(str(path), _tempo())
+    beats = seconds * bpm / 60.0
+    clip = FakeClip(name=str(path).replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0],
+                    length=beats, midi=False)
+    markers = [FakeObj(beat_time=0.0, sample_time=0.0),
+               FakeObj(beat_time=beats, sample_time=seconds),
+               FakeObj(beat_time=beats + 1 / 32.0, sample_time=seconds + 60.0 / bpm / 32.0)]
+    for key, value in (("file_path", path), ("warping", True), ("sample_rate", rate),
+                       ("sample_length", int(round(seconds * rate))), ("warp_markers", markers)):
+        object.__setattr__(clip, key, value)
+    _at_first_transient(clip)
+    return clip
 
 
 # Where Live puts a new audio clip's start: at the file's first transient
@@ -554,6 +701,15 @@ def _songs_of(track):
                     + [song.master_track])]
 
 
+def _playhead_to(track, beat):
+    """Live 12.4.16 moves the stopped playhead to the start of a clip that
+    duplicate_clip_to_arrangement, create_midi_clip or create_audio_clip
+    makes in a track's Arrangement (deleting one leaves it)."""
+    for song in _songs_of(track):
+        if not vars(song).get("is_playing"):
+            song.current_song_time = float(beat)
+
+
 def _select(track):
     """Live 12.4.16 selects a track a device was inserted on, a new MIDI or
     audio track (create_*_track), and one whose device was deleted while another device stays on it
@@ -642,6 +798,12 @@ INSERTABLE = {
 }
 
 
+def _slot_of(midi):
+    slot = FakeClipSlot()
+    object.__setattr__(slot, "_midi", bool(midi))  # Live refuses MIDI clips on audio tracks
+    return slot
+
+
 class FakeTrack(FakeObj):
     def __init__(self, name, midi=True, slots=4, devices=None, sends=2):
         mixer = FakeObj(volume=FakeParam("Track Volume", 0.85, display=volume_display),
@@ -653,7 +815,7 @@ class FakeTrack(FakeObj):
             name=name, has_midi_input=midi, has_audio_input=not midi, mute=False, solo=False,
             arm=False, can_be_armed=True, is_foldable=False, is_grouped=False,
             color_index=1, color=0, mixer_device=mixer, devices=list(devices or []),
-            clip_slots=[FakeClipSlot() for _ in range(slots)], arrangement_clips=[],
+            clip_slots=[_slot_of(midi) for _ in range(slots)], arrangement_clips=[],
             current_monitoring_state=1, available_input_routing_types=routing,
             input_routing_type=routing[0], has_audio_output=True,
             output_meter_left=0.0, output_meter_right=0.0)
@@ -663,17 +825,34 @@ class FakeTrack(FakeObj):
         if self.devices:
             _select(self)
 
+    def delete_clip(self, clip):
+        """Track.delete_clip: removes an Arrangement clip (Live 12.4.16)."""
+        if not any(c is clip for c in self.arrangement_clips):
+            raise RuntimeError("Clip not found on this track")
+        self.arrangement_clips[:] = [c for c in self.arrangement_clips if c is not clip]
+        object.__setattr__(clip, "_gone", True)
+
     def duplicate_clip_to_arrangement(self, clip, time):
-        """Like Live 12.4: the copy keeps notes and envelopes; clips under it
-        are split, the parts keeping all their notes and moving their markers."""
-        start, end = float(time), float(time) + clip.length
+        """Like Live 12.4: the copy is the clip's length long (loop_end -
+        loop_start, looped or not) and keeps notes and envelopes; clips under
+        it are split, the parts keeping all their notes and moving their
+        markers, and clips it covers go."""
+        if clip.is_midi_clip != bool(self.has_midi_input):
+            raise RuntimeError("Clip type does not match the track")
+        start = float(time)
+        end = start + (clip.end_time - clip.start_time if vars(clip).get("start_time") is not None
+                       else clip.length)
         copy = _copy_clip(clip)
+        object.__setattr__(copy, "is_arrangement_clip", True)
         object.__setattr__(copy, "start_time", start)
         object.__setattr__(copy, "end_time", end)
         kept = []
         for other in self.arrangement_clips:
             if other.end_time <= start or other.start_time >= end:
                 kept.append(other)
+                continue
+            if other.start_time >= start and other.end_time <= end:  # covered: replaced
+                object.__setattr__(other, "_gone", True)
                 continue
             if other.end_time > end:  # a part goes on after the copy
                 tail = other if other.start_time >= start else _copy_clip(other)
@@ -686,22 +865,25 @@ class FakeTrack(FakeObj):
                 kept.append(other)
         kept.append(copy)
         self.arrangement_clips[:] = sorted(kept, key=lambda c: c.start_time)
+        _playhead_to(self, start)
         return copy
 
     def create_midi_clip(self, start, length):
         clip = FakeClip(length=length)
+        object.__setattr__(clip, "is_arrangement_clip", True)
         object.__setattr__(clip, "start_time", float(start))
         object.__setattr__(clip, "end_time", float(start) + length)
         self.arrangement_clips.append(clip)
+        _playhead_to(self, start)
         return clip
 
     def create_audio_clip(self, path, position):
-        clip = FakeClip(name=path.rsplit("/", 1)[-1].rsplit(".", 1)[0], length=8.0, midi=False)
-        for key, value in (("file_path", path), ("warping", True), ("start_time", float(position)),
-                           ("end_time", float(position) + 8.0), ("sample_rate", 44100.0)):
-            object.__setattr__(clip, key, value)
-        _at_first_transient(clip)
+        clip = _new_audio_clip(path)
+        object.__setattr__(clip, "is_arrangement_clip", True)
+        object.__setattr__(clip, "start_time", float(position))
+        object.__setattr__(clip, "end_time", float(position) + clip.loop_end)
         self.arrangement_clips.append(clip)
+        _playhead_to(self, position)
         return clip
 
     def insert_device(self, name, index=-1):
@@ -717,7 +899,7 @@ class FakeTrack(FakeObj):
 # ── Undo history, by the rules measured on Live 12.4 (see journal.py) ───────
 
 # Bookkeeping of the fakes themselves, never part of an undo step
-_NOT_SET_STATE = frozenset(["_live_named", "exclusive_arm", "_listeners", "undo_log", "calls",
+_NOT_SET_STATE = frozenset(["_live_named", "_unwarped_length", "_gone", "_midi", "exclusive_arm", "_listeners", "undo_log", "calls",
                             "_undo", "_redo", "_open_step",
                             "_position", "_clock", "_stopped_at", "_pass", "_pass_closing", "_pass_starting",
                             "running_clock", "_data"])
@@ -783,9 +965,16 @@ def _apply(changes, use_old):
     for obj, attr, old, new in (reversed(changes) if use_old else changes):
         value = old if use_old else new
         current = vars(obj).get(attr, _MISSING)
+        vars(obj).pop("_gone", None)  # a clip undo or redo changes is there again
         if value is _MISSING:
             vars(obj).pop(attr, None)
         elif isinstance(value, list) and isinstance(current, list):
+            for item in value:  # clips back in a track's lists live again (as in Live)
+                if isinstance(item, FakeObj):
+                    vars(item).pop("_gone", None)
+            for item in current:  # and clips that leave them (a redone delete) are gone
+                if isinstance(item, FakeClip) and not any(item is v for v in value):
+                    object.__setattr__(item, "_gone", True)
             current[:] = value
         elif isinstance(value, dict) and isinstance(current, dict):
             current.clear()

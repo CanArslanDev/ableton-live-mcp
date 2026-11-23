@@ -673,6 +673,106 @@ def test_create_locator_deletes_a_cue_live_moved_and_says_so(empty_live, monkeyp
     assert song.cue_points == []
 
 
+def _legacy(tool, **arguments):
+    result = asyncio.run(live_server.mcp.call_tool(tool, arguments))
+    return result.content[0].text
+
+
+def test_create_audio_clip_checks_and_fits_what_live_warped(empty_live, tmp_path, monkeypatch):
+    """Live warps a new clip at the tempo it guesses for the file (a 120 BPM
+    click track came in at 96 BPM, Live 12.4.16): the tool says so, fits it
+    to `bars`, or with warping=false plays it as recorded, its Session
+    length (what copies get) the file's at the set's tempo."""
+    from MCP_Server import fake_live
+
+    call = empty_live
+    song = call.simulator.song
+    song.create_audio_track(-1)
+    index = len(song.tracks) - 1
+    wav = tmp_path / "loop.wav"
+    sf.write(wav, np.zeros(88200), 44100)  # 2 s: 4 beats at 120 BPM
+    monkeypatch.setitem(fake_live.FILE_TEMPOS, str(wav), 96.0)
+
+    def made(slot, **options):
+        text = _legacy("create_audio_clip", track_index=index, clip_index=slot, path=str(wav),
+                       **options)
+        assert text.startswith("Created audio clip"), text
+        return json.loads(text.split(": ", 1)[1]), song.tracks[index].clip_slots[slot].clip
+
+    guessed, clip = made(0)
+    assert guessed["length_beats"] == 3.2 and guessed["live_guess_bpm"] == 96.0
+    assert guessed["warp_bpm"] == 96.0  # as Live warped it
+    assert "96.0 BPM" in guessed["warning"] and "4 beats" in guessed["warning"]
+    fitted, clip = made(1, bars=1)
+    assert fitted["length_beats"] == 4.0 and "warning" not in fitted and clip.warping is True
+    # Live's first reading stays labelled as such; fitted, the file plays at the set's tempo
+    assert (fitted["live_guess_bpm"], fitted["warp_bpm"]) == (96.0, 120.0)
+    assert [m.beat_time for m in clip.warp_markers[:2]] == [0.0, 4.0]
+    as_recorded, clip = made(2, warping=False)
+    assert (as_recorded["length_beats"], as_recorded["warping"]) == (4.0, False)
+    assert "warning" not in as_recorded and (clip.loop_start, clip.start_marker) == (0.0, 0.0)
+    copy = json.loads(_legacy("duplicate_to_arrangement", track_index=index, clip_index=2,
+                              destination_time=8.0))
+    assert (copy["start_time"], copy["end_time"]) == (8.0, 12.0) and "warnings" not in copy
+    # a loop made at another tempo (not whole bars at the set's): Live's reading stands
+    loop90 = tmp_path / "loop90.wav"
+    sf.write(loop90, np.zeros(int(44100 * 8 / 3)), 44100)  # 4 beats at 90 BPM
+    monkeypatch.setitem(fake_live.FILE_TEMPOS, str(loop90), 90.0)
+    text = _legacy("create_audio_clip", track_index=index, clip_index=3, path=str(loop90))
+    info = json.loads(text.split(": ", 1)[1])
+    assert info["live_guess_bpm"] == 90.0 and info["length_beats"] == 4.0 and "warning" not in info
+
+
+def test_create_audio_clip_refuses_bars_unwarped_before_making_it(empty_live, tmp_path):
+    call = empty_live
+    song = call.simulator.song
+    song.create_audio_track(-1)
+    index = len(song.tracks) - 1
+    with pytest.raises(ToolError, match="warping=false"):
+        _legacy("create_audio_clip", track_index=index, clip_index=0,
+                path=str(tmp_path / "x.wav"), bars=2, warping=False)
+    assert not song.tracks[index].clip_slots[0].has_clip
+
+
+def test_create_audio_clip_says_the_clip_is_there_when_its_set_up_fails(empty_live,
+                                                                         monkeypatch):
+    call = empty_live
+    song = call.simulator.song
+    song.create_audio_track(-1)
+    index = len(song.tracks) - 1
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("Live went away")
+
+    monkeypatch.setattr(extended_tools, "fit_audio_clip", broken)
+    text = _legacy("create_audio_clip", track_index=index, clip_index=0,
+                   path=str(FIXTURES / "samples" / "kick.wav"))
+    assert text.startswith(f"Created audio clip 'kick' at track {index}, slot 0, but setting it")
+    assert "Live went away" in text and song.tracks[index].clip_slots[0].has_clip
+
+
+def test_duplicate_to_arrangement_says_where_the_copy_landed(empty_live):
+    """Live makes the copy the clip's length (loop_end - loop_start) even when
+    an unlooped clip's end_marker is earlier: said, and `length` sizes it."""
+    from MCP_Server import fake_live
+
+    call = empty_live
+    song = call.simulator.song
+    clip = fake_live.FakeClip(name="Pad", length=16.0)
+    clip.looping, clip.end_marker = False, 4.0
+    slot = song.tracks[0].clip_slots[0]
+    slot.clip, slot.has_clip = clip, True
+    whole = json.loads(_legacy("duplicate_to_arrangement", track_index=0, clip_index=0,
+                               destination_time=16.0))
+    assert (whole["start_time"], whole["end_time"]) == (16.0, 32.0)
+    assert "end_marker 4" in whole["warnings"][0]
+    short = json.loads(_legacy("duplicate_to_arrangement", track_index=0, clip_index=0,
+                               destination_time=32.0, length=4.0))
+    assert (short["start_time"], short["end_time"]) == (32.0, 36.0) and "warnings" not in short
+    assert (clip.loop_end, clip.end_marker, clip.looping) == (16.0, 4.0, False)
+    assert song.current_song_time == 0.0  # Live moved it to each copy; put back
+
+
 def test_the_original_create_audio_clip_plays_the_file_from_its_start(empty_live):
     """server.py's create_audio_clip: Live's warp analysis moves a new clip's
     start to the file's first transient; the tool puts it back."""

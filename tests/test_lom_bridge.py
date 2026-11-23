@@ -581,6 +581,32 @@ def test_midi_files_round_trip_through_clips(live_server, tmp_path):
         call("export_clip_to_midi", track="Bass", clip_index=1, path=exported["file"])
 
 
+def test_import_midi_file_ignores_a_release_tail_and_takes_a_length(live_server, tmp_path):
+    """A last note whose tail ends just past bar 8 leaves the clip 8 bars long
+    (it became 9); length_bars sets the length, cutting notes at its end."""
+    from MCP_Server import midi_files
+
+    script, call = live_server
+    notes = [{"pitch": 48, "start_time": float(b), "duration": 1.0, "velocity": 100}
+             for b in range(0, 32, 4)]
+    notes[-1]["duration"] = 4.1  # 28 → 32.1
+    path = tmp_path / "tail.mid"
+    midi_files.write_midi(path, notes, 120.0, 4, 4, "tail")
+    result = call("import_midi_file", path=str(path), track="Bass", clip_index=2)
+    clip = script._song.tracks[1].clip_slots[2].clip
+    assert result["length_beats"] == 32.0 and clip.length == 32.0
+    assert max(n.start_time + n.duration for n in clip._notes) == 32.0
+    # a note that starts on the bar line keeps that bar, however short
+    hit = notes + [{"pitch": 50, "start_time": 32.0, "duration": 0.25, "velocity": 100}]
+    midi_files.write_midi(tmp_path / "hit.mid", hit, 120.0, 4, 4, "hit")
+    assert call("import_midi_file", path=str(tmp_path / "hit.mid"), track="Bass",
+                clip_index=1)["length_beats"] == 36.0
+    short = call("import_midi_file", path=str(path), track="Bass", clip_index=3, length_bars=4)
+    clip = script._song.tracks[1].clip_slots[3].clip
+    assert short["length_beats"] == 16.0 and clip.length == 16.0
+    assert short["notes_after_the_end"] == 4 and len(clip._notes) == 4
+
+
 def test_import_from_live_set_writes_the_played_notes(live_server, tmp_path):
     import als_sets
 
@@ -783,7 +809,8 @@ def test_audio_to_midi_follows_the_clips_warp_and_start_marker(live_server, tmp_
     clip.warping, clip.start_marker = False, 0.75
     unwarped = call("audio_to_midi", track="Vox", clip_index=0, offset_beats=1)
     assert [n["start_time"] for n in note_dicts(unwarped)] == [1.5]
-    assert unwarped["timing"] == {"offset_beats": 1.0, "note": "The clip loops; the notes follow its file once.",
+    # (Live turns the loop off with warping, so no "the clip loops" note)
+    assert unwarped["timing"] == {"offset_beats": 1.0,
                                   "method": "tempo", "tempo": 120.0, "start_marker_seconds": 0.75,
                                   "notes_before_clip_start": 1}
     # A warped clip Live cannot map falls back to the tempo, and says so; audio
@@ -1455,13 +1482,437 @@ def test_build_arrangement_lays_out_sections_with_locators(live_server):
 
     assert starts(drums) == [(8.0, "Beat"), (12.0, "Beat"), (16.0, "Beat"), (20.0, "Beat")]
     assert starts(bass)[:3] == [(0.0, "Bass A"), (8.0, "Bass A"), (16.0, "Bass A")]
-    # Outro: 4 beats of a 3-beat MIDI clip → one copy plus an exact 1-beat cut
-    assert starts(bass)[3] == (24.0, "Bass B") and bass.arrangement_clips[4].length == 1.0
-    cut = bass.arrangement_clips[4]._notes
-    assert [(n.start_time, n.duration) for n in cut] == [(0.0, 1.0)]
-    assert any("Chop" in w or "Vox" in w for w in result["warnings"])
+    # Outro: 4 beats of a 3-beat MIDI clip → one copy plus a copy 1 beat long
+    # (Live sizes a copy by loop_end - loop_start: moved for it, put back)
+    assert starts(bass)[3:] == [(24.0, "Bass B"), (27.0, "Bass B")]
+    assert (bass.arrangement_clips[4].end_time, bass.arrangement_clips[4].length) == (28.0, 1.0)
+    assert (riff.loop_end, riff.end_marker, riff.length) == (3.0, 3.0, 3.0)
+    # the 6-beat audio clip: in the 8-beat Intro once, then 2 beats of it (not
+    # 6 past the section's end), in the 16-beat Drop twice and 4 beats
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [
+        (0.0, 6.0), (6.0, 8.0), (8.0, 14.0), (14.0, 20.0), (20.0, 24.0)]
+    assert vox.clip_slots[0].clip.length == 6.0 and "warnings" not in result
     assert [(c.name, c.time) for c in song.cue_points] == [("Intro", 0.0), ("Drop", 8.0),
                                                           ("Outro", 24.0)]
+
+
+def _arranged(track, clip, start, end=None):
+    """Put a copy of clip on the track's Arrangement at start (cut at end)."""
+    placed = track.duplicate_clip_to_arrangement(clip, start)
+    if end is not None:
+        object.__setattr__(placed, "end_time", end)
+    return placed
+
+
+def test_build_arrangement_silences_tracks_left_out_and_old_locators(live_server):
+    """A rebuilt section leaves nothing of the old layout playing on tracks
+    that don't play there: clips inside go, clips across its edges are cut
+    there (Live splits a clip a copy is laid over); old locators inside the
+    built bars go, others stay."""
+    script, call = live_server
+    song = script._song
+    drums, bass, vox = song.tracks
+    drums.clip_slots[0].clip = fake_live.FakeClip(name="Beat", length=4.0)
+    drums.clip_slots[0].has_clip = True
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    old_beat = fake_live.FakeClip(name="Old Beat", length=16.0)
+    _arranged(drums, old_beat, 0.0)                       # across the Intro's end
+    chop = vox.clip_slots[1].create_audio_clip("/samples/old chop.wav")
+    chop.loop_start = chop.start_marker = 0.0
+    _arranged(vox, chop, 2.0, 6.0)                        # inside the Intro
+    _arranged(vox, chop, 12.0, 20.0)                      # across the song's end
+    vox.clip_slots[1].delete_clip()
+    for name, at in (("Old Intro", 0.0), ("Old", 4.0), ("Later", 20.0)):
+        song.cue_points.append(fake_live.FakeObj(name=name, time=at))
+    song.current_song_time = 2.0
+
+    result = call("build_arrangement", sections=[  # Vox, with no Session clip, named in each
+        {"name": "Intro", "bars": 2, "clips": {"Bass": 0, "Vox": None}},
+        {"name": "Drop", "bars": 2, "scene": 0, "except": ["Vox"]}])
+    assert result["ok"], result
+    assert result["cleared"] == {"Drums": {"trimmed": 1}, "Vox": {"removed": 1, "trimmed": 1}}
+    assert [(c.start_time, c.end_time, c.name) for c in drums.arrangement_clips] == [
+        (8.0, 12.0, "Beat"), (12.0, 16.0, "Beat")]
+    # Vox plays nowhere: only what lies past the built bars is left, from its own beat 4
+    assert [(c.start_time, c.end_time, c.start_marker) for c in vox.arrangement_clips] == [
+        (16.0, 20.0, 4.0)]
+    assert not any(slot.has_clip for slot in vox.clip_slots)  # the scratch clip went
+    assert [(c.name, c.time) for c in sorted(song.cue_points, key=lambda c: c.time)] == [
+        ("Intro", 0.0), ("Drop", 8.0), ("Later", 20.0)]
+    assert result["locators_deleted"] == [{"name": "Old", "time": 4.0}]
+    # each copy moved the playhead to it (Live 12.4.16); it is back where it was
+    assert song.current_song_time == 2.0
+
+
+def test_build_arrangement_leaves_arrangement_only_tracks_alone(live_server):
+    """A track with no Session clip (vocals recorded in the Arrangement) is
+    not part of the layout: unless a section names it, its clips stay and
+    are listed under kept."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    take = vox.clip_slots[1].create_audio_clip("/samples/vocal take.wav")
+    _arranged(vox, take, 2.0, 10.0)
+    vox.clip_slots[1].delete_clip()
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 2, "clips": {"Bass": 0}}],
+                  locators=False)
+    assert result["ok"] and result["kept"] == {"Vox": 1} and "cleared" not in result
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(2.0, 10.0)]
+
+
+def test_an_arrangement_only_track_is_cleared_only_where_named(live_server):
+    """Named in one section (except), a track without Session clips is
+    cleared there and nowhere else (it was cleared in every section)."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    take = vox.clip_slots[1].create_audio_clip("/samples/vocal take.wav")
+    take.loop_start = take.start_marker = 0.0
+    _arranged(vox, take, 2.0, 6.0)    # in A, which names Vox
+    _arranged(vox, take, 10.0, 14.0)  # in B, which does not
+    vox.clip_slots[1].delete_clip()
+    result = call("build_arrangement", sections=[
+        {"name": "A", "bars": 2, "scene": 0, "except": ["Vox"]},
+        {"name": "B", "bars": 2, "scene": 0}], locators=False)
+    assert result["ok"] and result["cleared"] == {"Vox": {"removed": 1}} and result["kept"] == {"Vox": 1}
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(10.0, 14.0)]
+
+
+def test_kept_counts_what_is_left_after_the_cuts(live_server):
+    """One recorded clip across an unnamed, a named and an unnamed section:
+    cut out of the named one, its two parts are left in the others."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=4.0)
+    bass.clip_slots[0].has_clip = True
+    take = vox.clip_slots[1].create_audio_clip("/samples/vocal take.wav")
+    take.loop_start = take.start_marker = 0.0
+    _arranged(vox, take, 0.0, 24.0)
+    vox.clip_slots[1].delete_clip()
+    result = call("build_arrangement", sections=[
+        {"name": "B", "bars": 2, "scene": 0},
+        {"name": "A", "bars": 1, "scene": 0, "except": ["Vox"]},
+        {"name": "C", "bars": 3, "scene": 0}], locators=False)
+    assert result["cleared"] == {"Vox": {"trimmed": 1}} and result["kept"] == {"Vox": 2}
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(0.0, 8.0),
+                                                                           (12.0, 24.0)]
+
+
+def test_build_tracks_refuses_bars_it_cannot_fit_before_building(live_server):
+    script, call = live_server
+    before = len(script._song.tracks)
+    with pytest.raises(Exception, match="bars must be more than 0"):
+        call("build_tracks", tracks=[{"name": "Loop", "kind": "audio", "audio_clips": [
+            {"file": "/samples/loop.wav", "warping": True, "bars": 0}]}])
+    assert len(script._song.tracks) == before
+
+
+def test_build_arrangement_can_keep_other_tracks_and_locators(live_server):
+    script, call = live_server
+    song = script._song
+    drums, bass, _vox = song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    _arranged(drums, fake_live.FakeClip(name="Old Beat", length=16.0), 0.0)
+    song.cue_points.append(fake_live.FakeObj(name="Old", time=4.0))
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 2, "clips": {"Bass": 0}}],
+                  clear_others=False, clear_locators=False)
+    assert "cleared" not in result and "locators_deleted" not in result
+    assert [(c.start_time, c.end_time) for c in drums.arrangement_clips] == [(0.0, 16.0)]
+    assert sorted(c.time for c in song.cue_points) == [0.0, 4.0]
+
+
+def test_build_arrangement_keeps_envelopes_in_a_shortened_copy(live_server):
+    """What is left of a section after whole copies is a copy of the Session
+    clip too, so its clip envelopes play in the Arrangement."""
+    script, call = live_server
+    bass = script._song.tracks[1]
+    riff = fake_live.FakeClip(name="Riff", length=8.0)
+    volume = bass.mixer_device.volume
+    riff.create_automation_envelope(volume).insert_step(0.0, 8.0, 0.5)
+    bass.clip_slots[0].clip, bass.clip_slots[0].has_clip = riff, True
+    call("build_arrangement", sections=[{"name": "A", "bars": 3, "clips": {"Bass": 0}}],
+         locators=False)
+    whole, rest = bass.arrangement_clips
+    assert (rest.start_time, rest.end_time) == (8.0, 12.0)
+    assert rest.automation_envelope(volume).steps == [(0.0, 8.0, 0.5)]
+    assert riff.length == 8.0
+
+
+def test_build_arrangement_cuts_an_unwarped_audio_clip_to_its_section(live_server):
+    """An unwarped Session clip keeps its length whatever its loop (Live
+    12.4.16), so the copy is trimmed in the Arrangement, past everything,
+    and copied from there."""
+    script, call = live_server
+    vox = script._song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")  # 4 s: 8 beats
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 1, "clips": {"Vox": 0}}],
+                  locators=False)
+    assert result["ok"], result
+    assert [(c.start_time, c.end_time, c.loop_end) for c in vox.arrangement_clips] == [
+        (0.0, 4.0, 2.0)]
+    assert (take.length, take.loop_end, take.warping) == (8.0, 4.0, False)
+
+
+def test_build_arrangement_trims_one_unwarped_loop_in_several_sections(live_server):
+    """Each trimmed copy is made at a scratch place of its own: a scratch
+    copy laid over another replaces it (it can no longer be read), which
+    failed the build and left a stray clip."""
+    script, call = live_server
+    song = script._song
+    vox = song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")  # 4 s: 8 beats
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+    song.cue_points.append(fake_live.FakeObj(name="Old", time=4.0))
+    result = call("build_arrangement", sections=[
+        {"name": "A", "bars": 1, "clips": {"Vox": 0}},
+        {"name": "B", "bars": 3, "clips": {"Vox": 0}}])
+    assert result["ok"], result
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [
+        (0.0, 4.0), (4.0, 12.0), (12.0, 16.0)]
+    assert sorted((c.name, c.time) for c in song.cue_points) == [("A", 0.0), ("B", 4.0)]
+
+
+def test_build_arrangement_names_the_section_and_track_of_a_failed_copy(live_server,
+                                                                         monkeypatch):
+    """A trimmed copy that cannot be made is an error of its section and
+    track; the build goes on (locators placed) and leaves no scratch copy."""
+    from MCP_Server import extended_tools
+
+    script, call = live_server
+    vox = script._song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+
+    def unreadable(tp, at):
+        raise RuntimeError("no reading")
+
+    monkeypatch.setattr(extended_tools, "past_the_end", unreadable)
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 1, "clips": {"Vox": 0}}])
+    assert result["ok"] is False
+    assert result["errors"] == ["A: Vox: no scratch place: no reading"]
+    assert vox.arrangement_clips == [] and [c.name for c in script._song.cue_points] == ["A"]
+
+
+def test_build_arrangement_reports_a_track_it_could_not_clear(live_server, monkeypatch):
+    """A track whose clearing fails is an error (its old clips would still
+    play); a group track, which holds no clips, is skipped without one. The
+    playhead is read once for the whole build, not per cleared track."""
+    from MCP_Server import extended_tools
+
+    script, call = live_server
+    drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    object.__setattr__(vox, "is_foldable", True)
+    drums.clip_slots[1].clip, drums.clip_slots[1].has_clip = fake_live.FakeClip(name="B"), True
+    real_cut, real_get = extended_tools.cut_ranges, extended_tools.lom_get
+    cleared, playhead_reads = [], []
+
+    def cut(track, ranges):
+        cleared.append(track)
+        if track == 0:
+            raise extended_tools.AbletonCommandError("Live refused the scratch clip")
+        return real_cut(track, ranges)
+
+    def counting(path, properties=None):
+        if properties == ["current_song_time", "is_playing"]:
+            playhead_reads.append(path)
+        return real_get(path, properties)
+
+    monkeypatch.setattr(extended_tools, "cut_ranges", cut)
+    monkeypatch.setattr(extended_tools, "lom_get", counting)
+    _arranged(drums, fake_live.FakeClip(name="Old Beat", length=8.0), 0.0)
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 2, "clips": {"Bass": 0}}],
+                  locators=False)
+    assert result["ok"] is False
+    assert result["errors"] == ["Drums: not cleared: Live refused the scratch clip"]
+    assert cleared == [0] and len(playhead_reads) == 1
+
+
+def test_a_scratch_copy_left_behind_is_an_error(live_server, monkeypatch):
+    script, call = live_server
+    vox = script._song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+    real_delete = fake_live.FakeTrack.delete_clip
+
+    def stuck(self, clip):
+        if clip.start_time >= 1024:  # the scratch copies, past the end of the track
+            raise RuntimeError("Clip is locked")
+        return real_delete(self, clip)
+
+    monkeypatch.setattr(fake_live.FakeTrack, "delete_clip", stuck)
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 1, "clips": {"Vox": 0}}],
+                  locators=False)
+    assert result["ok"] is False and len(result["errors"]) == 1
+    assert result["errors"][0].startswith("A: Vox: a scratch copy (id ")
+    assert "Clip is locked" in result["errors"][0]
+
+
+def test_redoing_a_delete_leaves_the_clip_gone(script):
+    song = script._song
+    bass = song.tracks[1]
+    clip = _arranged(bass, fake_live.FakeClip(name="Line", length=4.0), 0.0)
+    song.begin_undo_step()
+    bass.delete_clip(clip)
+    song.end_undo_step()
+    song.undo()
+    assert bass.arrangement_clips == [clip] and clip.name == "Line"
+    song.redo()
+    assert bass.arrangement_clips == []
+    with pytest.raises(RuntimeError, match="no longer exists"):
+        clip.name
+
+
+def test_clip_lengths_that_cannot_be_are_refused(live_server):
+    from MCP_Server import extended_tools
+
+    with pytest.raises(ValueError, match="more than 0"):
+        extended_tools.duplicate_session_clip("Bass", 0, 0.0, 0.0)
+    with pytest.raises(ValueError, match="warping=false"):
+        extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", False, 4)
+
+
+def test_keeping_the_playhead_closes_a_step_it_never_ran(monkeypatch):
+    from MCP_Server import extended_tools
+
+    async def no_live(*_args, **_kwargs):
+        raise RuntimeError("no Live")
+
+    async def step():
+        return 1
+
+    monkeypatch.setattr(extended_tools, "asend", no_live)
+    coro = step()
+    with pytest.raises(RuntimeError, match="no Live"):
+        asyncio.run(extended_tools.keeping_the_playhead(coro))
+    assert coro.cr_frame is None  # closed, so never "never awaited"
+
+
+def test_clips_that_only_touch_a_section_are_not_cut(live_server):
+    """A rebuild over clips laid end to end by an earlier build: a clip
+    ending where the section starts is not across it, so nothing is split
+    (that once made a MIDI scratch clip on an audio track, which Live
+    refuses, and left the old audio playing)."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=16.0)
+    bass.clip_slots[0].has_clip = True
+    loop = vox.clip_slots[0].create_audio_clip("/samples/loop.wav")  # 8 beats
+    loop.loop_start = loop.start_marker = 0.0
+    loop.loop_end = 16.0
+    _arranged(vox, loop, 0.0)
+    _arranged(vox, loop, 16.0)
+    result = call("build_arrangement", sections=[
+        {"name": "A", "bars": 4, "clips": {"Vox": 0, "Bass": 0}},
+        {"name": "B", "bars": 4, "clips": {"Bass": 0}}], locators=False)
+    assert result["ok"], result
+    assert result["cleared"] == {"Vox": {"removed": 1}}
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(0.0, 16.0)]
+    with pytest.raises(RuntimeError, match="MIDI clips can only be created on MIDI tracks"):
+        vox.clip_slots[3].create_clip(4.0)
+
+
+def test_scratch_slot_says_when_its_clip_was_not_deleted(live_server, monkeypatch):
+    from MCP_Server import extended_tools
+
+    script, _call = live_server
+    bass = script._song.tracks[1]
+
+    def stuck(self):
+        raise RuntimeError("slot is locked")
+
+    with pytest.raises(RuntimeError, match=r"the scratch clip in live_set tracks 1 clip_slots 0 "
+                                           r"was not deleted: .*slot is locked"):
+        with extended_tools.scratch_slot("live_set tracks 1") as slot:
+            extended_tools.send("lom_call", {"path": slot, "method": "create_clip", "args": [1.0]})
+            monkeypatch.setattr(fake_live.FakeClipSlot, "delete_clip", stuck)
+    with pytest.raises(RuntimeError, match=r"^body failed; the scratch clip in live_set tracks 1 "
+                                           r"clip_slots 1 was not deleted"):
+        with extended_tools.scratch_slot("live_set tracks 1") as slot:
+            extended_tools.send("lom_call", {"path": slot, "method": "create_clip", "args": [1.0]})
+            raise RuntimeError("body failed")
+    assert bass.clip_slots[0].has_clip and bass.clip_slots[1].has_clip
+
+
+def test_bars_on_a_clip_live_left_unwarped(live_server):
+    """Warped again, Live 12.4.16 keeps no marker at the file's end, so it
+    cannot be fitted: said, and left unwarped."""
+    from MCP_Server import extended_tools
+
+    script, _call = live_server
+    vox = script._song.tracks[2]
+    clip = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    clip.warping = False
+    markers = [m.beat_time for m in clip.warp_markers]
+    report = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", None, 1)
+    assert "not fitted to bars" in report["notes"][0] and "errors" not in report
+    assert clip.warping is False
+    # asked for warping too: it is still left as it is, as the note says
+    report = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", True, 1)
+    assert "left unwarped" in report["notes"][0] and report["warping"] is False
+    assert clip.warping is False and "live_guess_bpm" in report and "warp_bpm" not in report
+    assert [m.beat_time for m in clip.warp_markers] == markers  # not warped again for nothing
+    # 4 s at 120 BPM: the file plays 8 beats; Live keeps it its length (what copies take)
+    assert report["warning"] == ("Live keeps it 7.75 beats long (copies last that), not 1 bars "
+                                 "(4 beats); the file plays 8 beats")
+
+
+def test_fit_audio_clip_reports_reads_that_failed(live_server):
+    from MCP_Server import extended_tools
+
+    script, _call = live_server
+    vox = script._song.tracks[2]
+    clip = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    object.__setattr__(clip, "warp_markers", [])
+    end = clip.end_marker
+    report = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", None, 1)
+    assert report["errors"] == ["its warp markers could not be read, so it was not fitted"]
+    assert clip.end_marker == end  # nothing set blindly
+    gone = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 3 clip", None, 1)
+    assert gone["errors"][0].startswith("Live did not answer for the clip")
+
+
+def test_copy_warnings_offer_a_length_only_where_one_can_be_passed():
+    from MCP_Server import extended_tools
+
+    info = {"name": "Pad", "length": 16.0, "looping": False, "loop_start": 0.0,
+            "loop_end": 16.0, "start_marker": 0.0, "end_marker": 4.0, "is_midi_clip": True}
+    assert "pass the length" in extended_tools.copy_warnings(info, 120.0)[0]
+    assert "pass the length" not in extended_tools.copy_warnings(info, 120.0,
+                                                                 takes_length=False)[0]
+
+
+def test_a_gap_cuts_audio_tracks_too_and_returns_the_clips_around_it(live_server):
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    line = fake_live.FakeClip(name="Line", length=16.0)
+    line.add_new_notes([fake_live.MidiNoteSpecification(pitch=40, start_time=float(t), duration=1.0,
+                                                        velocity=100, mute=False)
+                        for t in range(16)])
+    _arranged(bass, line, 0.0)
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    take.loop_start = take.start_marker = 0.0
+    take.loop_end = 16.0
+    _arranged(vox, take, 0.0)
+    vox.clip_slots[0].delete_clip()
+    gap = call("design_transition", kind="gap", at_bar=3, tracks=["Bass", "Vox"])
+    assert gap["tracks"] == ["Bass", "Vox"]
+    assert [(c["start_time"], c["end_time"], c["name"]) for c in gap["clips"]["Bass"]] == [
+        (0.0, 7.0, "Line"), (7.0, 8.0, "Gap"), (8.0, 16.0, "Line")]
+    assert [(c["arrangement_clip_index"], c["start_time"], c["end_time"])
+            for c in gap["clips"]["Vox"]] == [(0, 0.0, 7.0), (1, 8.0, 16.0)]
+    assert [(c.start_time, c.end_time, c.start_marker) for c in vox.arrangement_clips] == [
+        (0.0, 7.0, 0.0), (8.0, 16.0, 8.0)]
 
 
 def test_create_locator_toggles_after_the_playhead_moved(script):
