@@ -341,7 +341,7 @@ def test_jobs_run_one_at_a_time():
     assert any("Waiting for the echo job" in m for m in said)
 
 
-@pytest.mark.skipif(not hasattr(os, "nice"), reason="no nice() here")
+@pytest.mark.skipif(not hasattr(os, "getpriority"), reason="no getpriority() here")
 def test_jobs_run_below_lives_priority():
     assert asyncio.run(ml.run("echo", {"niceness": 1}))["niceness"] >= 10
 

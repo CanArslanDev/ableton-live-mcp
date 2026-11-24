@@ -405,6 +405,9 @@ and undoes the fixes below. Install from this version instead.
 
 ### Tests
 
+- The ML jobs' priority is set and read with `os.setpriority` /
+  `os.getpriority`: `os.nice(0)` answered 0 on GitHub's macOS runners
+  (BSD's nice()), failing the priority test there.
 - The script's display units, unit and range refusals, bare ids in
   `$ref`, a walk's share of the main thread and folders read by index
   (all failed on script 2.1.0), other spellings of units ("1.5 sec" is

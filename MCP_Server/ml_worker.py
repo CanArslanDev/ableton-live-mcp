@@ -325,11 +325,9 @@ def echo(job: dict) -> dict:
     """For tests: the protocol without any library."""
     import time
 
-    import os
-
     progress(0.5, "echo")
     if job.get("niceness"):
-        job["niceness"] = os.nice(0) if hasattr(os, "nice") else None
+        job["niceness"] = niceness()
     if job.get("clock"):
         job["started"] = time.time()
     time.sleep(float(job.get("sleep", 0)))
@@ -344,13 +342,25 @@ TASKS = {"separate": separate, "transcribe": transcribe, "embed": embed, "genera
          "echo": echo}
 
 
+def niceness() -> int | None:
+    """This process's nice value. os.nice(0) is not used: macOS's nice()
+    can answer 0 whatever the value (BSD), as on GitHub's macOS runners."""
+    import os
+
+    try:
+        return os.getpriority(os.PRIO_PROCESS, 0)
+    except (AttributeError, OSError):  # Windows
+        return None
+
+
 def lower_priority() -> None:
     """Below Live: a job that takes every core must not starve Live's
     audio and its Remote Script (torch's threads inherit this)."""
+    import os
+
     try:
-        import os
-        os.nice(10)
-    except (AttributeError, OSError):  # Windows has no nice
+        os.setpriority(os.PRIO_PROCESS, 0, max(10, os.getpriority(os.PRIO_PROCESS, 0)))
+    except (AttributeError, OSError):  # Windows has neither
         pass
 
 
