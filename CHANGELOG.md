@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.5.0 — 2026-11-24
 
 Remote Script 2.2.0: reinstall it (`ableton-mcp-install-script`) and restart
 Live. Checked in Live 12.4.16: the script loads, and the plugin's server
