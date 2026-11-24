@@ -36,7 +36,7 @@ MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
 # Bumped whenever the TCP command surface changes; the MCP server compares
 # this to EXPECTED_REMOTE_SCRIPT_VERSION.
-SCRIPT_VERSION = "2.1.0"
+SCRIPT_VERSION = "2.2.0"
 # 2: newline-terminated JSON, request ids echoed, hello with a session token.
 # Requests without a newline (protocol 1 clients) are still understood.
 PROTOCOL_VERSION = 2
@@ -124,6 +124,8 @@ LOM_REGISTRY_MAX = 4096
 # samples (~12,000 items) used to push its own early results, and every
 # other id, out of the shared 4096 before they could be loaded
 BROWSER_REGISTRY_MAX = 65536
+# Most of Live's main thread one browser walk may take, slice after slice
+BROWSER_WALK_SHARE = 0.5
 LOM_EVENT_BUFFER_MAX = 2000
 # Generous enough for any real clip; Live clamps note windows itself.
 NOTE_TIME_SPAN = 1000000.0
@@ -207,26 +209,127 @@ def parse_display_number(text):
     import re
     if text is None:
         return None
-    s = str(text).strip()
+    s = normal_sign(text)
     low = s.lower()
     if "inf" in low:
         return float("-inf") if "-" in low else float("inf")
     if low == "c":
         return 0.0
-    pan = re.match(r"^(\d+(?:\.\d+)?)\s*([lr])$", low)
+    # pan "25L"/"25R", the crossfader "25A"/"25B" (A left, B right)
+    pan = re.match(r"^(\d+(?:\.\d+)?)\s*([lrab])$", low)
     if pan:
         value = float(pan.group(1))
-        return -value if pan.group(2) == "l" else value
+        return -value if pan.group(2) in ("l", "a") else value
+    number = r"(\d+(?:\.\d+)?|\.\d+)"
+    # Compressor's expansion "1 : 1.25"; note values "1 / 16", "5/16"
+    expansion = re.match(r"^1\s*:\s*" + number + r"$", low)
+    if expansion:
+        return float(expansion.group(1))
+    # Hybrid Reverb's Ti Rate: "1/128 T" .. "1/4 D", "1 T", "2 D"
+    feel = re.match(r"^" + number + r"(?:\s*/\s*" + number + r")?\s*([td])$", low)
+    if feel:
+        value = float(feel.group(1))
+        if feel.group(2) is not None:
+            if not float(feel.group(2)):
+                return None
+            value /= float(feel.group(2))
+        return value * (2.0 / 3.0 if feel.group(3) == "t" else 1.5)
+    fraction = re.match(r"^" + number + r"\s*/\s*" + number + r"$", low)
+    if fraction:
+        first, second = float(fraction.group(1)), float(fraction.group(2))
+        if abs(first + second - 100.0) <= 1.0:
+            return first  # a split, Roar's Blend "75 / 25"
+        if not second:
+            return None  # "1/0"
+        return first / second
+    note = note_number(low)
+    if note is not None:
+        return float(note)
+    morph = re.match(r"^" + number + r"\s*(lp/bp|bp/hp|hp/no|no/lp)$", low)
+    if morph:
+        # Simpler's, Operator's and Wavetable's Filter Morph: "0 lp/bp" ..
+        # "75 no/lp", "100 no/lp", each section counting from 0 again
+        return MORPH_SECTIONS.index(morph.group(2)) * 100.0 + float(morph.group(1))
     match = re.search(r"-?(?:\d+(?:\.\d+)?|\.\d+)", s)
     if not match:
         return None
     value = float(match.group(0))
-    unit = low[match.end():].strip()
-    if unit.startswith("k"):
-        value *= 1000.0
-    elif unit == "s" or unit.startswith("s "):
+    unit = unit_word(low[match.end():])
+    if unit in ("khz", "s"):
         value *= 1000.0
     return value
+
+
+# Other spellings of the units Live shows, as someone might type them
+UNIT_ALIASES = {"k": "khz", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
+                "msec": "ms", "msecs": "ms", "cent": "ct", "cents": "ct",
+                "semitone": "st", "semitones": "st", "dbtp": "db", "dbfs": "db",
+                "deg": "\u00b0"}
+
+
+def unit_word(text):
+    """The unit after a number, lower case, aliases folded: "sec" -> "s",
+    "msec" -> "ms", "dBFS" -> "db"."""
+    unit = str(text).strip().lower()
+    return UNIT_ALIASES.get(unit, unit)
+
+
+# Units as parameters display them, by family: "1.20 kHz" and "800 Hz" are
+# both Hz, "1.50 s" and "350 ms" both time (as parse_display_number reads them)
+DISPLAY_UNITS = {"hz": "Hz", "khz": "Hz", "ms": "ms", "s": "ms", "db": "dB", "%": "%",
+                 "\u00b0": "\u00b0", "st": "st", "ct": "ct"}
+
+
+MORPH_SECTIONS = ["lp/bp", "bp/hp", "hp/no", "no/lp"]
+NOTE_STEPS = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
+
+
+def note_number(text):
+    """MIDI note of a note name as Live shows it (C3 = 60, C-2 = 0): Roar's
+    FB Note "C-1" .. "C5"; None for anything else."""
+    import re
+    match = re.match(r"^([a-g])(#|b)?(-?\d)$", normal_sign(text).lower())
+    if not match:
+        return None
+    step = NOTE_STEPS[match.group(1)] + {"#": 1, "b": -1}.get(match.group(2) or "", 0)
+    return 12 * (int(match.group(3)) + 2) + step
+
+
+def normal_sign(text):
+    """Display text with a plain leading minus: "\u2212 6 dB" and "- 6 dB"
+    become "-6 dB" (Unicode minus and en dash as typed or pasted)."""
+    import re
+    s = str(text).strip().replace("\u2212", "-").replace("\u2013", "-")
+    s = s.replace("\u266f", "#").replace("\u266d", "b")  # Resonators: "C\u266f3"
+    return re.sub(r"^([-+])\s+", r"\1", s)
+
+
+def display_unit(text):
+    """The unit family of a display string: "dB", "Hz", "ms", "%", "pan"
+    (50L, C, 25R), "ratio" (4.00 : 1), "" for a bare number or note value
+    ("0.50", ".6", "1 / 16"), else the text after the number."""
+    import re
+    s = normal_sign(text).lower()
+    if s == "c" or re.match(r"^\d+(?:\.\d+)?\s*[lr]$", s):
+        return "pan"
+    if re.match(r"^\d+(?:\.\d+)?\s*[ab]$", s):
+        return "crossfade"
+    if re.match(r"^1\s*:\s*(\d+(?:\.\d+)?|\.\d+)$", s) and \
+            not re.match(r"^1\s*:\s*1$", s):
+        return "expansion"  # Compressor's Expansion Ratio "1 : 1.25"
+    if ":" in s:
+        return "ratio"
+    if re.match(r"^[\d.]+(\s*/\s*[\d.]+)?\s*[td]$", s):
+        return ""  # a triplet or dotted note value
+    if note_number(s) is not None:
+        return "note"
+    if re.match(r"^[\d.]+\s*(lp/bp|bp/hp|hp/no|no/lp)$", s):
+        return "morph"
+    rest = re.sub(r"^[-+]?\s*(?:inf|\d+(?:\.\d+)?|\.\d+)", "", s).strip()
+    if rest.startswith("/"):
+        return ""
+    rest = unit_word(rest)
+    return DISPLAY_UNITS.get(rest, rest)
 
 
 class LomMixin(object):
@@ -271,13 +374,17 @@ class LomMixin(object):
         if name == "browser":
             return self.application().browser
         raise LomError(
-            "Unknown root '%s' (use live_set, live_app, browser or 'id N')" % name)
+            "Unknown root '%s' (use live_set, live_app, browser or 'id N'; an id as "
+            "an argument is {\"$id\": N} or {\"$ref\": \"id N\"})" % name)
 
     def _lom_resolve(self, path):
         tokens = lom_tokenize(path)
         if not tokens:
             raise LomError("Empty path")
         head = str(tokens.pop(0))
+        if head.isdigit():  # an id on its own: {"$ref": 4965354872}
+            tokens.insert(0, head)
+            head = "id"
         if head == "id":
             if not tokens:
                 raise LomError("'id' must be followed by a number")
@@ -811,15 +918,39 @@ class LomMixin(object):
             if items:
                 raise LomError("'%s' is not one of: %s" % (target, ", ".join(items)))
 
+        low, high = float(param.min), float(param.max)
+        def read(v):
+            shown = param.str_for_value(v)
+            number = parse_display_number(shown)
+            if number == 0 and normal_sign(shown).startswith("-"):
+                return -1e-9  # "-0.0 dB" is just below zero, not zero
+            return number
+        names = []
+        if read(low) is None or read(high) is None:
+            # Glue Compressor's Release ends in "A" (Auto): numbers up to a name
+            low, high, names = self._numeric_span(param, low, high)
+            wanted = normal_sign(target).lower()
+            for shown, value in names:
+                if normal_sign(shown).lower() == wanted:
+                    param.value = value
+                    return {"name": param.name, "old": old_display,
+                            "new": param.str_for_value(param.value),
+                            "raw_value": float(param.value)}
+            if low is None:  # Hybrid Reverb's Vintage: Off, Subtle .. Extreme
+                raise LomError("'%s' is not one of: %s"
+                               % (target, ", ".join(n.strip() for n, _ in names)))
         goal = parse_display_number(target) if isinstance(target, string_types) \
             else float(target)
         if goal is None:
+            if names:
+                raise LomError("'%s' is neither a number from %s to %s nor one of: %s"
+                               % (target, param.str_for_value(low).strip(),
+                                  param.str_for_value(high).strip(),
+                                  ", ".join(n.strip() for n, _ in names)))
             raise LomError("Could not read a number from %r" % (target,))
-        low, high = float(param.min), float(param.max)
-        read = lambda v: parse_display_number(param.str_for_value(v))
         at_low, at_high = read(low), read(high)
-        if at_low is None or at_high is None:
-            raise LomError("Parameter display '%s' is not numeric" % old_display)
+        tie_note = None
+        end_note = self._check_display_target(param, target, goal, low, high, at_low, at_high)
         increasing = at_high >= at_low
         if (goal <= min(at_low, at_high)):
             best = low if increasing else high
@@ -842,11 +973,314 @@ class LomMixin(object):
             for value in (hi, lo, (lo + hi) / 2.0):
                 shown = read(value)
                 if shown is not None:
-                    candidates.append((abs(shown - goal), value))
-            best = min(candidates, key=lambda c: c[0])[1] if candidates else (lo + hi) / 2.0
-        param.value = min(high, max(low, best))
-        return {"name": param.name, "old": old_display,
-                "new": param.str_for_value(param.value), "raw_value": float(param.value)}
+                    candidates.append((abs(shown - goal), -shown, value))
+            # Halfway between two displays ("1" on Glue Release, between
+            # ".8" and "1.2") goes to the larger number, and says so
+            best = min(candidates)[2] if candidates else (lo + hi) / 2.0
+            nearest = min(candidates)[0] if candidates else 0.0
+            tied = sorted(set(param.str_for_value(c[2]).strip() for c in candidates
+                              if c[0] - nearest < 1e-9))
+            if len(tied) > 1:
+                tie_note = ("'%s' lies halfway between %s: set to %s"
+                            % (target, " and ".join(tied), param.str_for_value(best).strip()))
+        best = min(high, max(low, best))
+        asked = normal_sign(target) if isinstance(target, string_types) else None
+        if asked is not None and normal_sign(param.str_for_value(best)) != asked:
+            # The same number written otherwise next to it: "0.0 %" beside
+            # "-0.0 %", "0.49 Hz" a hair past where "0.48 Hz" ends
+            # (Operator's Freq<Vel shows "-50" only at -50 exactly, "-50.0" beside)
+            near = [round(best, digits) for digits in range(5)]
+            near = [v for v in near
+                    if low <= v <= high and normal_sign(param.str_for_value(v)) == asked]
+            nudge = 1e-7 if not near else 1.0
+            if near:
+                best = near[0]
+            while nudge < 0.1:  # display steps of fine controls are ~2 % wide
+                near = [v for v in (best + nudge * (high - low), best - nudge * (high - low))
+                        if low <= v <= high and normal_sign(param.str_for_value(v)) == asked]
+                if near:
+                    best = near[0]
+                    break
+                nudge *= 2.0
+        note = None
+        if goal != float("-inf") and float("-inf") in (at_low, at_high):
+            # Below the lowest level a fader shows above -inf dB is -inf, as
+            # on Live's faders ("-80 dB" on a send, "-70 dB" on Compressor's
+            # Threshold, whose lowest is -69.7 dB)
+            shown = param.str_for_value(best)
+            level = read(best)
+            if level is not None and level != float("-inf") and \
+                    goal < level - self._display_step(shown):
+                best = low if at_low == float("-inf") else high
+                note = ("%s shows nothing between -inf dB and %s: set to -inf dB"
+                        % (param.name, shown.strip()))
+        if note is None:
+            wanted = param.str_for_value(best)
+            if end_note is None and normal_sign(wanted) != asked and \
+                    not self._reads_near(param, best, goal, low, high):
+                raise LomError("'%s' could not be set on %s: the nearest it found shows %s "
+                               "(it shows %s to %s)"
+                               % (target, param.name, wanted.strip(),
+                                  param.str_for_value(low).strip(),
+                                  param.str_for_value(high).strip()))
+            best = self._inside_display(param, best, low, high)
+        # Checked before writing, so a refusal writes nothing
+        wanted = param.str_for_value(best)
+        best = self._kept_as_shown(param, best, wanted, low, high)
+        param.value = best
+        if param.str_for_value(param.value) != wanted:
+            # Live kept it otherwise than a float32 would: step inside
+            for nudge in (1e-6, 1e-5, 1e-4, 1e-3):
+                for v in (best + nudge * (high - low), best - nudge * (high - low)):
+                    if low <= v <= high and param.str_for_value(v) == wanted:
+                        param.value = v
+                        break
+                if param.str_for_value(param.value) == wanted:
+                    break
+        result = {"name": param.name, "old": old_display,
+                  "new": param.str_for_value(param.value), "raw_value": float(param.value)}
+        note = note or end_note or tie_note
+        if note:
+            result["note"] = note
+        return result
+
+    @staticmethod
+    def _inside_display(param, value, low, high):
+        """A value showing the same text as value, away from the display's
+        edges: a rounded one ("C" pan at 0.0, "25L" at -0.5, "0 dB" at 0.0),
+        else the middle of the values showing it."""
+        shown = param.str_for_value(value)
+        hair = (high - low) * 1e-5
+        for digits in range(5):
+            rounded = round(value, digits)
+            # not at the display's edge (Shifter's "0.38 st" starts at
+            # exactly 0.25, and Live keeps 0.25 as 0.24999998: "0.37 st")
+            number = parse_display_number(shown)
+            if low <= rounded <= high and param.str_for_value(rounded) == shown and all(
+                    parse_display_number(param.str_for_value(v)) == number
+                    for v in (max(low, rounded - hair), min(high, rounded + hair))):
+                return float(rounded) + 0.0  # 0.0, not -0.0
+        reach = (high - low) / 64.0
+        edges = []
+        for direction in (-1.0, 1.0):
+            inside = value
+            outside = min(high, max(low, value + direction * reach))
+            if param.str_for_value(outside) == shown:
+                edges.append(outside)
+                continue
+            for _ in range(30):
+                mid = (inside + outside) / 2.0
+                if param.str_for_value(mid) == shown:
+                    inside = mid
+                else:
+                    outside = mid
+            edges.append(inside)
+        middle = (edges[0] + edges[1]) / 2.0
+        return middle if param.str_for_value(middle) == shown else value
+
+    @staticmethod
+    def _kept_as_shown(param, value, wanted, low, high):
+        """value, or one beside it, that still shows wanted once Live keeps
+        it as a float32 ("12 dB" on Limiter's Input Gain, found at the edge
+        of its display, read back "11 dB")."""
+        import struct
+
+        def kept(v):
+            return struct.unpack("f", struct.pack("f", v))[0]
+
+        if param.str_for_value(kept(value)) == wanted:
+            return value
+        for nudge in (1e-7, 1e-6, 1e-5, 1e-4, 1e-3):
+            for v in (value + nudge * (high - low), value - nudge * (high - low)):
+                if low <= v <= high and param.str_for_value(kept(v)) == wanted:
+                    return v
+        return value
+
+    @staticmethod
+    def _is_stepped(param, low, high):
+        """Whole steps from low to high, each shown from its value up (Glue
+        Compressor's Attack), unlike a continuous control."""
+        return (low == int(low) and high == int(high) and 2 <= high - low <= 128
+                and param.str_for_value(low + 0.5) == param.str_for_value(low))
+
+    def _reads_near(self, param, value, goal, low, high, tolerance=0.0):
+        """Whether the display at value is what was asked for: the goal is
+        that display (within its last digit), or lies between it and the
+        display one step away (a whole step on stepped controls, 1/64 of
+        the range on others) in the same unit. A misread display can then
+        never set something else and report success (Resonators' "C\u266f3"
+        once made "C3" set E4)."""
+        shown = param.str_for_value(value)
+        got = parse_display_number(shown)
+        if got is None:
+            return False
+        if goal == float("-inf") or got == float("-inf"):
+            return got == goal
+        slack = max(tolerance, self._display_step(shown))
+        if abs(got - goal) <= slack:
+            return True
+        unit = display_unit(shown)
+        step = 1.0 if self._is_stepped(param, low, high) else (high - low) / 64.0
+        for other in (max(low, value - step), min(high, value + step)):
+            text = param.str_for_value(other)
+            number = parse_display_number(text)
+            if number is None or display_unit(text) != unit:
+                continue
+            if min(got, number) - slack <= goal <= max(got, number) + slack:
+                return True
+        return False
+
+    @staticmethod
+    def _numeric_span(param, low, high):
+        """(first, last, names) of a parameter whose range ends in a name:
+        the values showing numbers, and (display, value) of the others.
+        Glue Compressor's Release (Live 12.4.16): 0..6, ".1" to "1.2", "A"."""
+        stepped = LomMixin._is_stepped(param, low, high)
+        if stepped:
+            points = [low + i for i in range(int(high - low) + 1)]
+        else:
+            points = [low + (high - low) * i / 64.0 for i in range(65)]
+        numeric, names, seen = [], [], set()
+        for value in points:
+            shown = param.str_for_value(value)
+            if parse_display_number(shown) is not None:
+                numeric.append(value)
+            elif shown not in seen:
+                seen.add(shown)
+                names.append((shown, value))
+        if numeric and not stepped:
+            # a continuous range: move each end out to the last value
+            # that still shows a number
+            step = (high - low) / 64.0
+            ends = []
+            for end, outward in ((numeric[0], -step), (numeric[-1], step)):
+                inside, outside = end, min(high, max(low, end + outward))
+                if inside != outside and parse_display_number(
+                        param.str_for_value(outside)) is None:
+                    for _ in range(40):
+                        mid = (inside + outside) / 2.0
+                        if parse_display_number(param.str_for_value(mid)) is None:
+                            outside = mid
+                        else:
+                            inside = mid
+                ends.append(inside)
+            numeric = [ends[0], ends[1]]
+        if not numeric:
+            return None, None, names
+        return numeric[0], numeric[-1], names
+
+    def _end_step(self, param, end, other, low, high):
+        """How far past an end a target may be and still set it, in
+        parse_display_number's units: the distance to the next display
+        inward ("1 : 2.00" -> 0.01 on Expansion Ratio), or one unit of the
+        end's last digit when that is larger ("100 ms" -> 1 while the next
+        display reads "99.9 ms"). Stepped controls: half that digit ("3"
+        takes 3.4). Nothing past an end that is not a plain number ("4 D",
+        "1/128 T" on Ti Rate, "1 : 2.00"): it has no digit to round to."""
+        shown = param.str_for_value(end)
+        digit = self._plain_digit(shown)
+        if not digit:
+            return 0.0
+        if self._is_stepped(param, low, high):
+            return digit / 2.0
+        at_end = parse_display_number(shown)
+        fallback = digit
+        if at_end is None or at_end in (float("inf"), float("-inf")):
+            return fallback
+        # the first value inward showing something else: grow, then bisect
+        same, distance = end, (other - end) * 1e-6
+        while abs(distance) < abs(other - end) and \
+                param.str_for_value(end + distance) == shown:
+            same, distance = end + distance, distance * 2.0
+        changed = end + distance if abs(distance) < abs(other - end) else other
+        if param.str_for_value(changed) == shown:
+            return fallback
+        for _ in range(40):
+            mid = (same + changed) / 2.0
+            if param.str_for_value(mid) == shown:
+                same = mid
+            else:
+                changed = mid
+        nearby = parse_display_number(param.str_for_value(changed))
+        if nearby is None or nearby in (float("inf"), float("-inf")) or nearby == at_end:
+            return fallback
+        return max(abs(nearby - at_end), digit)
+
+    @staticmethod
+    def _plain_digit(text):
+        """One unit of the last digit of a display that is a plain number
+        with a unit ("100 ms" -> 1, "20.0 kHz" -> 100, "0.10" -> 0.01), in
+        parse_display_number's units ("50R" -> 1 too); 0 for any other form
+        ("1 : 2.00", "1/128 T", "4 D")."""
+        import re
+        match = re.match(r"^[-+]?(?:\d+(?:\.(\d+))?|\.(\d+))\s*([a-z%\u00b0]*)$",
+                         normal_sign(text).lower())
+        if not match or match.group(3) in ("d", "t"):
+            return 0.0
+        decimals = len(match.group(1) or match.group(2) or "")
+        scale = 1000.0 if unit_word(match.group(3)) in ("khz", "s") else 1.0
+        return (10.0 ** -decimals) * scale
+
+    @staticmethod
+    def _display_step(text):
+        """Half the last shown digit of a display, in parse_display_number's
+        units: "20.0 kHz" -> 50, "6.0 dB" -> 0.05, "100 %" -> 0.5."""
+        import re
+        shown = str(text).strip().lower()
+        match = re.search(r"\d+(?:\.(\d+))?|\.(\d+)", shown)
+        if not match:
+            return 0.0
+        decimals = len(match.group(1) or match.group(2) or "")
+        scale = 1000.0 if unit_word(shown[match.end():]) in ("khz", "s") else 1.0
+        return 0.5 * (10.0 ** -decimals) * scale
+
+    def _check_display_target(self, param, target, goal, low, high, at_low, at_high):
+        """Refuse a target in another unit than the parameter shows ("40 %" on
+        Drum Buss Transients, which shows -1.00 to 1.00) or outside its range,
+        instead of clamping it."""
+        import re
+        shown_low = param.str_for_value(low)
+        shown_high = param.str_for_value(high)
+        units = set()
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            units.add(display_unit(param.str_for_value(low + (high - low) * fraction)))
+        unit = display_unit(target) if isinstance(target, string_types) else ""
+        if unit == "ratio" and "expansion" in units and \
+                re.match(r"^1\s*:\s*1(\.0*)?$", str(target).strip()):
+            unit = "expansion"  # "1:1" is both forms
+        if unit and unit not in units:
+            labels = {"pan": "pan positions (25L, C, 25R)", "ratio": "ratios (4:1)",
+                      "Hz": "Hz or kHz", "ms": "ms or s", "note": "note names (C3)",
+                      "morph": "filter morph positions (25 bp/hp)",
+                      "expansion": "expansion ratios (1:2)",
+                      "crossfade": "crossfader positions (25A, 0, 25B)"}
+            named = sorted(labels.get(u, u) for u in units if u)
+            raise LomError(
+                "'%s' does not fit %s: it shows %s, from %s to %s"
+                % (target, param.name,
+                   " or ".join(named) if named else "plain numbers (no unit)",
+                   shown_low.strip(), shown_high.strip()))
+        bottom, top = min(at_low, at_high), max(at_low, at_high)
+        shown_bottom = shown_low if at_low <= at_high else shown_high
+        shown_top = shown_high if at_low <= at_high else shown_low
+        # Past an end by at most one display step there (to the next display
+        # inward, as read: "0 ms" on an Attack whose lowest is 0.01 ms) sets
+        # the end, and says so; however the target is written. Further is
+        # refused, and so is anything past a stepped control's ends (Hybrid
+        # Reverb's Ti Rate "1/128 T" .. "4 D"): its steps are choices.
+        bottom_end, top_end = (low, high) if at_low <= at_high else (high, low)
+        slack_low = self._end_step(param, bottom_end, top_end, low, high)
+        slack_high = self._end_step(param, top_end, bottom_end, low, high)
+        if goal < bottom - slack_low - 1e-9 or goal > top + slack_high + 1e-9:
+            raise LomError("'%s' is outside the range of %s, %s to %s"
+                           % (target, param.name, shown_low.strip(), shown_high.strip()))
+        if goal < bottom:
+            return "%s's lowest is %s: set to %s" % (param.name, shown_bottom.strip(),
+                                                    shown_bottom.strip())
+        if goal > top:
+            return "%s's highest is %s: set to %s" % (param.name, shown_top.strip(),
+                                                     shown_top.strip())
+        return None
 
     # ── Compact session overview ──────────────────────────────────────────────
 
@@ -861,7 +1295,8 @@ class LomMixin(object):
     def _cmd_browser_search(self, params):
         """Find browser items whose name, or the folders above it, contain every
         word of the query. Walks in slices (slice_ms) so Live's UI keeps up;
-        while "done" is false, call again with the returned walk_id."""
+        while "done" is false, call again with the returned walk_id, after
+        rest_ms for a whole slice (sooner gets a shorter one)."""
         walks = self._browser_walks
         if params.get("walk_id") is not None:
             walk = walks.get(int(params["walk_id"]))
@@ -905,29 +1340,43 @@ class LomMixin(object):
             walks[walk["id"]] = walk
             while len(walks) > 4:
                 walks.popitem(last=False)
-        deadline = time.time() + min(float(params.get("slice_ms") or 100), 2000) / 1000.0
+        started = time.monotonic()
+        budget = min(float(params.get("slice_ms") or 100), 2000) / 1000.0
+        if walk.get("ended") is not None:
+            # The walk gets at most BROWSER_WALK_SHARE of Live's main thread:
+            # a call that comes back sooner than the last slice took gets a
+            # shorter slice (a client that asks again at once, as servers
+            # 2.4.3 and earlier do, kept Live busy for minutes on a large
+            # library). The share is per walk: walks run side by side (up to
+            # four are kept) can take more together.
+            rested = started - walk["ended"]
+            budget = min(budget, rested * BROWSER_WALK_SHARE / (1.0 - BROWSER_WALK_SHARE))
+        deadline = started + budget
         limit = min(int(params.get("max_results") or 100), 500)
         results = []
         visited_before = walk["visited"]
         # Always make some progress, however short the slice
-        while len(results) < limit and (time.time() < deadline
+        while len(results) < limit and (time.monotonic() < deadline
                                         or walk["visited"] == visited_before):
             if walk["current"] is None:
                 if not walk["queue"]:
                     break
                 folder, trail, depth = walk["queue"].popleft()
                 try:
-                    children = list(folder.children)
+                    # Live's vector, read item by item: no Python list of a
+                    # huge folder's every item at once
+                    children = folder.children
+                    count = len(children)
                 except Exception:
                     continue
-                walk["current"] = [children, 0, trail, depth]
-            children, position, trail, depth = walk["current"]
-            while (position < len(children) and len(results) < limit
-                   and (time.time() < deadline or walk["visited"] == visited_before)):
-                child = children[position]
+                walk["current"] = [children, 0, count, trail, depth]
+            children, position, count, trail, depth = walk["current"]
+            while (position < count and len(results) < limit
+                   and (time.monotonic() < deadline or walk["visited"] == visited_before)):
                 position += 1
                 walk["visited"] += 1
                 try:
+                    child = children[position - 1]
                     name = child.name
                     is_folder = child.is_folder
                     loadable = child.is_loadable
@@ -940,13 +1389,18 @@ class LomMixin(object):
                 text = (" ".join(trail[1:]) + " " + name).lower()
                 if all(word in text for word in walk["words"]):
                     results.append(self._browser_entry(child, trail))
-            walk["current"] = None if position >= len(children) else [
-                children, position, trail, depth]
+            walk["current"] = None if position >= count else [
+                children, position, count, trail, depth]
         done = walk["current"] is None and not walk["queue"]
+        walk["ended"] = time.monotonic()
+        busy = walk["ended"] - started
         if done:
             walks.pop(walk["id"], None)
+        # rest_ms: wait this long before the next call to get a whole slice
         return {"walk_id": walk["id"], "results": results, "visited": walk["visited"],
-                "done": done}
+                "done": done, "busy_ms": round(busy * 1000.0, 1),
+                "rest_ms": round(busy * 1000.0 * (1.0 - BROWSER_WALK_SHARE)
+                                 / BROWSER_WALK_SHARE, 1)}
 
     def _browser_entry(self, item, trail):
         name = item.name

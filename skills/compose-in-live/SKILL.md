@@ -47,7 +47,7 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
 - `apply_midi_tool(track=..., tool="strum")`: Live 12's MIDI Tools
   (Transformations such as strum, ornament, chop, connect) on a clip.
 - `read_clip_notes(...)` / `edit_clip_notes(...)` for exact changes.
-- `.mid` files: `import_midi_file(path=..., track=...)` and
+- `.mid` files: `import_midi_file(path=..., track=..., length_bars=...)` and
   `export_clip_to_midi(track=..., clip_index=..., path=...)`.
 - From an older set: `read_live_set(path=..., detail="full")` lists its clips,
   `import_from_live_set(path=..., track=..., clip_index=..., to_track=...)`
@@ -61,7 +61,10 @@ scale_name=..., time_signature="4/4")` when starting from scratch.
 - Live's own devices without the browser: `add_device(track=..., device="Drift")`.
 - By description or example: `find_similar_sounds(text="dusty vinyl kick")` or
   `find_similar_sounds(like="/path/to/sound.wav")`; the first search in a
-  folder indexes it, so warn that it takes a minute or two.
+  folder indexes it, so warn that it takes a minute or two. One search at a
+  time (they queue). The default folders hold one-shots: for leads or pads
+  give a `folder` of such sounds and `min_seconds`; a `warning` about weak
+  matches means none fits.
 - When nothing in the library fits, make it: `generate_audio(prompt="metallic
   snare hit", seconds=1.5, track="Drums", drum_pad="snare")` or a loop onto an
   audio track (MusicGen, on this computer; the set's tempo and key go into
@@ -116,11 +119,17 @@ the plan stay on the user's computer.
 When the scenes are ready, `build_arrangement(sections=[{"name": "Intro",
 "bars": 8, "scene": 0, "except": ["Drums"]}, {"name": "Drop", "bars": 16,
 "scene": 1}], locators=true)` lays them out with a locator per section. It
-overwrites those bars of the Arrangement, so ask first if it is not empty.
+overwrites those bars of the Arrangement: a track that doesn't play in a
+section is cleared there, and other locators in those bars go
+(`clear_others=false`, `clear_locators=false` keep them), so ask first if
+it is not empty. A track with only Arrangement clips (recorded vocals) is
+cleared only in the sections that name it (`kept` lists the rest);
+`cleared` and `locators_deleted` say what went.
 
 Then the joins: `design_transition(kind=..., at_bar=<first bar of the new
 section>)` with `riser`, `reverse_cymbal`, `drum_fill` (fill=snare_roll |
-toms | build), `gap` (a beat of silence before a drop) or `filter_sweep`
+toms | build), `gap` (a beat of silence before a drop; it returns the clips
+around it) or `filter_sweep`
 (MIDI tracks). Automation over a stretch: `write_arrangement_automation` on
 MIDI tracks (instant); `record_automation` on audio tracks, returns or the
 main track plays the stretch in real time, so say so before. Each is one

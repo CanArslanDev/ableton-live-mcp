@@ -126,7 +126,19 @@ def handshake(send_command) -> dict[str, Any]:
 
 
 def require_capability(name: str) -> str | None:
-    """Return an error message if capability missing, else None."""
+    """Return an error message if capability missing, else None. Before any
+    handshake (the first call in a process) it connects to ask Live, and
+    says so when Live cannot be reached."""
+    if get_cached_script_info() is None:
+        try:
+            from .server import get_ableton_connection
+
+            connection = get_ableton_connection()  # its hello fills the cache
+            if get_cached_script_info() is None:
+                handshake(connection.send_command)
+        except Exception as e:
+            message = str(e)
+            return message if "Ableton Live" in message else f"Could not reach Ableton Live: {message}"
     if script_has_capability(name):
         return None
     info = get_cached_script_info() or {}

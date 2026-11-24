@@ -251,9 +251,470 @@ def test_envelope_writes_clamped_steps(script):
     ("1.50 s", 1500.0), ("50L", -50.0), ("C", 0.0), ("25R", 25.0), ("40 %", 40.0),
     ("-inf dB", float("-inf")), ("Lowpass", None),
     (".6", 0.6), ("-.5 dB", -0.5), ("4.00 : 1", 4.0),
+    # Compressor's expansion and note values, as Live 12.4.16 shows them
+    ("1 : 1.25", 1.25), ("1  / 16", 0.0625), ("5/16", 0.3125), ("8", 8.0),
+    # other spellings
+    ("1.5 sec", 1500.0), ("2 secs", 2000.0), ("1.5 seconds", 1500.0), ("350 msec", 350.0),
+    ("1.2k", 1200.0), ("-6 dBFS", -6.0), ("12 semitones", 12.0), ("11 cents", 11.0),
+    # a minus typed with a space, or as Unicode minus or en dash
+    ("- 6 dB", -6.0), ("\u22126 dB", -6.0), ("\u2212 6 dB", -6.0), ("\u20136 dB", -6.0),
+    ("1/0", None), ("A", None),
+    # Roar's Blend is a split (its first number), FB Note a note (C3 = 60),
+    # Filter Morph a position over its four sections
+    ("100 / 0", 100.0), ("75 / 25", 75.0), ("6 / 94", 6.0), ("0 / 100", 0.0),
+    ("C-1", 12.0), ("F#3", 66.0), ("Bb2", 58.0), ("C5", 84.0), ("C-2", 0.0),
+    ("0 lp/bp", 0.0), ("25 bp/hp", 125.0), ("100 no/lp", 400.0),
+    # Resonators writes sharps as music signs; Hybrid Reverb's Ti Rate has
+    # triplet and dotted values
+    ("C\u266f3", 61.0), ("B\u266d2", 58.0), ("1/128 T", 1 / 192), ("1/32 D", 3 / 64),
+    ("1 T", 2 / 3), ("1 D", 1.5), ("4 D", 6.0), ("1/64", 1 / 64),
 ])
 def test_parse_display_number(script, text, expected):
     assert script.module.parse_display_number(text) == expected
+
+
+@pytest.mark.parametrize("text,unit", [
+    ("800 Hz", "Hz"), ("1.20 kHz", "Hz"), ("-6.0 dB", "dB"), ("-inf dB", "dB"),
+    ("350 ms", "ms"), ("1.50 s", "ms"), ("40 %", "%"), ("0.00", ""), (".6", ""),
+    ("0.50 ", ""), ("1  / 16", ""), ("25L", "pan"), ("C", "pan"), ("4.00 : 1", "ratio"),
+    ("inf : 1", "ratio"), ("1 : 1.25", "expansion"), ("12 st", "st"), ("90\u00b0", "\u00b0"),
+    ("1.5 sec", "ms"), ("2 secs", "ms"), ("350 msec", "ms"), ("-1 dBTP", "dB"),
+    ("-6 dBFS", "dB"), ("12 semitones", "st"), ("1 semitone", "st"), ("11 cents", "ct"),
+    ("75 / 25", ""), ("C-1", "note"), ("G#4", "note"), ("25 bp/hp", "morph"),
+    ("C\u266f3", "note"), ("1/128 T", ""), ("1 D", ""), ("1:4", "expansion"),
+    ("4:1", "ratio"),
+])
+def test_display_unit(script, text, unit):
+    assert script.module.display_unit(text) == unit
+
+
+def _drum_buss(script):
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Drum Buss"])
+    return "live_set tracks 2 devices -1 parameters "
+
+
+def test_param_set_display_refuses_another_unit(script):
+    """Crank: "40 %" on Drum Buss Transients (shown -1.00 to 1.00, no unit)
+    was clamped to 1.00."""
+    params = _drum_buss(script)
+    error = run_error(script, "param_set_display", path=params + "Transients", value="40 %")
+    assert "'40 %' does not fit Transients" in error and "plain numbers" in error
+    assert "-1.00 to 1.00" in error
+    assert run(script, "lom_get", path=params + "Transients", properties=["value"])["value"] == 0
+    assert run(script, "param_set_display", path=params + "Transients", value="0.4")["new"] \
+        == "0.40"
+    assert run(script, "param_set_display", path=params + "Transients", value=".6")["new"] \
+        == "0.60"
+    error = run_error(script, "param_set_display", path=params + "Drive", value="40 dB")
+    assert "does not fit Drive: it shows %" in error
+    assert run(script, "param_set_display", path=params + "Drive", value="40 %")["new"] == "40 %"
+    assert run(script, "param_set_display", path=params + "Drive", value="40")["new"] == "40 %"
+    assert "does not fit" in run_error(script, "param_set_display",
+                                       path="live_set tracks 0 mixer_device panning",
+                                       value="25 %")
+    freq = 'live_set tracks 1 devices 0 parameters "Filter Freq"'
+    assert run(script, "param_set_display", path=freq, value="0.8 kHz")["new"] == "800 Hz"
+    assert "shows Hz or kHz" in run_error(script, "param_set_display", path=freq, value="800 ms")
+
+
+def test_param_set_display_takes_other_spellings_of_a_unit(script):
+    """"1.5 sec" passed the unit check but set 1.5 ms."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Compressor"])
+    release = 'live_set tracks 2 devices -1 parameters "Release"'
+    assert run(script, "param_set_display", path=release, value="1.5 sec")["new"] == "1500.0 ms"
+    assert run(script, "param_set_display", path=release, value="300 msec")["new"] \
+        == "300.0 ms"
+    output = 'live_set tracks 2 devices -1 parameters "Output"'
+    assert run(script, "param_set_display", path=output, value="-6 dBFS")["new"] == "-6.00 dB"
+    # an alias of a unit the parameter does not show is still refused
+    assert "does not fit" in run_error(script, "param_set_display", path=output,
+                                       value="3 semitones")
+
+
+def test_param_set_display_reads_a_minus_however_typed(script):
+    """"- 6 dB" read as +6 dB."""
+    vol = "live_set tracks 0 mixer_device volume"
+    assert run(script, "param_set_display", path=vol, value="- 6 dB")["new"] == "-6.0 dB"
+    assert run(script, "param_set_display", path=vol, value="\u221212 dB")["new"] == "-12.0 dB"
+    assert "Could not read a number" in run_error(
+        script, "param_set_display",
+        path='live_set tracks 1 devices 0 parameters "Filter Freq"', value="1/0")
+
+
+def test_param_set_display_on_glue_release_ending_in_auto(script):
+    """Glue Compressor's Release shows .1 to 1.2 (s), then "A": every
+    number was refused ("is not numeric")."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device",
+        args=["Glue Compressor"])
+    release = 'live_set tracks 2 devices -1 parameters "Release"'
+    assert run(script, "param_set_display", path=release, value=".8")["new"] == ".8"
+    assert run(script, "param_set_display", path=release, value="0.2")["new"] == ".2"
+    assert run(script, "param_set_display", path=release, value="a")["new"] == "A"
+    assert run(script, "param_set_display", path=release, value="1.2")["new"] == "1.2"
+    assert "outside the range of Release, .1 to 1.2" in run_error(
+        script, "param_set_display", path=release, value="3")
+    assert run_error(script, "param_set_display", path=release, value="slow") == \
+        "'slow' is neither a number from .1 to 1.2 nor one of: A"
+    attack = 'live_set tracks 2 devices -1 parameters "Attack"'
+    assert run(script, "param_set_display", path=attack, value="10")["new"] == "10"
+
+
+def test_param_set_display_on_roar_blend_and_fb_note(script):
+    """Roar's Blend ("100 / 0" .. "0 / 100") collapsed to one value: "50 /
+    50" was refused, "25 / 75" set "0 / 100". FB Note shows note names."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Roar"])
+    blend = 'live_set tracks 2 devices -1 parameters "Blend"'
+    for shown in ("50 / 50", "25 / 75", "6 / 94", "100 / 0", "0 / 100", "94 / 6"):
+        assert run(script, "param_set_display", path=blend, value=shown)["new"] == shown
+    note = 'live_set tracks 2 devices -1 parameters "FB Note"'
+    for shown in ("F-1", "F#0", "F#3", "G#4", "C5", "C-1"):
+        assert run(script, "param_set_display", path=note, value=shown)["new"] == shown
+    assert run(script, "param_set_display", path=note, value="Bb2")["new"] == "A#2"
+    assert "outside the range of FB Note, C-1 to C5" in run_error(
+        script, "param_set_display", path=note, value="C6")
+    assert "shows note names (C3)" in run_error(script, "param_set_display", path=note,
+                                               value="40 %")
+
+
+MORPH = ["lp/bp", "bp/hp", "hp/no", "no/lp"]
+
+
+def _morph_display(value):
+    """Simpler's Filter Morph (Live 12.4.16): 0 lp/bp .. 75 no/lp, 100 no/lp."""
+    if value >= 1.0:
+        return "100 no/lp"
+    position = int(value * 16)
+    return "%d %s" % (25 * (position % 4), MORPH[position // 4])
+
+
+def test_param_set_display_on_filter_morph(script):
+    """Filter Morph counts from 0 in each section: it bisected by the number
+    alone ("25 lp/bp" set "25 no/lp")."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("Filter Morph", 0.0, display=_morph_display))
+    path = 'live_set tracks 1 devices 0 parameters "Filter Morph"'
+    for shown in ("25 lp/bp", "0 bp/hp", "0 hp/no", "0 no/lp", "75 no/lp", "100 no/lp"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def _fader_display(value):
+    """Like Live's faders and Compressor's Threshold: -inf dB at the bottom,
+    then -69.7 dB as the lowest number."""
+    return "-inf dB" if value < 0.004 else "%.1f dB" % (-70.0 + 76.0 * value)
+
+
+@pytest.mark.parametrize("name", ["Volume", "Send A", "Threshold"])
+def test_param_set_display_below_a_faders_lowest_level_is_inf(script, name):
+    """Below the lowest level a fader shows is -inf, as on Live's faders:
+    "-80 dB" on a send was refused, which broke set_track_mixer and
+    build_tracks (script 2.1.0 landed it on -69.7 dB)."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam(name, 0.5, display=_fader_display))
+    path = 'live_set tracks 1 devices 0 parameters "%s"' % name
+    for asked in ("-69.9 dB", "-70 dB", "-80 dB", "-100 dB", "-200 dB", "-inf dB"):
+        result = run(script, "param_set_display", path=path, value=asked)
+        assert result["new"] == "-inf dB" and result["raw_value"] == 0.0
+        assert asked == "-inf dB" or "set to -inf dB" in result["note"]
+    for asked, shown in (("-69.7 dB", "-69.7 dB"), ("-69.72 dB", "-69.7 dB"),
+                         ("-12 dB", "-12.0 dB")):
+        result = run(script, "param_set_display", path=path, value=asked)
+        assert result["new"] == shown and "note" not in result
+
+
+class _Float32Param(fake_live.FakeParam):
+    """Keeps its value as Live does, a float32 (here always rounded down)."""
+
+    def __setattr__(self, name, value):
+        if name == "value":
+            import struct
+            stored = struct.unpack("f", struct.pack("f", value))[0]
+            if stored > value:
+                stored = struct.unpack("f", struct.pack("f", value - abs(value) * 1e-7))[0]
+            value = stored
+        fake_live.FakeParam.__setattr__(self, name, value)
+
+
+def test_param_set_display_lands_inside_the_display(script):
+    """Limiter's Input Gain "12 dB" read back "11 dB": the value found at
+    the edge of "12 dB" was stored a hair below it."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(_Float32Param(
+        "Input Gain", 0.5, display=lambda v: "%.0f dB" % (-24.0 + 48.0 * v)))
+    path = 'live_set tracks 1 devices 0 parameters "Input Gain"'
+    for shown in ("12 dB", "11 dB", "21 dB", "-3 dB", "0 dB"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def test_param_set_display_writes_zero_as_asked(script):
+    """"0.0 %" came back "-0.0 %" (a hair below zero)."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam(
+        "Amount", 0.3, -1.0, 1.0, display=lambda v: "%.1f %%" % (100 * v)))
+    path = 'live_set tracks 1 devices 0 parameters "Amount"'
+    assert run(script, "param_set_display", path=path, value="0.0 %")["new"] == "0.0 %"
+
+
+def test_param_set_display_finds_a_display_shown_at_one_value_only(script):
+    """Operator's Freq<Vel (Live 12.4.16) shows "-50" at -50 exactly and
+    "-50.0" next to it: "-50" set "-50.0"."""
+    def show(value):
+        return "%d" % value if value == int(value) else "%.1f" % value
+
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("A Freq<Vel", 0.3, -100.0, 100.0,
+                                                 display=show))
+    path = 'live_set tracks 1 devices 0 parameters "A Freq<Vel"'
+    for shown in ("-50", "0", "50", "12.5", "-37.5"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def _sharp_note_display(value):
+    """Resonators' I Note (Live 12.4.16): sharps as "\u266f" ("C\u266f3")."""
+    return fake_live.note_display(value).replace("#", "\u266f")
+
+
+TI_RATES = ["1/128 T", "1/64 T", "1/64", "1/32 T", "1/32", "1/32 D", "1/8 T", "1/8",
+            "1/8 D", "1/4", "1/4 D", "1 T", "1", "1 D", "2", "2 D", "4 D"]
+
+
+def test_param_set_display_on_resonators_and_hybrid_reverb(script):
+    """"C3" on Resonators' I Note set E4 (its sharps are "\u266f"); Hybrid
+    Reverb's Ti Rate ("1/32 T", "1 D") and Vintage (Off .. Extreme, not
+    quantized) were misread or refused."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters += [
+        fake_live.FakeParam("I Note", 60.0, 12.0, 84.0, display=_sharp_note_display),
+        fake_live.FakeParam("Ti Rate", 0.0, 0.0, len(TI_RATES) - 1.0,
+                            display=lambda v: TI_RATES[min(int(v), len(TI_RATES) - 1)]),
+        fake_live.FakeParam("Vintage", 0.0, 0.0, 4.0, display=lambda v: [
+            "Off", "Subtle", "Old", "Older", "Extreme"][min(int(v), 4)])]
+    path = 'live_set tracks 1 devices 0 parameters "%s"'
+    for asked, shown in (("C3", "C3"), ("E-1", "E-1"), ("C#3", "C\u266f3"),
+                         ("C\u266f3", "C\u266f3"), ("A\u266f0", "A\u266f0"),
+                         ("Bb2", "A\u266f2")):
+        assert run(script, "param_set_display", path=path % "I Note", value=asked)["new"] \
+            == shown
+    for shown in TI_RATES:
+        assert run(script, "param_set_display", path=path % "Ti Rate", value=shown)["new"] \
+            == shown
+    for shown in ("Old", "Off", "Extreme", "subtle"):
+        assert run(script, "param_set_display", path=path % "Vintage", value=shown)["new"] \
+            == shown.title()
+    assert run_error(script, "param_set_display", path=path % "Vintage", value="2") == \
+        "'2' is not one of: Off, Subtle, Old, Older, Extreme"
+
+
+def test_param_set_display_never_reports_a_wrong_value(script):
+    """A display it cannot read (German note names: "H" for B) must not
+    lead it to set another value and report success."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam(
+        "Note", 60.0, 12.0, 84.0, display=lambda v: fake_live.note_display(v).replace("B", "H")))
+    path = 'live_set tracks 1 devices 0 parameters "Note"'
+    for note in range(12, 85):
+        asked = fake_live.note_display(note)
+        response = script._process_command({"type": "param_set_display",
+                                            "params": {"path": path, "value": asked}})
+        if response["status"] == "success":
+            assert response["result"]["new"] == asked.replace("B", "H") or \
+                parse_note_ok(response["result"]["new"], note)
+
+
+def parse_note_ok(shown, note):
+    return shown.replace("H", "B") == fake_live.note_display(note)
+
+
+def test_ratios_and_expansion_are_told_apart(script):
+    """"1:4" on Compressor's Ratio (which shows "4.00 : 1") read as 4 and
+    set 4:1."""
+    ratio = 'live_set tracks 2 devices -1 parameters "Ratio"'
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device", args=["Compressor"])
+    assert "does not fit Ratio" in run_error(script, "param_set_display", path=ratio,
+                                             value="1:4")
+    assert run(script, "param_set_display", path=ratio, value="4:1")["new"] == "4.00 : 1"
+
+
+def test_param_set_display_on_the_crossfader(script):
+    """The crossfader (Live 12.4.16) shows "50A" .. "0" .. "50B": "50B" set
+    50A, A and B both reading 50."""
+    def show(value):
+        amount = int(round(abs(value) * 50))
+        return "0" if amount == 0 else "%d%s" % (amount, "A" if value < 0 else "B")
+
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("Crossfade", 0.0, -1.0, 1.0, display=show))
+    path = 'live_set tracks 1 devices 0 parameters "Crossfade"'
+    for shown, raw in (("50B", 1.0), ("25B", 0.5), ("0", 0.0), ("25A", -0.5), ("50A", -1.0)):
+        result = run(script, "param_set_display", path=path, value=shown)
+        assert result["new"] == shown and str(result["raw_value"]) == str(raw)
+    assert "crossfader positions" in run_error(script, "param_set_display", path=path,
+                                               value="25L")
+
+
+def test_param_set_display_prefers_the_middle_of_a_display(script):
+    """"C" on a pan landed on -0.01, "25L" off -0.5, "0 dB" off 0."""
+    pan = "live_set tracks 0 mixer_device panning"
+    assert run(script, "param_set_display", path=pan, value="C")["raw_value"] == 0.0
+    assert run(script, "param_set_display", path=pan, value="25L")["raw_value"] == -0.5
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(fake_live.FakeParam("Gain", 3.0, -15.0, 15.0,
+                                                 display=lambda v: "%.1f dB" % v))
+    gain = 'live_set tracks 1 devices 0 parameters "Gain"'
+    result = run(script, "param_set_display", path=gain, value="0 dB")
+    assert result["raw_value"] == 0.0 and result["new"] == "0.0 dB"
+
+
+def test_param_set_display_takes_an_end_one_display_step_away(script):
+    """Past an end by one step of that end's display sets the end, with a
+    note, however the target is written; further is refused ("6 kHz" set
+    5.50 kHz, "0" set 0.20 silently, while "6.0 kHz" was refused)."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters += [
+        fake_live.FakeParam("Attack", 0.5, display=lambda v: "%.2f ms" % (0.01 + 999.99 * v ** 3)),
+        fake_live.FakeParam("X Over", 0.5, display=lambda v: "%.2f kHz" % (0.5 + 5.0 * v)),
+        fake_live.FakeParam("HiShelf Gain", 0.5, display=lambda v: "%.2f " % (0.2 + 0.8 * v))]
+    path = 'live_set tracks 1 devices 0 parameters "%s"'
+    for asked in ("0 ms", "0.0 ms", "0.00 ms", "0.000 ms"):
+        result = run(script, "param_set_display", path=path % "Attack", value=asked)
+        assert result["new"] == "0.01 ms"
+        assert result["note"] == "Attack's lowest is 0.01 ms: set to 0.01 ms"
+    assert "note" not in run(script, "param_set_display", path=path % "Attack", value="0.01 ms")
+    assert "outside" in run_error(script, "param_set_display", path=path % "Attack", value="-1 ms")
+    high = run(script, "param_set_display", path=path % "X Over", value="5.51 kHz")
+    assert high["new"] == "5.50 kHz" and high["note"] == \
+        "X Over's highest is 5.50 kHz: set to 5.50 kHz"
+    for asked in ("6 kHz", "6.0 kHz", "6000 Hz", "5.9 kHz", "5.52 kHz"):
+        assert "outside the range of X Over, 0.50 kHz to 5.50 kHz" in run_error(
+            script, "param_set_display", path=path % "X Over", value=asked)
+    for asked in ("0", "0.0", "0.18"):
+        assert "outside" in run_error(script, "param_set_display", path=path % "HiShelf Gain",
+                                      value=asked)
+    assert run(script, "param_set_display", path=path % "HiShelf Gain",
+               value="0.19")["note"] == "HiShelf Gain's lowest is 0.20: set to 0.20"
+
+
+def test_param_set_display_end_step_is_the_next_display(script):
+    """The end's step came from the first number of its display: on "1 :
+    2.00" that was 1, so "1:3" set 1 : 2.00; on Ti Rate "1/1000" set the
+    bottom and "7" the "4 D" top."""
+    device = script._song.tracks[1].devices[0]
+    device.parameters += [
+        fake_live.FakeParam("Expansion Ratio", 0.5, display=lambda v: "1 : %.2f" % (1.0 + v)),
+        fake_live.FakeParam("Ti Rate", 0.0, 0.0, len(TI_RATES) - 1.0,
+                            display=lambda v: TI_RATES[min(int(v), len(TI_RATES) - 1)])]
+    path = 'live_set tracks 1 devices 0 parameters "%s"'
+    for asked in ("1:2.6", "1:3", "1:2.01"):
+        assert "outside the range of Expansion Ratio" in run_error(
+            script, "param_set_display", path=path % "Expansion Ratio", value=asked)
+    assert run(script, "param_set_display", path=path % "Expansion Ratio",
+               value="1:2")["new"] == "1 : 2.00"
+    for asked in ("1/256", "1/1000", "7", "8 D"):
+        assert "outside the range of Ti Rate" in run_error(
+            script, "param_set_display", path=path % "Ti Rate", value=asked)
+    assert run(script, "param_set_display", path=path % "Ti Rate", value="4 D")["new"] == "4 D"
+    # as in Live, where each step shows from half a step below (not stepped)
+    device.parameters.append(fake_live.FakeParam(
+        "Ti Rate 2", 0.0, 0.0, len(TI_RATES) - 1.0,
+        display=lambda v: TI_RATES[min(int(round(v)), len(TI_RATES) - 1)]))
+    for asked in ("1/256", "1/1000", "7"):
+        assert "outside the range" in run_error(
+            script, "param_set_display", path=path % "Ti Rate 2", value=asked)
+    # a stepped number takes half its last digit; an end whose neighbour
+    # reads finer still takes one digit of its own ("100 ms" beside "99.9 ms")
+    device.parameters += [
+        fake_live.FakeParam("Oct", 0.0, -3.0, 3.0, display=lambda v: "%+d st" % (v // 1)),
+        fake_live.FakeParam("Env Attack", 0.5, display=lambda v: (
+            "%.0f ms" if 100.0 * v >= 99.95 else "%.1f ms") % (100.0 * v))]
+    assert run(script, "param_set_display", path=path % "Oct", value="3.4")["new"] == "+3 st"
+    assert "outside" in run_error(script, "param_set_display", path=path % "Oct", value="3.6")
+    assert run(script, "param_set_display", path=path % "Env Attack",
+               value="100.4 ms")["new"] == "100 ms"
+    assert "outside" in run_error(script, "param_set_display", path=path % "Env Attack",
+                                  value="101.5 ms")
+
+
+def test_param_set_display_halfway_goes_up(script):
+    """"1" on Glue Compressor's Release lies halfway between ".8" and
+    "1.2": it went down silently; ties go to the larger number, noted."""
+    run(script, "lom_call", path="live_set tracks 2", method="insert_device",
+        args=["Glue Compressor"])
+    release = 'live_set tracks 2 devices -1 parameters "Release"'
+    result = run(script, "param_set_display", path=release, value="1")
+    assert result["new"] == "1.2"
+    assert result["note"] == "'1' lies halfway between .8 and 1.2: set to 1.2"
+    assert "note" not in run(script, "param_set_display", path=release, value=".9")
+
+
+class _CountingParam(fake_live.FakeParam):
+    """Counts the values written to it."""
+
+    def __setattr__(self, name, value):
+        if name == "value":
+            object.__setattr__(self, "writes", getattr(self, "writes", 0) + 1)
+        fake_live.FakeParam.__setattr__(self, name, value)
+
+
+class _KeptLowParam(fake_live.FakeParam):
+    """Keeps a value a hair low, as Live kept Shifter's 0.25 (0.24999998)."""
+
+    def __setattr__(self, name, value):
+        if name == "value":
+            value = value - 1.5e-8
+        fake_live.FakeParam.__setattr__(self, name, value)
+
+
+def test_param_set_display_keeps_off_a_displays_edge(script):
+    """Shifter's "0.38 st" starts at exactly 0.25, which Live keeps as
+    0.24999998 ("0.37 st"): a rounded value at a display's edge is not
+    taken."""
+    import math
+    device = script._song.tracks[1].devices[0]
+    device.parameters.append(_KeptLowParam(
+        "LFO Amt St", 0.0, display=lambda v: "%.2f st" % (math.floor(v * 100 + 1e-12) / 100)))
+    path = 'live_set tracks 1 devices 0 parameters "LFO Amt St"'
+    for shown in ("0.25 st", "0.38 st", "0.50 st", "0.01 st"):
+        assert run(script, "param_set_display", path=path, value=shown)["new"] == shown
+
+
+def test_a_refused_display_writes_nothing(script):
+    """A refusal after writing put the old value back, which left an undo
+    step the journal did not count (agent_changes(undo=N) one short)."""
+    device = script._song.tracks[1].devices[0]
+    param = _CountingParam("Note", 60.0, 12.0, 84.0,
+                           display=lambda v: fake_live.note_display(v).replace("B", "H"))
+    device.parameters.append(param)
+    object.__setattr__(param, "writes", 0)
+    path = 'live_set tracks 1 devices 0 parameters "Note"'
+    refused = 0
+    for note in range(12, 85):
+        before = param.writes
+        response = script._process_command({"type": "param_set_display", "params": {
+            "path": path, "value": fake_live.note_display(note)}})
+        if response["status"] == "error":
+            refused += 1
+            assert param.writes == before
+        else:
+            assert param.writes == before + 1
+    assert refused
+
+
+def test_param_set_display_refuses_a_value_outside_the_range(script):
+    params = _drum_buss(script)
+    error = run_error(script, "param_set_display", path=params + "Transients", value="1.5")
+    assert error == "'1.5' is outside the range of Transients, -1.00 to 1.00"
+    assert "outside the range of Output, -36.0 dB to 12.0 dB" in run_error(
+        script, "param_set_display", path=params + "Output", value="20 dB")
+    assert "outside" in run_error(script, "param_set_display", path=params + "Output",
+                                  value="-inf dB")
+    assert "outside" in run_error(script, "param_set_display", path=params + "Drive", value=120)
+    # what rounds to the end of the range is still the end
+    assert run(script, "param_set_display", path=params + "Output", value="12.04 dB")["new"] \
+        == "12.0 dB"
+    pan = "live_set tracks 0 mixer_device panning"
+    assert "outside" in run_error(script, "param_set_display", path=pan, value="60R")
+    assert run(script, "param_set_display", path=pan, value="-10")["new"] == "10L"
+    vol = "live_set tracks 0 mixer_device volume"
+    assert run(script, "param_set_display", path=vol, value="-inf dB")["new"] == "-inf dB"
 
 
 def test_param_set_display_finds_values_by_bisection(script):
@@ -359,6 +820,13 @@ def test_tools_mixer_tracks_and_scenes(live_server):
     assert bass.mixer_device.volume.str_for_value(bass.mixer_device.volume.value) == "-6.0 dB"
     assert bass.mixer_device.panning.str_for_value(bass.mixer_device.panning.value) == "30R"
     assert bass.mute is True
+    # a part that fails makes the call an error, naming what did apply
+    with pytest.raises(Exception) as failed:
+        asyncio.run(call.mcp.call_tool("set_track_mixer", {
+            "track": "Bass", "pan": "25 %", "mute": False}))
+    text = str(failed.value)
+    assert "1 of 2 mixer changes failed" in text and "does not fit" in text and "mute" in text
+    assert bass.mute is False
     call("set_track_mixer", track="return A", volume_db=-3)
     assert song.return_tracks[0].mixer_device.volume.str_for_value(
         song.return_tracks[0].mixer_device.volume.value) == "-3.0 dB"
@@ -453,13 +921,23 @@ def test_tools_watch_and_events(live_server):
     assert call("get_live_events")["observers"] == []
 
 
+def test_tools_pass_on_what_was_set_instead(live_server):
+    """A note from param_set_display (the end, -inf, a tie) was dropped by
+    the tools' summaries."""
+    script, call = live_server
+    added = call("add_device", track="Bass", device="Compressor",
+                 settings={"Output": "36.004 dB", "Threshold": "-12 dB"})
+    assert added["notes"] == {"Output": "Output's highest is 36.00 dB: set to 36.00 dB"}
+    mixed = call("set_track_mixer", track="Bass", pan="50.4R")
+    assert mixed["steps"][0]["note"] == "Track Panning's highest is 50R: set to 50R"
+
+
 def test_tool_errors_are_reported_as_tool_errors(live_server):
     from mcp.server.mcpserver.exceptions import ToolError
 
     script, call = live_server
-    result = call("set_track_mixer", track="Nope", mute=True)
-    assert result["ok"] is False
-    assert "No item named 'Nope'" in result["steps"][0]["error"]
+    with pytest.raises(ToolError, match="No item named 'Nope'"):
+        call("set_track_mixer", track="Nope", mute=True)
     # The SDK turns the ToolError into a result with isError=true
     with pytest.raises(ToolError, match="manage_scene: Unknown action 'explode'"):
         call("manage_scene", action="explode", scene=0)
@@ -581,6 +1059,32 @@ def test_midi_files_round_trip_through_clips(live_server, tmp_path):
         call("export_clip_to_midi", track="Bass", clip_index=1, path=exported["file"])
 
 
+def test_import_midi_file_ignores_a_release_tail_and_takes_a_length(live_server, tmp_path):
+    """A last note whose tail ends just past bar 8 leaves the clip 8 bars long
+    (it became 9); length_bars sets the length, cutting notes at its end."""
+    from MCP_Server import midi_files
+
+    script, call = live_server
+    notes = [{"pitch": 48, "start_time": float(b), "duration": 1.0, "velocity": 100}
+             for b in range(0, 32, 4)]
+    notes[-1]["duration"] = 4.1  # 28 → 32.1
+    path = tmp_path / "tail.mid"
+    midi_files.write_midi(path, notes, 120.0, 4, 4, "tail")
+    result = call("import_midi_file", path=str(path), track="Bass", clip_index=2)
+    clip = script._song.tracks[1].clip_slots[2].clip
+    assert result["length_beats"] == 32.0 and clip.length == 32.0
+    assert max(n.start_time + n.duration for n in clip._notes) == 32.0
+    # a note that starts on the bar line keeps that bar, however short
+    hit = notes + [{"pitch": 50, "start_time": 32.0, "duration": 0.25, "velocity": 100}]
+    midi_files.write_midi(tmp_path / "hit.mid", hit, 120.0, 4, 4, "hit")
+    assert call("import_midi_file", path=str(tmp_path / "hit.mid"), track="Bass",
+                clip_index=1)["length_beats"] == 36.0
+    short = call("import_midi_file", path=str(path), track="Bass", clip_index=3, length_bars=4)
+    clip = script._song.tracks[1].clip_slots[3].clip
+    assert short["length_beats"] == 16.0 and clip.length == 16.0
+    assert short["notes_after_the_end"] == 4 and len(clip._notes) == 4
+
+
 def test_import_from_live_set_writes_the_played_notes(live_server, tmp_path):
     import als_sets
 
@@ -613,9 +1117,13 @@ def _fake_ml(monkeypatch, tmp_path):
     monkeypatch.setattr(ml, "INDEX_DIR", tmp_path / "sound-index")
 
     def vector(text):
+        if "lead" in text.lower():
+            return [0.0, 0.0, 1.0]
         return [1.0, 0.0, 0.0] if "kick" in text.lower() else [0.0, 1.0, 0.0]
 
-    async def run(task, job, report=None, timeout=3600.0):
+    async def run(task, job, report=None, timeout=3600.0, prepare=None):
+        if prepare is not None:
+            prepare(job)
         jobs.append((task, job))
         if report:
             await report(0.5, task)
@@ -681,6 +1189,13 @@ def test_separate_stems_from_a_clip_onto_new_tracks(live_server, tmp_path, monke
     # each stem plays from where the source does, not where Live's warp analysis put its start
     assert (placed.start_marker, placed.loop_start) == (1.5, 1.5) != (fake_live.FIRST_TRANSIENT,) * 2
     assert result["tracks"][0] == {"track": "Song drums", "clip_index": 1}
+    # The same source again may overwrite its stems; another file's are refused
+    call("separate_stems", path=str(source), out_dir=str(tmp_path / "stems"))
+    other = tmp_path / "Other.wav"
+    sf.write(other, np.zeros(4410), 44100)
+    with pytest.raises(Exception, match="already holds stems"):
+        call("separate_stems", path=str(other), out_dir=str(tmp_path / "stems"))
+    assert len(jobs) == 2
 
 
 def _riff(path, rate=44100):
@@ -783,7 +1298,8 @@ def test_audio_to_midi_follows_the_clips_warp_and_start_marker(live_server, tmp_
     clip.warping, clip.start_marker = False, 0.75
     unwarped = call("audio_to_midi", track="Vox", clip_index=0, offset_beats=1)
     assert [n["start_time"] for n in note_dicts(unwarped)] == [1.5]
-    assert unwarped["timing"] == {"offset_beats": 1.0, "note": "The clip loops; the notes follow its file once.",
+    # (Live turns the loop off with warping, so no "the clip loops" note)
+    assert unwarped["timing"] == {"offset_beats": 1.0,
                                   "method": "tempo", "tempo": 120.0, "start_marker_seconds": 0.75,
                                   "notes_before_clip_start": 1}
     # A warped clip Live cannot map falls back to the tempo, and says so; audio
@@ -821,6 +1337,28 @@ def test_find_similar_sounds_indexes_once_then_searches(live_server, tmp_path, m
     assert by_example["results"][0]["file"] == "Kick Short.wav"
     with pytest.raises(Exception, match="Give text"):
         call("find_similar_sounds", folder=str(folder))
+    assert "warning" not in first
+    # Nothing there sounds like it: the best match is weak, and said so
+    weak = call("find_similar_sounds", text="sustained lead", folder=str(folder), top=2)
+    assert weak["results"][0]["score"] == 0.0 and "Weak matches" in weak["warning"]
+    assert call("find_similar_sounds", text="sustained lead", folder=str(folder),
+                min_score=0.3)["results"] == []
+
+
+def test_find_similar_sounds_by_length(live_server, tmp_path, monkeypatch):
+    import numpy as np
+    import soundfile as sf
+
+    _script, call = live_server
+    _fake_ml(monkeypatch, tmp_path)
+    folder = tmp_path / "Sounds"
+    folder.mkdir()
+    for name, seconds in (("Kick Hit.wav", 0.3), ("Kick Drone.wav", 4.0), ("Kick Mid.wav", 1.0)):
+        sf.write(folder / name, np.zeros(int(22050 * seconds)), 22050)
+    long = call("find_similar_sounds", text="kick", folder=str(folder), min_seconds=2)
+    assert [(r["file"], r["seconds"]) for r in long["results"]] == [("Kick Drone.wav", 4.0)]
+    short = call("find_similar_sounds", text="kick", folder=str(folder), max_seconds=1.5)
+    assert {r["file"] for r in short["results"]} == {"Kick Hit.wav", "Kick Mid.wav"}
 
 
 def test_analyzer_tools_write_the_device_and_read_its_track(live_server, tmp_path, monkeypatch):
@@ -867,12 +1405,34 @@ def test_add_device_inserts_by_name_and_applies_settings(live_server):
     bass = script._song.tracks[1]
     result = call("add_device", track="Bass", device="Utility",
                   settings={"Bass Mono": "On", "Gain": 0.25})
-    assert result["settings"]["ok"]
+    assert result["ok"] and result["settings"] == "2 of 2 applied" and "errors" not in result
     utility = bass.devices[-1]
     assert utility.class_name == "StereoGain"
     assert utility.parameters[1].value == 1 and utility.parameters[2].value == 0.25
     with pytest.raises(Exception, match="Could not insert 'Nope'"):
         call("add_device", track="Bass", device="Nope")
+
+
+def test_add_device_reports_failed_settings_at_the_top(live_server):
+    """An EQ Eight filter type Live does not have looked like success: the
+    failure sat inside result["settings"]."""
+    script, call = live_server
+    result = call("add_device", track="Bass", device="EQ Eight",
+                  settings={"1 Filter Type A": "High Pass 24dB", "1 Frequency A": "80 Hz"})
+    assert result["ok"] is False and result["settings"] == "1 of 2 applied"
+    assert list(result["errors"]) == ["1 Filter Type A"]
+    assert "High Pass 48dB" in result["errors"]["1 Filter Type A"]   # Live's choices
+
+
+def test_apply_device_chain_reports_failed_settings_at_the_top(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import device_recipes
+    broken = {"description": "x", "devices": [("EQ Eight", {"1 Filter Type A": "High Pass 24dB"}),
+                                              ("Limiter", {"Gain": "2 dB"})]}
+    monkeypatch.setattr(device_recipes, "recipe", lambda name: broken)
+    result = call("apply_device_chain", track="Bass", chain="anything")
+    assert result["ok"] is False and list(result["errors"]) == ["EQ Eight: 1 Filter Type A"]
+    assert result["renamed"] == {"Limiter: Gain": "Limiter: Input Gain"}
 
 
 def test_sidechain_chain_keys_the_compressor_from_another_track(live_server):
@@ -1123,6 +1683,52 @@ def test_browser_search_walks_in_slices_and_returns_loadable_ids(script):
                                     within=["Drum Hits", "Cowbell"])
 
 
+def test_browser_walk_takes_at_most_half_of_lives_time(script, monkeypatch):
+    """A client that asks for the next slice at once (2.4.3 and earlier)
+    gets a short one, so Live keeps half of its main thread; rest_ms says
+    how long to wait for a whole slice."""
+    clock = [1000.0]  # Live's clock stands still unless the test moves it
+    monkeypatch.setattr(script.module, "time",
+                        types.SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
+    first = run(script, "browser_search", query="a", roots=["drums", "samples"],
+                loadable_only=False, slice_ms=1000, max_results=1)
+    assert not first["done"] and first["rest_ms"] == first["busy_ms"] == 0
+    again = run(script, "browser_search", walk_id=first["walk_id"], slice_ms=1000,
+                max_results=500)
+    assert again["visited"] == first["visited"] + 1  # no rest: one item, no more
+    clock[0] += 0.5  # rested half a second: a slice as long
+    rested = run(script, "browser_search", walk_id=first["walk_id"], slice_ms=1000,
+                 max_results=500)
+    assert rested["done"] and rested["visited"] > again["visited"] + 1
+
+
+class _ItemVector(object):
+    """Like Live's vector of browser items: indexed, never listed whole."""
+
+    def __init__(self, items):
+        self.items = items
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+    def __iter__(self):
+        raise AssertionError("the walk listed a whole folder at once")
+
+
+def test_browser_walk_reads_a_folder_item_by_item(script):
+    browser = script.application().browser
+    big = fake_live.FakeBrowserItem("Big", [fake_live.FakeBrowserItem("Hit %d.wav" % i)
+                                            for i in range(50)])
+    object.__setattr__(big, "children", _ItemVector(big.children))
+    object.__setattr__(browser.samples, "children", _ItemVector([big]))
+    found = run(script, "browser_search", query="hit 4", roots=["samples"])
+    assert found["done"] and found["visited"] == 51
+    assert len(found["results"]) == 14  # Hit 4, 14, 24, 34 and 40 to 49
+
+
 def test_browser_ids_outlast_many_lom_objects(script):
     """A long walk (12,000 samples) used to push its results out of the shared
     4096-entry registry: browser_load then failed with "Unknown id"."""
@@ -1132,6 +1738,19 @@ def test_browser_ids_outlast_many_lom_objects(script):
         script._lom_register(object())
     assert run(script, "lom_get", path=f"id {item_id}", properties=["name"])["name"] == \
         found[0]["name"]
+
+
+def test_ref_takes_a_bare_id(script):
+    """Köprüaltı: {"$ref": <int>} said "Unknown root"; an id alone is an id."""
+    track_id = run(script, "lom_get", path="live_set tracks 2", properties=["name"])["$id"]
+    for ref in (track_id, str(track_id), "id %d" % track_id):
+        run(script, "lom_set", path="live_set view", property="selected_track",
+            value={"$ref": ref})
+        assert script._song.view.selected_track is script._song.tracks[2]
+        script._song.view.selected_track = script._song.tracks[0]
+    assert run(script, "lom_get", path=str(track_id), properties=["name"])["name"] == "Vox"
+    error = run_error(script, "lom_get", path="tracks 0", properties=["name"])
+    assert "Unknown root 'tracks'" in error and '{"$id": N}' in error
 
 
 def test_browser_tools_search_load_and_preview(live_server):
@@ -1433,13 +2052,436 @@ def test_build_arrangement_lays_out_sections_with_locators(live_server):
 
     assert starts(drums) == [(8.0, "Beat"), (12.0, "Beat"), (16.0, "Beat"), (20.0, "Beat")]
     assert starts(bass)[:3] == [(0.0, "Bass A"), (8.0, "Bass A"), (16.0, "Bass A")]
-    # Outro: 4 beats of a 3-beat MIDI clip → one copy plus an exact 1-beat cut
-    assert starts(bass)[3] == (24.0, "Bass B") and bass.arrangement_clips[4].length == 1.0
-    cut = bass.arrangement_clips[4]._notes
-    assert [(n.start_time, n.duration) for n in cut] == [(0.0, 1.0)]
-    assert any("Chop" in w or "Vox" in w for w in result["warnings"])
+    # Outro: 4 beats of a 3-beat MIDI clip → one copy plus a copy 1 beat long
+    # (Live sizes a copy by loop_end - loop_start: moved for it, put back)
+    assert starts(bass)[3:] == [(24.0, "Bass B"), (27.0, "Bass B")]
+    assert (bass.arrangement_clips[4].end_time, bass.arrangement_clips[4].length) == (28.0, 1.0)
+    assert (riff.loop_end, riff.end_marker, riff.length) == (3.0, 3.0, 3.0)
+    # the 6-beat audio clip: in the 8-beat Intro once, then 2 beats of it (not
+    # 6 past the section's end), in the 16-beat Drop twice and 4 beats
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [
+        (0.0, 6.0), (6.0, 8.0), (8.0, 14.0), (14.0, 20.0), (20.0, 24.0)]
+    assert vox.clip_slots[0].clip.length == 6.0 and "warnings" not in result
     assert [(c.name, c.time) for c in song.cue_points] == [("Intro", 0.0), ("Drop", 8.0),
                                                           ("Outro", 24.0)]
+
+
+def _arranged(track, clip, start, end=None):
+    """Put a copy of clip on the track's Arrangement at start (cut at end)."""
+    placed = track.duplicate_clip_to_arrangement(clip, start)
+    if end is not None:
+        object.__setattr__(placed, "end_time", end)
+    return placed
+
+
+def test_build_arrangement_silences_tracks_left_out_and_old_locators(live_server):
+    """A rebuilt section leaves nothing of the old layout playing on tracks
+    that don't play there: clips inside go, clips across its edges are cut
+    there (Live splits a clip a copy is laid over); old locators inside the
+    built bars go, others stay."""
+    script, call = live_server
+    song = script._song
+    drums, bass, vox = song.tracks
+    drums.clip_slots[0].clip = fake_live.FakeClip(name="Beat", length=4.0)
+    drums.clip_slots[0].has_clip = True
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    old_beat = fake_live.FakeClip(name="Old Beat", length=16.0)
+    _arranged(drums, old_beat, 0.0)                       # across the Intro's end
+    chop = vox.clip_slots[1].create_audio_clip("/samples/old chop.wav")
+    chop.loop_start = chop.start_marker = 0.0
+    _arranged(vox, chop, 2.0, 6.0)                        # inside the Intro
+    _arranged(vox, chop, 12.0, 20.0)                      # across the song's end
+    vox.clip_slots[1].delete_clip()
+    for name, at in (("Old Intro", 0.0), ("Old", 4.0), ("Later", 20.0)):
+        song.cue_points.append(fake_live.FakeObj(name=name, time=at))
+    song.current_song_time = 2.0
+
+    result = call("build_arrangement", sections=[  # Vox, with no Session clip, named in each
+        {"name": "Intro", "bars": 2, "clips": {"Bass": 0, "Vox": None}},
+        {"name": "Drop", "bars": 2, "scene": 0, "except": ["Vox"]}])
+    assert result["ok"], result
+    assert result["cleared"] == {"Drums": {"trimmed": 1}, "Vox": {"removed": 1, "trimmed": 1}}
+    assert [(c.start_time, c.end_time, c.name) for c in drums.arrangement_clips] == [
+        (8.0, 12.0, "Beat"), (12.0, 16.0, "Beat")]
+    # Vox plays nowhere: only what lies past the built bars is left, from its own beat 4
+    assert [(c.start_time, c.end_time, c.start_marker) for c in vox.arrangement_clips] == [
+        (16.0, 20.0, 4.0)]
+    assert not any(slot.has_clip for slot in vox.clip_slots)  # the scratch clip went
+    assert [(c.name, c.time) for c in sorted(song.cue_points, key=lambda c: c.time)] == [
+        ("Intro", 0.0), ("Drop", 8.0), ("Later", 20.0)]
+    assert result["locators_deleted"] == [{"name": "Old", "time": 4.0}]
+    # each copy moved the playhead to it (Live 12.4.16); it is back where it was
+    assert song.current_song_time == 2.0
+
+
+def test_build_arrangement_leaves_arrangement_only_tracks_alone(live_server):
+    """A track with no Session clip (vocals recorded in the Arrangement) is
+    not part of the layout: unless a section names it, its clips stay and
+    are listed under kept."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    take = vox.clip_slots[1].create_audio_clip("/samples/vocal take.wav")
+    _arranged(vox, take, 2.0, 10.0)
+    vox.clip_slots[1].delete_clip()
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 2, "clips": {"Bass": 0}}],
+                  locators=False)
+    assert result["ok"] and result["kept"] == {"Vox": 1} and "cleared" not in result
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(2.0, 10.0)]
+
+
+def test_an_arrangement_only_track_is_cleared_only_where_named(live_server):
+    """Named in one section (except), a track without Session clips is
+    cleared there and nowhere else (it was cleared in every section)."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    take = vox.clip_slots[1].create_audio_clip("/samples/vocal take.wav")
+    take.loop_start = take.start_marker = 0.0
+    _arranged(vox, take, 2.0, 6.0)    # in A, which names Vox
+    _arranged(vox, take, 10.0, 14.0)  # in B, which does not
+    vox.clip_slots[1].delete_clip()
+    result = call("build_arrangement", sections=[
+        {"name": "A", "bars": 2, "scene": 0, "except": ["Vox"]},
+        {"name": "B", "bars": 2, "scene": 0}], locators=False)
+    assert result["ok"] and result["cleared"] == {"Vox": {"removed": 1}} and result["kept"] == {"Vox": 1}
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(10.0, 14.0)]
+
+
+def test_kept_counts_what_is_left_after_the_cuts(live_server):
+    """One recorded clip across an unnamed, a named and an unnamed section:
+    cut out of the named one, its two parts are left in the others."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=4.0)
+    bass.clip_slots[0].has_clip = True
+    take = vox.clip_slots[1].create_audio_clip("/samples/vocal take.wav")
+    take.loop_start = take.start_marker = 0.0
+    _arranged(vox, take, 0.0, 24.0)
+    vox.clip_slots[1].delete_clip()
+    result = call("build_arrangement", sections=[
+        {"name": "B", "bars": 2, "scene": 0},
+        {"name": "A", "bars": 1, "scene": 0, "except": ["Vox"]},
+        {"name": "C", "bars": 3, "scene": 0}], locators=False)
+    assert result["cleared"] == {"Vox": {"trimmed": 1}} and result["kept"] == {"Vox": 2}
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(0.0, 8.0),
+                                                                           (12.0, 24.0)]
+
+
+def test_build_tracks_refuses_bars_it_cannot_fit_before_building(live_server):
+    script, call = live_server
+    before = len(script._song.tracks)
+    with pytest.raises(Exception, match="bars must be more than 0"):
+        call("build_tracks", tracks=[{"name": "Loop", "kind": "audio", "audio_clips": [
+            {"file": "/samples/loop.wav", "warping": True, "bars": 0}]}])
+    assert len(script._song.tracks) == before
+
+
+def test_build_arrangement_can_keep_other_tracks_and_locators(live_server):
+    script, call = live_server
+    song = script._song
+    drums, bass, _vox = song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    _arranged(drums, fake_live.FakeClip(name="Old Beat", length=16.0), 0.0)
+    song.cue_points.append(fake_live.FakeObj(name="Old", time=4.0))
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 2, "clips": {"Bass": 0}}],
+                  clear_others=False, clear_locators=False)
+    assert "cleared" not in result and "locators_deleted" not in result
+    assert [(c.start_time, c.end_time) for c in drums.arrangement_clips] == [(0.0, 16.0)]
+    assert sorted(c.time for c in song.cue_points) == [0.0, 4.0]
+
+
+def test_build_arrangement_keeps_envelopes_in_a_shortened_copy(live_server):
+    """What is left of a section after whole copies is a copy of the Session
+    clip too, so its clip envelopes play in the Arrangement."""
+    script, call = live_server
+    bass = script._song.tracks[1]
+    riff = fake_live.FakeClip(name="Riff", length=8.0)
+    volume = bass.mixer_device.volume
+    riff.create_automation_envelope(volume).insert_step(0.0, 8.0, 0.5)
+    bass.clip_slots[0].clip, bass.clip_slots[0].has_clip = riff, True
+    call("build_arrangement", sections=[{"name": "A", "bars": 3, "clips": {"Bass": 0}}],
+         locators=False)
+    whole, rest = bass.arrangement_clips
+    assert (rest.start_time, rest.end_time) == (8.0, 12.0)
+    assert rest.automation_envelope(volume).steps == [(0.0, 8.0, 0.5)]
+    assert riff.length == 8.0
+
+
+def test_build_arrangement_cuts_an_unwarped_audio_clip_to_its_section(live_server):
+    """An unwarped Session clip keeps its length whatever its loop (Live
+    12.4.16), so the copy is trimmed in the Arrangement, past everything,
+    and copied from there."""
+    script, call = live_server
+    vox = script._song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")  # 4 s: 8 beats
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 1, "clips": {"Vox": 0}}],
+                  locators=False)
+    assert result["ok"], result
+    assert [(c.start_time, c.end_time, c.loop_end) for c in vox.arrangement_clips] == [
+        (0.0, 4.0, 2.0)]
+    assert (take.length, take.loop_end, take.warping) == (8.0, 4.0, False)
+
+
+def test_build_arrangement_trims_one_unwarped_loop_in_several_sections(live_server):
+    """Each trimmed copy is made at a scratch place of its own: a scratch
+    copy laid over another replaces it (it can no longer be read), which
+    failed the build and left a stray clip."""
+    script, call = live_server
+    song = script._song
+    vox = song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")  # 4 s: 8 beats
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+    song.cue_points.append(fake_live.FakeObj(name="Old", time=4.0))
+    result = call("build_arrangement", sections=[
+        {"name": "A", "bars": 1, "clips": {"Vox": 0}},
+        {"name": "B", "bars": 3, "clips": {"Vox": 0}}])
+    assert result["ok"], result
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [
+        (0.0, 4.0), (4.0, 12.0), (12.0, 16.0)]
+    assert sorted((c.name, c.time) for c in song.cue_points) == [("A", 0.0), ("B", 4.0)]
+
+
+def test_build_arrangement_names_the_section_and_track_of_a_failed_copy(live_server,
+                                                                         monkeypatch):
+    """A trimmed copy that cannot be made is an error of its section and
+    track; the build goes on (locators placed) and leaves no scratch copy."""
+    from MCP_Server import extended_tools
+
+    script, call = live_server
+    vox = script._song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+
+    def unreadable(tp, at):
+        raise RuntimeError("no reading")
+
+    monkeypatch.setattr(extended_tools, "past_the_end", unreadable)
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 1, "clips": {"Vox": 0}}])
+    assert result["ok"] is False
+    assert result["errors"] == ["A: Vox: no scratch place: no reading"]
+    assert vox.arrangement_clips == [] and [c.name for c in script._song.cue_points] == ["A"]
+
+
+def test_build_arrangement_reports_a_track_it_could_not_clear(live_server, monkeypatch):
+    """A track whose clearing fails is an error (its old clips would still
+    play); a group track, which holds no clips, is skipped without one. The
+    playhead is read once for the whole build, not per cleared track."""
+    from MCP_Server import extended_tools
+
+    script, call = live_server
+    drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=8.0)
+    bass.clip_slots[0].has_clip = True
+    object.__setattr__(vox, "is_foldable", True)
+    drums.clip_slots[1].clip, drums.clip_slots[1].has_clip = fake_live.FakeClip(name="B"), True
+    real_cut, real_read = extended_tools.cut_ranges, extended_tools.read_playhead
+    cleared, playhead_reads = [], []
+
+    def cut(track, ranges):
+        cleared.append(track)
+        if track == 0:
+            raise extended_tools.AbletonCommandError("Live refused the scratch clip")
+        return real_cut(track, ranges)
+
+    def counting():
+        playhead_reads.append(1)
+        return real_read()
+
+    monkeypatch.setattr(extended_tools, "cut_ranges", cut)
+    monkeypatch.setattr(extended_tools, "read_playhead", counting)
+    _arranged(drums, fake_live.FakeClip(name="Old Beat", length=8.0), 0.0)
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 2, "clips": {"Bass": 0}}],
+                  locators=False)
+    assert result["ok"] is False
+    assert result["errors"] == ["Drums: not cleared: Live refused the scratch clip"]
+    assert cleared == [0] and len(playhead_reads) == 1
+
+
+def test_a_scratch_copy_left_behind_is_an_error(live_server, monkeypatch):
+    script, call = live_server
+    vox = script._song.tracks[2]
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    take.loop_start = take.start_marker = 0.0
+    take.warping = False
+    real_delete = fake_live.FakeTrack.delete_clip
+
+    def stuck(self, clip):
+        if clip.start_time >= 1024:  # the scratch copies, past the end of the track
+            raise RuntimeError("Clip is locked")
+        return real_delete(self, clip)
+
+    monkeypatch.setattr(fake_live.FakeTrack, "delete_clip", stuck)
+    result = call("build_arrangement", sections=[{"name": "A", "bars": 1, "clips": {"Vox": 0}}],
+                  locators=False)
+    assert result["ok"] is False and len(result["errors"]) == 1
+    assert result["errors"][0].startswith("A: Vox: a scratch copy (id ")
+    assert "Clip is locked" in result["errors"][0]
+
+
+def test_redoing_a_delete_leaves_the_clip_gone(script):
+    song = script._song
+    bass = song.tracks[1]
+    clip = _arranged(bass, fake_live.FakeClip(name="Line", length=4.0), 0.0)
+    song.begin_undo_step()
+    bass.delete_clip(clip)
+    song.end_undo_step()
+    song.undo()
+    assert bass.arrangement_clips == [clip] and clip.name == "Line"
+    song.redo()
+    assert bass.arrangement_clips == []
+    with pytest.raises(RuntimeError, match="no longer exists"):
+        clip.name
+
+
+def test_clip_lengths_that_cannot_be_are_refused(live_server):
+    from MCP_Server import extended_tools
+
+    with pytest.raises(ValueError, match="more than 0"):
+        extended_tools.duplicate_session_clip("Bass", 0, 0.0, 0.0)
+    with pytest.raises(ValueError, match="warping=false"):
+        extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", False, 4)
+
+
+def test_keeping_the_playhead_closes_a_step_it_never_ran(monkeypatch):
+    from MCP_Server import extended_tools
+
+    def no_live(*_args, **_kwargs):
+        raise RuntimeError("no Live")
+
+    async def step():
+        return 1
+
+    monkeypatch.setattr(extended_tools, "send", no_live)
+    coro = step()
+    with pytest.raises(RuntimeError, match="no Live"):
+        asyncio.run(extended_tools.keeping_the_playhead(coro))
+    assert coro.cr_frame is None  # closed, so never "never awaited"
+
+
+def test_clips_that_only_touch_a_section_are_not_cut(live_server):
+    """A rebuild over clips laid end to end by an earlier build: a clip
+    ending where the section starts is not across it, so nothing is split
+    (that once made a MIDI scratch clip on an audio track, which Live
+    refuses, and left the old audio playing)."""
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=16.0)
+    bass.clip_slots[0].has_clip = True
+    loop = vox.clip_slots[0].create_audio_clip("/samples/loop.wav")  # 8 beats
+    loop.loop_start = loop.start_marker = 0.0
+    loop.loop_end = 16.0
+    _arranged(vox, loop, 0.0)
+    _arranged(vox, loop, 16.0)
+    result = call("build_arrangement", sections=[
+        {"name": "A", "bars": 4, "clips": {"Vox": 0, "Bass": 0}},
+        {"name": "B", "bars": 4, "clips": {"Bass": 0}}], locators=False)
+    assert result["ok"], result
+    assert result["cleared"] == {"Vox": {"removed": 1}}
+    assert [(c.start_time, c.end_time) for c in vox.arrangement_clips] == [(0.0, 16.0)]
+    with pytest.raises(RuntimeError, match="MIDI clips can only be created on MIDI tracks"):
+        vox.clip_slots[3].create_clip(4.0)
+
+
+def test_scratch_slot_says_when_its_clip_was_not_deleted(live_server, monkeypatch):
+    from MCP_Server import extended_tools
+
+    script, _call = live_server
+    bass = script._song.tracks[1]
+
+    def stuck(self):
+        raise RuntimeError("slot is locked")
+
+    with pytest.raises(RuntimeError, match=r"the scratch clip in live_set tracks 1 clip_slots 0 "
+                                           r"was not deleted: .*slot is locked"):
+        with extended_tools.scratch_slot("live_set tracks 1") as slot:
+            extended_tools.send("lom_call", {"path": slot, "method": "create_clip", "args": [1.0]})
+            monkeypatch.setattr(fake_live.FakeClipSlot, "delete_clip", stuck)
+    with pytest.raises(RuntimeError, match=r"^body failed; the scratch clip in live_set tracks 1 "
+                                           r"clip_slots 1 was not deleted"):
+        with extended_tools.scratch_slot("live_set tracks 1") as slot:
+            extended_tools.send("lom_call", {"path": slot, "method": "create_clip", "args": [1.0]})
+            raise RuntimeError("body failed")
+    assert bass.clip_slots[0].has_clip and bass.clip_slots[1].has_clip
+
+
+def test_bars_on_a_clip_live_left_unwarped(live_server):
+    """Warped again, Live 12.4.16 keeps no marker at the file's end, so it
+    cannot be fitted: said, and left unwarped."""
+    from MCP_Server import extended_tools
+
+    script, _call = live_server
+    vox = script._song.tracks[2]
+    clip = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    clip.warping = False
+    markers = [m.beat_time for m in clip.warp_markers]
+    report = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", None, 1)
+    assert "not fitted to bars" in report["notes"][0] and "errors" not in report
+    assert clip.warping is False
+    # asked for warping too: it is still left as it is, as the note says
+    report = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", True, 1)
+    assert "left unwarped" in report["notes"][0] and report["warping"] is False
+    assert clip.warping is False and "live_guess_bpm" in report and "warp_bpm" not in report
+    assert [m.beat_time for m in clip.warp_markers] == markers  # not warped again for nothing
+    # 4 s at 120 BPM: the file plays 8 beats; Live keeps it its length (what copies take)
+    assert report["warning"] == ("Live keeps it 7.75 beats long (copies last that), not 1 bars "
+                                 "(4 beats); the file plays 8 beats")
+
+
+def test_fit_audio_clip_reports_reads_that_failed(live_server):
+    from MCP_Server import extended_tools
+
+    script, _call = live_server
+    vox = script._song.tracks[2]
+    clip = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    object.__setattr__(clip, "warp_markers", [])
+    end = clip.end_marker
+    report = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 0 clip", None, 1)
+    assert report["errors"] == ["its warp markers could not be read, so it was not fitted"]
+    assert clip.end_marker == end  # nothing set blindly
+    gone = extended_tools.fit_audio_clip("live_set tracks 2 clip_slots 3 clip", None, 1)
+    assert gone["errors"][0].startswith("Live did not answer for the clip")
+
+
+def test_copy_warnings_offer_a_length_only_where_one_can_be_passed():
+    from MCP_Server import extended_tools
+
+    info = {"name": "Pad", "length": 16.0, "looping": False, "loop_start": 0.0,
+            "loop_end": 16.0, "start_marker": 0.0, "end_marker": 4.0, "is_midi_clip": True}
+    assert "pass the length" in extended_tools.copy_warnings(info, 120.0)[0]
+    assert "pass the length" not in extended_tools.copy_warnings(info, 120.0,
+                                                                 takes_length=False)[0]
+
+
+def test_a_gap_cuts_audio_tracks_too_and_returns_the_clips_around_it(live_server):
+    script, call = live_server
+    _drums, bass, vox = script._song.tracks
+    line = fake_live.FakeClip(name="Line", length=16.0)
+    line.add_new_notes([fake_live.MidiNoteSpecification(pitch=40, start_time=float(t), duration=1.0,
+                                                        velocity=100, mute=False)
+                        for t in range(16)])
+    _arranged(bass, line, 0.0)
+    take = vox.clip_slots[0].create_audio_clip("/samples/take.wav")
+    take.loop_start = take.start_marker = 0.0
+    take.loop_end = 16.0
+    _arranged(vox, take, 0.0)
+    vox.clip_slots[0].delete_clip()
+    gap = call("design_transition", kind="gap", at_bar=3, tracks=["Bass", "Vox"])
+    assert gap["tracks"] == ["Bass", "Vox"]
+    assert [(c["start_time"], c["end_time"], c["name"]) for c in gap["clips"]["Bass"]] == [
+        (0.0, 7.0, "Line"), (7.0, 8.0, "Gap"), (8.0, 16.0, "Line")]
+    assert [(c["arrangement_clip_index"], c["start_time"], c["end_time"])
+            for c in gap["clips"]["Vox"]] == [(0, 0.0, 7.0), (1, 8.0, 16.0)]
+    assert [(c.start_time, c.end_time, c.start_marker) for c in vox.arrangement_clips] == [
+        (0.0, 7.0, 0.0), (8.0, 16.0, 8.0)]
 
 
 def test_create_locator_toggles_after_the_playhead_moved(script):
@@ -1539,16 +2581,35 @@ def test_parameter_names_from_another_live_version_still_work(live_server):
     script, call = live_server
     added = call("add_device", track="Bass", device="Compressor",
                  settings={"Output Gain": "6 dB", "Threshold": "-30 dB"})
-    assert added["settings"]["ok"], added
+    assert added["ok"] and added["renamed"] == {"Output Gain": "Output"}, added
     compressor = script._song.tracks[1].devices[-1]
     output = next(p for p in compressor.parameters if p.name == "Output")
     assert output.str_for_value(output.value) == "6.00 dB"
-    call("set_device_parameter_by_name", track="Bass", device="Compressor",
-         parameter="Output Gain", display_value="-3 dB")
+    set_ = call("set_device_parameter_by_name", track="Bass", device="Compressor",
+                parameter="Output Gain", display_value="-3 dB")
     assert output.str_for_value(output.value) == "-3.00 dB"
+    assert (set_["asked"], set_["parameter"]) == ("Output Gain", "Output")
     from MCP_Server.extended_tools import parameter_aliases
     assert parameter_aliases("2 Resonance A") == ["2 Q A"]
     assert parameter_aliases("Output") == ["Output Gain", "Makeup", "Gain", "Master Output"]
+
+
+def test_limiter_gain_is_its_input_gain_not_its_output(live_server):
+    """Live 12.3's Limiter "Gain" is 12.4's "Input Gain"; the general rename
+    "Gain" → "Output" (Utility) used to send it to the Limiter's Output."""
+    script, call = live_server
+    added = call("add_device", track="Bass", device="Limiter", settings={"Gain": "4 dB"})
+    assert added["ok"] and added["renamed"] == {"Gain": "Input Gain"}, added
+    limiter = {p.name: p for p in script._song.tracks[1].devices[-1].parameters}
+    assert limiter["Input Gain"].value == pytest.approx(4.0, abs=0.05)
+    assert limiter["Output"].value == 0.0
+    set_ = call("set_device_parameter_by_name", track="Bass", device="Limiter",
+                parameter="Gain", display_value="2 dB")
+    assert set_["parameter"] == "Input Gain" and limiter["Output"].value == 0.0
+    from MCP_Server.extended_tools import parameter_aliases
+    assert parameter_aliases("Gain", "Limiter") == ["Input Gain"]
+    assert parameter_aliases("Output", "Limiter") == ["Output Gain", "Makeup", "Master Output"]
+    assert parameter_aliases("Gain", "StereoGain") == ["Output"]
 
 
 def _updates_server():
@@ -2052,3 +3113,700 @@ def test_a_track_named_with_digits_is_found_by_its_name(live_server, monkeypatch
     result = call("apply_device_chain", track="Bass", chain="sidechain_duck", sidechain_from="808")
     assert result["ok"], result
     assert bass.devices[-1].input_routing_type.display_name == "808"
+
+
+# ── Remake sessions: loads, names, racks (fix/remake-session-issues) ─────────
+
+def _boot_kit():
+    """Like Live 12.4's "BNYX Boot Kit": an Instrument Rack whose one chain
+    holds a Drum Rack (kick on 36) and a Saturator."""
+    rack = fake_live.FakeDrumRack()
+    rack.name = "Boot Kit"
+    rack.insert_chain()
+    rack.chains[0].in_note = 36
+    rack.chains[0].name = "Kick Boot"
+    rack.chains[0].insert_device("Simpler")
+    rack.drum_pads[36].name = "Kick Boot"
+    saturator = fake_live.INSERTABLE["Saturator"]()
+    return fake_live.FakeRack("Boot Kit", [("Boot Kit", [rack, saturator])])
+
+
+def test_browser_load_refuses_a_missing_track_before_loading(live_server):
+    """A failed track select used to load the item onto whatever track was
+    selected: a preset replaced the Drums track's Drum Rack."""
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    song.view.selected_track = song.tracks[2]
+    with pytest.raises(Exception, match="No item named 'Nope'"):
+        call("browser_load", track="Nope", item="pad warm")
+    # the track is checked before the browser is searched
+    with pytest.raises(Exception, match="No item named 'Nope'"):
+        call("browser_load", track="Nope", item="nothing is called this")
+    with pytest.raises(Exception, match="No Drum Rack"):
+        call("browser_load", track="Vox", item="nothing is called this", drum_pad="kick")
+    with pytest.raises(Exception, match="No item named 'Nope'"):
+        call("build_drum_kit", track="Nope", roles=["kick"])
+    assert browser.loaded == [] and song.tracks[2].devices == []
+
+
+def test_browser_load_follows_a_track_live_renames(live_server):
+    """Live names a "5-MIDI" track after the instrument it loads; reading the
+    track back by its old name failed after the load had happened."""
+    script, call = live_server
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("5-MIDI"))
+    loaded = call("browser_load", track="5-MIDI", item="pad warm")
+    assert loaded["track"] == "5-Warm Pad" and loaded["devices"] == ["Warm Pad"]
+    assert "warning" not in loaded
+    assert song.tracks[-1].arm is False           # Live armed it on loading; put back
+    # a load that changes nothing says so
+    browser = script.application().browser
+    object.__setattr__(browser, "load_item", lambda item: None)
+    loaded = call("browser_load", track="Vox", item="pad warm")
+    assert loaded["warning"] == "the track's devices did not change"
+
+
+def test_a_name_made_of_digits_is_searched_for(live_server):
+    """browser_load(item="808") took the digits for a browser id and failed
+    with "Unknown id 808"; an id that is no browser item is a name too."""
+    script, call = live_server
+    loaded = call("browser_load", track="Bass", item="808", category="drums")
+    assert "808" in loaded["loaded"], loaded
+    track_id = call("lom_get_object", path="live_set tracks 2")["$id"]
+    with pytest.raises(Exception, match="Nothing in the browser"):  # not a browser item
+        call("browser_preview", item=str(track_id))
+    found = call("browser_search", query="crash 505", category="drums")["results"][0]
+    assert call("browser_preview", item=str(found["id"]))["previewing"] == "Crash 505.wav"
+
+
+def test_an_exact_name_ends_the_browser_walk(monkeypatch):
+    """Looking up a name walked up to 200 strong hits, or the whole category
+    for 20 s (a large User Library kept Live busy for minutes); an exact
+    name now ends the walk."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    chunks = [[("Impact Layered Reversed.wav", 1)], [("Impact Layered.wav", 2)],
+              [("Impact Layered Long.wav", 3)]]
+    sent = []
+
+    def send(command, params=None, timeout=None):
+        sent.append((command, params))
+        if command == "browser_search" and params.get("cancel"):
+            return {}
+        if command == "browser_search":
+            part = chunks[sum(1 for c, p in sent if c == "browser_search") - 1]
+            return {"walk_id": 1, "done": False, "visited": 10,
+                    "results": [{"$id": i, "name": n, "kind": "sample", "root": "Drums",
+                                 "path": "Drum Hits/FX Hit/" + n, "source": "Core Library",
+                                 "uri": ""} for n, i in part]}
+        return {}
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    # register() sets the module's connection: put the old one back afterwards
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    asyncio.run(mcp.call_tool("browser_preview", {"item": "impact layered"}))
+    walks = [p for c, p in sent if c == "browser_search"]
+    assert len(walks) == 3 and walks[-1] == {"walk_id": 1, "cancel": True}
+    assert sent[-1] == ("lom_call", {"path": "live_app browser", "method": "preview_item",
+                                     "args": [{"$ref": "id 2"}]})
+
+
+def test_browser_search_rests_between_slices(monkeypatch):
+    """Script 2.2 says how long Live should rest after a slice (rest_ms);
+    the server waits that long (at most 0.5 s) before asking for the next."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    replies = [{"walk_id": 1, "done": False, "visited": 5, "results": [], "rest_ms": 60.0},
+               {"walk_id": 1, "done": False, "visited": 9, "results": [], "rest_ms": 900},
+               {"walk_id": 1, "done": False, "visited": 10, "results": [], "rest_ms": -5},
+               {"walk_id": 1, "done": True, "visited": 12, "results": []}]
+    sent, slept = [], []
+
+    def send(command, params=None, timeout=None):
+        sent.append(params)
+        return replies[len(sent) - 1]
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    monkeypatch.setattr(extended_tools.time, "sleep", slept.append)
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    asyncio.run(mcp.call_tool("browser_search", {"query": "zzz"}))
+    assert slept == [0.06, 0.5, 0.0] and sent[0]["slice_ms"] == 60
+
+
+def test_browser_search_time_limit_leaves_out_the_rests(monkeypatch):
+    """Resting between slices does not make a search cover less ground: its
+    20 s count only the time Live was asked to walk."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    clock = [0.0]
+    walks = []
+
+    def send(command, params=None, timeout=None):
+        if params.get("cancel"):
+            return {}
+        walks.append(params)
+        clock[0] += 1.0  # each slice takes a second
+        return {"walk_id": 1, "done": False, "visited": len(walks), "results": [],
+                "rest_ms": 500}
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    monkeypatch.setattr(extended_tools.time, "sleep", sleep)
+    monkeypatch.setattr(extended_tools.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    asyncio.run(mcp.call_tool("browser_search", {"query": "zzz"}))
+    assert len(walks) == 21  # 20 s of slices; the rests added 10 s more
+
+
+def test_explicit_sound_names_prefer_the_exact_item(live_server):
+    """build_drum_kit(sounds={"crash": "Impact Layered"}) loaded "Impact
+    Layered Reversed", the browser's first hit."""
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    song.tracks.append(fake_live.FakeTrack("Beat"))
+    kit = call("build_drum_kit", track="Beat", roles=["crash"],
+               sounds={"crash": "Impact Layered"})
+    assert kit["pads"][0]["sample"].endswith("FX Hit/Impact Layered.wav"), kit
+    assert browser.loaded[-1] == ("Beat", 49, "Impact Layered.wav")
+    from MCP_Server.extended_tools import by_name_match
+    hits = [{"name": n} for n in ("Kick 808 Reverse Thud.wav", "Kick 808 Deep.wav",
+                                  "Kick 808 1.aif", "Kick 808.wav", "Kick 808 Loop 120 BPM.wav")]
+    assert [h["name"] for h in by_name_match("kick 808", hits)] == [
+        "Kick 808.wav", "Kick 808 1.aif", "Kick 808 Deep.wav", "Kick 808 Reverse Thud.wav",
+        "Kick 808 Loop 120 BPM.wav"]
+    assert by_name_match("KICK 808.WAV", hits)[0]["name"] == "Kick 808.wav"
+    assert by_name_match("kick 808 reverse", hits)[0]["name"] == "Kick 808 Reverse Thud.wav"
+
+
+def test_drum_rack_inside_an_instrument_rack(live_server):
+    """get_drum_pads said "No Drum Rack" for a kit whose Drum Rack sits in an
+    Instrument Rack; loads onto its pads and set_device_parameter_by_name
+    could not reach it either."""
+    script, call = live_server
+    song = script._song
+    browser = script.application().browser
+    kit = _boot_kit()
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit]))
+    pads = call("get_drum_pads", track="Boot")
+    assert [p["name"] for p in pads["pads"]] == ["Kick Boot"]
+    assert pads["rack"].endswith("devices 0 chains 0 devices 0")
+    loaded = call("browser_load", track="Boot", item="snare tight", drum_pad="snare")
+    assert loaded["pad_name"] == "Snare Tight" and browser.loaded[-1][1] == 38
+    drum_rack, saturator = kit.chains[0].devices
+    assert [c.in_note for c in drum_rack.chains] == [36, 38]
+    # a device inside the rack, by name
+    call("set_device_parameter_by_name", track="Boot", device="Saturator",
+         parameter="Drive", display_value="6 dB")
+    drive = next(p for p in saturator.parameters if p.name == "Drive")
+    assert drive.value == pytest.approx(6.0, abs=0.05)
+    assert call("manage_device", track="Boot", device="saturator",
+                action="info")["class_name"] == "Saturator"
+    with pytest.raises(Exception, match="No device named 'Nope'.*Saturator"):
+        call("set_device_parameter_by_name", track="Boot", device="Nope", parameter="Drive")
+    # a pad chain's mixer, and the device on a pad
+    call("set_device_parameter_by_name", track="Boot", device="mixer", pad="kick",
+         parameter="volume", display_value="-6 dB")
+    assert drum_rack.chains[0].mixer_device.volume.str_for_value(
+        drum_rack.chains[0].mixer_device.volume.value) == "-6.0 dB"
+    call("set_device_parameter_by_name", track="Boot", device=0, pad=36,
+         parameter="Volume", value=-3.0)
+    assert drum_rack.chains[0].devices[0].parameters[4].value == -3.0
+
+
+def test_a_name_several_nested_devices_share_is_an_error(live_server):
+    script, call = live_server
+    song = script._song
+    rack = fake_live.FakeRack("Fx", [("A", [fake_live.INSERTABLE["Saturator"]()]),
+                                     ("B", [fake_live.INSERTABLE["Saturator"]()])],
+                              class_name="AudioEffectGroupDevice")
+    song.tracks.append(fake_live.FakeTrack("Bus", midi=False, devices=[rack]))
+    with pytest.raises(Exception, match=r"2 devices inside racks are named 'Saturator': "
+                                        r".*chains 0 devices 0; .*chains 1 devices 0"):
+        call("set_device_parameter_by_name", track="Bus", device="Saturator", parameter="Drive")
+    second = "live_set tracks 3 devices 0 chains 1 devices 0"
+    call("set_device_parameter_by_name", track="Bus", device=second, parameter="Drive",
+         value=3.0)
+    assert rack.chains[1].devices[0].parameters[1].value == 3.0
+    # a device named like a path is that device, not the path
+    rack.chains[0].devices[0].name = "live_set tracks 0"
+    call("set_device_parameter_by_name", track="Bus", device="live_set tracks 0",
+         parameter="Drive", value=4.0)
+    assert rack.chains[0].devices[0].parameters[1].value == 4.0
+    # the track's own device of a name wins over one inside a rack
+    song.tracks[3].devices.append(fake_live.INSERTABLE["Saturator"]())
+    call("set_device_parameter_by_name", track="Bus", device="Saturator", parameter="Drive",
+         value=5.0)
+    assert song.tracks[3].devices[1].parameters[1].value == 5.0
+
+
+def test_run_batch_checks_each_step_before_running(live_server):
+    """param_set_display without params.path ran and answered "Empty path"."""
+    script, call = live_server
+    song = script._song
+    before = song.tempo
+    for commands, message in (
+            ([{"type": "lom_set", "params": {"path": "live_set", "property": "tempo",
+                                             "value": 99.0}},
+              {"type": "param_set_display", "params": {"value": "-6 dB"}}],
+             r"Step 1 \(param_set_display\): params.path is missing"),
+            ([{"params": {}}], "Step 0: needs"),
+            ([{"type": "lom_get", "params": {}}], r"Step 0 \(lom_get\): params.path"),
+            ([{"type": "lom_get", "params": ["live_set"]}], r"Step 0 \(lom_get\): params must")):
+        with pytest.raises(Exception, match=message):
+            call("run_batch", commands=commands)
+    assert song.tempo == before          # nothing ran
+
+
+def test_manage_device_deletes_by_path_id_and_inside_racks(live_server):
+    """A path or id as the device went to index_in and failed ("No item named
+    'live_set tracks 3 devices 1'"); a device inside a rack is deleted by its
+    chain."""
+    script, call = live_server
+    song = script._song
+    kit = _boot_kit()
+    extra = [fake_live.INSERTABLE[n]() for n in ("Utility", "Reverb", "Delay")]
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit] + extra))
+    call("manage_device", track="Boot", device="live_set tracks 3 devices 1", action="delete")
+    assert [d.name for d in song.tracks[3].devices] == ["Boot Kit", "Reverb", "Delay"]
+    reverb = call("manage_device", track="Boot", device="Reverb", action="info")["$id"]
+    call("manage_device", track="Boot", device=f"id {reverb}", action="delete")
+    assert [d.name for d in song.tracks[3].devices] == ["Boot Kit", "Delay"]
+    call("manage_device", track="Boot", device="Saturator", action="delete")
+    assert [d.name for d in kit.chains[0].devices] == ["Boot Kit"]
+    saturator = fake_live.INSERTABLE["Saturator"]()
+    kit.chains[0].devices.append(saturator)
+    sat_id = call("manage_device", track="Boot", device="Saturator", action="info")["$id"]
+    call("manage_device", track="Boot", device=f"id {sat_id}", action="delete")
+    assert [d.name for d in kit.chains[0].devices] == ["Boot Kit"]
+    call("manage_device", track="Boot", device="-1", action="delete")
+    assert [d.name for d in song.tracks[3].devices] == ["Boot Kit"]
+
+
+def test_pads_digit_names_and_kit_track_names(live_server):
+    script, call = live_server
+    song = script._song
+    kit = _boot_kit()
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit]))
+    with pytest.raises(Exception, match=r"Pad 38 \(D1\) is empty"):
+        call("set_device_parameter_by_name", track="Boot", device="mixer", pad="snare",
+             parameter="volume")
+    # a device inside a rack named only with digits is found by that name
+    kit.chains[0].devices[1].name = "808"
+    call("set_device_parameter_by_name", track="Boot", device="808", parameter="Drive", value=2.0)
+    assert kit.chains[0].devices[1].parameters[1].value == 2.0
+    call("set_device_parameter_by_name", track="Boot", device=0, parameter=0, value=0.0)
+    assert kit.parameters[0].value == 0.0          # an integer stays an index
+    # build_drum_kit names the track as it is after loading (Live renames a
+    # "6-MIDI" track after what it holds)
+    song.tracks.append(fake_live.FakeTrack("6-MIDI"))
+    browser = script.application().browser
+    load = browser.load_item
+
+    def load_and_rename(item):
+        load(item)
+        song.tracks[-1].name = "6-Drum Rack"
+
+    object.__setattr__(browser, "load_item", load_and_rename)
+    built = call("build_drum_kit", track="6-MIDI", roles=["kick"])
+    assert built["track"] == "6-Drum Rack" and built["ok"]
+
+
+def test_device_digits_paths_and_pad_chains(live_server):
+    """Digit-only text that is both an index and a nested name is refused;
+    a path must be on the track; pad chains loaded through the browser are
+    the rack's chains, where devices are found and deleted by name."""
+    script, call = live_server
+    song = script._song
+    kit = _boot_kit()
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[kit, fake_live.INSERTABLE["Utility"]()]))
+    drum_rack = kit.chains[0].devices[0]
+    drum_rack.chains[0].devices[0].name = "1"            # a pad Simpler from "1.wav"
+    with pytest.raises(Exception, match=r"'1' is ambiguous: index 1 is 'Utility'.*"
+                                        r"chains 0 devices 0 chains 0 devices 0"):
+        call("manage_device", track="Boot", device="1", action="info")
+    assert call("manage_device", track="Boot", device=1, action="info")["name"] == "Utility"
+    drum_rack.chains[0].devices[0].name = "7"            # no index 7: the nested name
+    assert call("manage_device", track="Boot", device="7", action="info")["name"] == "7"
+    # a path on another track is refused; "id N …" nested paths work
+    with pytest.raises(Exception, match="tracks 1 devices 0 is not a device on this track"):
+        call("manage_device", track="Boot", device="live_set tracks 1 devices 0", action="info")
+    kit_id = call("manage_device", track="Boot", device=0, action="info")["$id"]
+    assert call("manage_device", track="Boot", device=f"id {kit_id} chains 0 devices 1",
+                action="info")["name"] == "Saturator"
+    # a pad filled through the browser: its chain is one of the rack's chains
+    call("browser_load", track="Boot", item="snare tight", drum_pad="snare")
+    pad_chain = drum_rack.drum_pads[38].chains[0]
+    assert pad_chain in drum_rack.chains and isinstance(pad_chain, fake_live.FakeDrumChain)
+    call("manage_device", track="Boot", device="Snare Tight", action="delete")
+    assert pad_chain.devices == []
+
+
+def test_pad_sends_need_the_racks_returns(live_server):
+    """A pad chain's sends go to its Drum Rack's own return chains; a fresh
+    rack has none, which gave Live's raw "Index 0 out of range"."""
+    script, call = live_server
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("Boot", devices=[_boot_kit()]))
+    with pytest.raises(Exception, match="no return chain 0: pad sends go to the rack's own"):
+        call("set_device_parameter_by_name", track="Boot", device="mixer", pad="kick",
+             parameter="send A", value=0.5)
+
+
+class _Clock:
+    """extended_tools' time with a monotonic clock that moves a second per read."""
+
+    def __init__(self):
+        import time as real
+        self._real, self.now = real, 0.0
+
+    def monotonic(self):
+        self.now += 1.0
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _walk_stub(monkeypatch, chunk_for, fallback=None):
+    """browser_search answered by chunk_for(call number) and never finishing;
+    other commands go to fallback (or answer {})."""
+    from MCP_Server import extended_tools
+    sent = []
+
+    def send(command, params=None, timeout=None):
+        if command == "browser_search":
+            sent.append(params)
+            if params.get("cancel"):
+                return {}
+            return {"walk_id": 1, "done": False, "visited": 100 * len(sent),
+                    "results": [{"$id": i, "name": n, "kind": "sample", "root": "Drums",
+                                 "path": "Drum Hits/Kick/" + n, "source": "User Library",
+                                 "uri": ""} for i, n in chunk_for(len(sent))]}
+        return fallback(command, params, timeout) if fallback else {}
+
+    monkeypatch.setattr(extended_tools, "send", send)
+    monkeypatch.setattr(extended_tools, "time", _Clock())
+    return sent
+
+
+def test_name_lookups_wait_for_a_first_hit_and_say_when_unfinished(monkeypatch):
+    """With the 3 s limit, a name further into a large library came back as
+    "Nothing in the browser matches"; the short limit now counts only once a
+    hit is found, and a walk that ran out says so."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+
+    def preview(item):
+        result = asyncio.run(mcp.call_tool("browser_preview", {"item": item}))
+        return result.content[0].text
+
+    # nothing for a while, then the item: found (the old limit gave up at 3 s)
+    sent = _walk_stub(monkeypatch, lambda n: [(7, "My Kick.wav")] if n == 6 else [])
+    assert "Drums/Drum Hits/Kick/My Kick.wav" in preview("my kick")
+    # a strong hit that is not the exact name: the walk ends a few seconds on
+    sent = _walk_stub(monkeypatch, lambda n: [(8, "My Kick Long.wav")] if n == 1 else [])
+    assert "My Kick Long.wav" in preview("my kick")
+    assert len(sent) <= 6 and sent[-1] == {"walk_id": 1, "cancel": True}
+    # nothing at all: up to 20 s, then an error saying the walk did not finish
+    sent = _walk_stub(monkeypatch, lambda n: [])
+    with pytest.raises(Exception, match=r"Nothing in the browser \(samples\) matches 'my kick': "
+                                        r"searched \d+ items in [\d.]+ s without finishing; pass "
+                                        r"an id from browser_search or a narrower category"):
+        preview("my kick")
+    assert 15 <= len(sent) <= 25          # ~20 s of walking, then the cancel
+
+
+def test_build_drum_kit_says_which_searches_did_not_finish(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import extended_tools
+    real = extended_tools.send
+    _walk_stub(monkeypatch, lambda n: [], fallback=real)
+    script._song.tracks.append(fake_live.FakeTrack("Beat"))
+    kit = call("build_drum_kit", track="Beat", roles=["kick"])
+    assert kit["no_match"] == ["kick"]
+    assert "without finishing" in kit["searches_unfinished"]["kick"]
+
+
+def test_devices_landing_on_an_empty_midi_track_leave_it_unarmed(live_server):
+    """Live 12.4.16 arms a MIDI track with no devices when one lands on it;
+    tools put arm back, and leave a track the user armed armed."""
+    script, call = live_server
+    song = script._song
+    bass = song.tracks[1]
+    for name in ("A", "B", "C"):
+        song.tracks.append(fake_live.FakeTrack(name))
+    a, b, c = song.tracks[-3:]
+    bass.arm = True                                   # the user's armed track
+    call("add_device", track="A", device="Drift")
+    assert (a.arm, bass.arm) == (False, True)
+    call("build_drum_kit", track="B", roles=["kick"])
+    assert (b.arm, bass.arm) == (False, True)
+    c.arm = True                                      # armed by the user: stays
+    call("add_device", track="C", device="Drift")
+    assert (c.arm, bass.arm) == (True, True)
+
+
+def test_tools_follow_tracks_live_renames_as_devices_land(live_server):
+    """Live renames "1-MIDI" to "1-Drift" when an instrument lands on it: the
+    arm read after the insert failed (the track stayed armed), and
+    build_drum_kit lost the track after inserting its Drum Rack."""
+    script, call = live_server
+    song = script._song
+    for n in (5, 6, 7, 8):
+        song.tracks.append(fake_live.FakeTrack(f"{n}-MIDI"))
+    added = call("add_device", track="5-MIDI", device="Drift")
+    assert added["track"] == "5-Drift" and added["ok"]
+    chain = call("apply_device_chain", track="6-MIDI", chain="pad")
+    assert chain["ok"]
+    kit = call("build_drum_kit", track="7-MIDI", roles=["kick"])
+    assert kit["track"] == "7-Drum Rack" and kit["ok"] and kit["pads"][0]["sample"]
+    loaded = call("browser_load", track="8-MIDI", item="pad warm")
+    assert loaded["track"] == "8-Warm Pad"
+    assert [(t.name, t.arm) for t in song.tracks[-4:]] == [
+        ("5-Drift", False), ("6-MIDI", False), ("7-Drum Rack", False), ("8-Warm Pad", False)]
+
+
+def test_a_late_strong_hit_does_not_end_the_walk_at_once(monkeypatch):
+    """The 3 s counted from the start: a strong hit found late ended the walk
+    at once, and "Impact Layered Reversed" beat "Impact Layered" one chunk on."""
+    from mcp.server.mcpserver import MCPServer
+    from MCP_Server import extended_tools
+
+    monkeypatch.setattr(extended_tools, "_get_connection", extended_tools._get_connection)
+    mcp = MCPServer("test")
+    extended_tools.register(mcp, lambda: None)
+    late = {5: [(1, "Impact Layered Reversed.wav")], 6: [(2, "Impact Layered.wav")]}
+    _walk_stub(monkeypatch, lambda n: late.get(n, []))
+    result = asyncio.run(mcp.call_tool("browser_preview", {"item": "impact layered"}))
+    assert "Drum Hits/Kick/Impact Layered.wav" in result.content[0].text
+
+
+def test_legacy_load_tools_leave_tracks_unarmed(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import server
+    from MCP_Server.connection import AbletonConnection
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("Empty"))
+    connection = AbletonConnection(host="127.0.0.1", port=script.module.DEFAULT_PORT)
+    monkeypatch.setattr(server, "get_ableton_connection", lambda: connection)
+    try:
+        text = server.load_instrument_or_effect(None, 3, "query:Warm%20Pad.adg")
+        assert text.startswith("Loaded"), text
+        assert song.tracks[3].devices and song.tracks[3].arm is False
+        song.tracks[3].arm = True                     # the user's arm stays
+        server.load_instrument_or_effect(None, 3, "query:Glass%20Pad.adg")
+        assert song.tracks[3].arm is True
+        # Live's exclusive arm took the other track's arm: it comes back
+        song.tracks.append(fake_live.FakeTrack("Empty 2"))
+        song.tracks[3].arm = True
+        server.load_instrument_or_effect(None, 4, "query:Warm%20Pad.adg")
+        assert (song.tracks[3].arm, song.tracks[4].arm) == (True, False)
+    finally:
+        connection.disconnect()
+
+
+def test_exclusive_arm_and_selection_are_put_back(live_server):
+    """A device landing on an empty MIDI track makes Live arm it, drop every
+    other track's arm (exclusive arm) and select it (Live 12.4.16): the
+    user's armed track lost its arm, and add_device left the selection moved."""
+    script, call = live_server
+    song = script._song
+    bass, vox = song.tracks[1], song.tracks[2]
+    for name in ("5-MIDI", "6-MIDI", "7-MIDI"):
+        song.tracks.append(fake_live.FakeTrack(name))
+    bass.arm = True
+    song.view.selected_track = vox
+    call("add_device", track="5-MIDI", device="Reverb")
+    call("browser_load", track="6-MIDI", item="pad warm")
+    call("build_drum_kit", track="7-MIDI", roles=["kick"])
+    assert bass.arm is True and song.view.selected_track is vox
+    assert [t.arm for t in song.tracks[-3:]] == [False, False, False]
+    # the fake behaves as Live: without put_back_arms the arm would be gone
+    empty = fake_live.FakeTrack("8-MIDI")
+    song.tracks.append(empty)
+    empty.insert_device("Drift")
+    assert (empty.arm, bass.arm, song.view.selected_track) == (True, False, empty)
+    assert empty.name == "8-Drift"
+    empty.devices[:] = []
+    fake_live._named_after(empty, "Operator")      # a replacing instrument renames again
+    assert empty.name == "8-Operator"
+
+
+def test_new_tracks_and_deletes_leave_the_users_selection(live_server):
+    """Live selects a new track (create_midi_track) and the track of a device
+    deleted while another stays (12.4.16, after the command): build_tracks
+    left its last track selected, a delete on a return selected the return."""
+    script, call = live_server
+    song = script._song
+    vox = song.tracks[2]
+    song.view.selected_track = vox
+    song.tracks[1].arm = True
+    call("build_tracks", tracks=[{"name": "Keys", "instrument": "Drift"},
+                                 {"name": "Pad", "effects": [{"device": "Reverb"}]}])
+    assert song.view.selected_track is vox and song.tracks[1].arm is True
+    assert [t.arm for t in song.tracks[-2:]] == [False, False]
+    call("design_transition", kind="riser", at_bar=5)
+    assert song.view.selected_track is vox
+    ret = song.return_tracks[0]
+    ret.devices[:] = [fake_live.INSERTABLE["Reverb"](), fake_live.INSERTABLE["Utility"]()]
+    call("manage_device", track="return A", device="Utility", action="delete")
+    assert [d.name for d in ret.devices] == ["Reverb"] and song.view.selected_track is vox
+
+
+def test_a_transition_onto_its_existing_track_leaves_the_selection(live_server):
+    """Live 12.4.16 pins a track it made once a clip was copied onto it and
+    the playhead set: a copy over its clip, or the playhead set back into
+    it, selects it again, and a set back to the track before is ignored. A
+    second riser left "Riser" selected, and copies at 64 and 32 did."""
+    from MCP_Server import extended_tools
+    script, call = live_server
+    song = script._song
+    vox, bass = song.tracks[2], song.tracks[1]
+    song.view.selected_track = vox
+    for _ in range(2):
+        call("design_transition", kind="riser", at_bar=5)  # Riser plays 0..16
+        assert song.view.selected_track is vox, song.view.selected_track.name
+    riser = next(t for t in song.tracks if t.name == "Riser")
+    # the fake pins as Live does: the playhead set back into the span selects it
+    bass.clip_slots[0].clip = fake_live.FakeClip(name="Bass A", length=4.0)
+    bass.clip_slots[0].has_clip = True
+    bass.duplicate_clip_to_arrangement(bass.clip_slots[0].clip, 64.0)
+    song.end_undo_step()
+    assert song.view.selected_track is vox and song.current_song_time == 64.0
+    song.current_song_time = 0.0
+    assert song.view.selected_track is vox  # not within the command
+    song.end_undo_step()
+    assert song.view.selected_track is riser
+    song.view.selected_track = vox
+    assert song.view.selected_track is riser  # ignored
+    song.view.selected_track = riser
+    song.view.selected_track = vox
+    assert song.view.selected_track is vox
+    song.current_song_time = 8.0  # from inside: no jump
+    song.end_undo_step()
+    assert song.view.selected_track is vox
+    song.current_song_time = 40.0
+    song.current_song_time = 16.0  # the span's end, set: inside, so it jumps
+    song.end_undo_step()
+    assert song.view.selected_track is riser
+    song.view.selected_track = riser
+    song.view.selected_track = vox
+    song.current_song_time = 8.0   # from the end, set there: inside, no jump
+    song.end_undo_step()
+    assert song.view.selected_track is vox
+    bass.duplicate_clip_to_arrangement(bass.clip_slots[0].clip, 16.0)
+    song.current_song_time = 0.0   # from the end, a copy moved there: outside
+    song.end_undo_step()
+    assert song.view.selected_track is riser
+    song.view.selected_track = riser
+    song.view.selected_track = vox
+    # copy tools put the selection back (playhead_put_back)
+    for at in (64.0, 32.0, 8.0, 0.0):
+        extended_tools.duplicate_session_clip(1, 0, at)
+        assert song.view.selected_track is vox, at
+    call("write_arrangement_automation", track="Bass", parameter="Volume", start=40, end=42,
+         shape="ramp_up")
+    assert song.view.selected_track is vox
+    for _ in range(2):
+        call("design_transition", kind="reverse_cymbal", at_bar=5)
+        assert song.view.selected_track is vox
+    # the cymbal pinned anew; deleting its clip ends the pin
+    cymbal = next(t for t in song.tracks if t.name == "Reverse Cymbal")
+    inside = cymbal.arrangement_clips[0].start_time + 0.5
+    for pinned in (True, False):
+        bass.duplicate_clip_to_arrangement(bass.clip_slots[0].clip, 64.0)
+        song.current_song_time = inside
+        song.end_undo_step()
+        assert (song.view.selected_track is cymbal) is pinned
+        song.view.selected_track = cymbal
+        song.view.selected_track = vox
+        for clip in list(cymbal.arrangement_clips):
+            cymbal.delete_clip(clip)
+
+
+def test_inserts_skip_the_put_back_when_nothing_can_change(live_server, monkeypatch):
+    """An effect onto the selected track that has devices neither arms nor
+    moves the selection: two round trips, no restore batch."""
+    script, call = live_server
+    song = script._song
+    from MCP_Server import extended_tools
+    song.view.selected_track = song.tracks[1]
+    batches = []
+    real = extended_tools.batch
+
+    def counting(commands, stop_on_error=True):
+        batches.append([c["type"] for c in commands])
+        return real(commands, stop_on_error)
+
+    monkeypatch.setattr(extended_tools, "batch", counting)
+    added = call("add_device", track="Bass", device="Reverb")
+    assert added["track"] == "Bass" and len(batches) == 2, batches
+
+
+def test_a_failed_put_back_does_not_hide_the_original_error():
+    from MCP_Server.extended_tools import arms_put_back
+    reads = {"n": 0}
+
+    def run(commands):
+        if commands[0]["type"] == "lom_set":
+            raise RuntimeError("put back failed")
+        reads["n"] += 1
+        arm = reads["n"] == 1  # armed before, disarmed after: a put-back is needed
+        return {"results": [{"status": "success", "result": {"items": [{"$id": 1, "arm": arm}]}},
+                            {"status": "success", "result": {"selected_track": {"$id": 1}}}]}
+
+    with pytest.raises(ValueError, match="the load failed"):
+        with arms_put_back(run=run):
+            raise ValueError("the load failed")
+    reads["n"] = 0
+    with pytest.raises(RuntimeError, match="put back failed"):
+        with arms_put_back(run=run):
+            pass
+
+
+def test_fake_arms_only_for_a_device_that_lands(live_server):
+    """An unknown device name does not arm (or select) anything; a MIDI track
+    holding only a MIDI effect is not empty (Live 12.4.16)."""
+    script, call = live_server
+    song = script._song
+    empty = fake_live.FakeTrack("Empty")
+    song.tracks.append(empty)
+    song.view.selected_track = song.tracks[0]
+    with pytest.raises(RuntimeError):
+        empty.insert_device("Nope")
+    assert empty.arm is False and song.view.selected_track is song.tracks[0]
+    empty.devices.append(fake_live.FakeDevice("Arpeggiator", "MidiArpeggiator"))
+    empty.insert_device("Drift")
+    assert empty.arm is False
+
+
+def test_a_failed_insert_reports_lives_error_over_the_put_back(live_server, monkeypatch):
+    script, call = live_server
+    from MCP_Server import extended_tools
+    song = script._song
+    song.tracks.append(fake_live.FakeTrack("Empty"))
+    song.view.selected_track = song.tracks[0]
+
+    def failing(*args, **kwargs):
+        raise ConnectionError("lost Live")
+
+    monkeypatch.setattr(extended_tools, "put_back_arms", failing)
+    with pytest.raises(Exception, match="Could not insert 'Nope'"):
+        call("add_device", track="Empty", device="Nope")

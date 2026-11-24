@@ -66,6 +66,27 @@ def test_samples_found_in_the_project_and_missing(song_set):
     assert any("Frozen tracks: Vox" in n for n in info["notes"])
 
 
+def test_project_samples_of_a_moved_project_are_found(tmp_path):
+    """Live 12.4 saves a project's samples as RelativePathType 3, relative to
+    the project (the folder with "Ableton Project Info"); Path keeps where the
+    project was. The user's "Dreyko Lead Project" moved to "Dreyko Lead": the
+    old reading took Path only and called the sample missing."""
+    folder = tmp_path / "Moved"
+    (folder / "Ableton Project Info").mkdir(parents=True)
+    sample = folder / "Samples" / "Imported" / "lead.wav"
+    sample.parent.mkdir(parents=True)
+    sample.write_bytes(b"RIFF")
+    ref = als_sets.sample_ref(path="/Users/someone/Old Project/Samples/Imported/lead.wav",
+                              relative="Samples/Imported/lead.wav", relative_type=3)
+    tracks = als_sets.track("AudioTrack", 1, "Lead", "", als_sets.slots(
+        als_sets.audio_clip("lead", 0, 4, ref)))
+    for where in (folder / "Moved.als", folder / "Sets" / "Version 2.als"):
+        info = als.read_set(als_sets.write_set(where, als_sets.song(tracks=tracks)), "full")
+        assert info["samples"]["missing"] == 0, where
+        assert info["samples"]["files"][0] == {"file": "lead.wav", "path": str(sample),
+                                               "found": True, "where": "project"}
+
+
 def test_full_detail_lists_clips_chains_and_pads(song_set):
     info = als.read_set(song_set, "full")
     keys = _track(info, "Keys")

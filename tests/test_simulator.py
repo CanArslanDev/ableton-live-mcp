@@ -181,3 +181,39 @@ def test_capabilities_come_with_every_connection(tmp_path, monkeypatch):
         connection.disconnect()
     assert script_handshake.script_has_capability("create_locator")
     assert script_handshake.script_version_ok()
+
+
+def test_a_capability_check_before_any_connection_asks_live(tmp_path, monkeypatch):
+    """create_locator as the first call in a process reported the script
+    missing (loaded=None): nothing had connected yet."""
+    from MCP_Server import script_handshake, server
+    from MCP_Server.connection import AbletonConnection
+
+    monkeypatch.setattr(script_handshake, "_script_info", None)
+
+    def no_live():
+        raise ConnectionError("Live is not running")
+
+    monkeypatch.setattr(server, "get_ableton_connection", no_live)
+    missing = script_handshake.require_capability("create_locator")
+    assert missing == "Could not reach Ableton Live: Live is not running"  # not "reinstall"
+
+    def server_error():
+        raise Exception("Could not connect to Ableton Live. Is Live open?")
+
+    monkeypatch.setattr(server, "get_ableton_connection", server_error)
+    assert script_handshake.require_capability("create_locator") == \
+        "Could not connect to Ableton Live. Is Live open?"  # said once
+    with Simulator(free_port(), tmp_path / "session.json") as simulator:
+        monkeypatch.setenv("ABLETON_MCP_SESSION_FILE", str(simulator.session_file))
+        connection = AbletonConnection(host="127.0.0.1", port=simulator.port)
+
+        def connect():
+            assert connection.connect(), connection.last_error
+            return connection
+
+        monkeypatch.setattr(server, "get_ableton_connection", connect)
+        try:
+            assert script_handshake.require_capability("create_locator") is None
+        finally:
+            connection.disconnect()

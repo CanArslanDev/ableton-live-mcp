@@ -135,7 +135,38 @@ def band_balance(data: np.ndarray, rate: int) -> tuple[dict[str, float], float]:
 
 
 def estimate_tempo(mono: np.ndarray, rate: int) -> float | None:
-    """Spectral-flux onset envelope + autocorrelation, 70–180 BPM.
+    """The tempo in BPM (tempo_estimate's), None without a beat."""
+    found = tempo_estimate(mono, rate)
+    return found["bpm"] if found else None
+
+
+# Tempos a beat finder confuses with the true one: double and half, and the
+# 3:4 relations a dotted or triplet pattern sets up (a 136 BPM song read as
+# 102, a 102 BPM trap beat with 16th hats as 136)
+TEMPO_RELATIONS = (1.0, 2.0, 0.5, 4 / 3, 0.75, 1.5, 2 / 3)
+# A relation replaces the strongest peak's tempo only when it scores this
+# many times as much: at 1.0 a few grooves the peak got right went wrong
+# (a half-time beat at 174 BPM read 87), from 1.15 none did (206 grooves,
+# tests/tempo_bench.py and its variations)
+TEMPO_SWITCH = 1.2
+
+
+def tempo_estimate(mono: np.ndarray, rate: int) -> dict | None:
+    """{"bpm", "confidence", "alternatives"} from a spectral-flux onset
+    envelope's autocorrelation, None for steady material.
+
+    The strongest peak between 70 and 180 BPM proposes a tempo; it and its
+    relations (TEMPO_RELATIONS, kept within 60-200 BPM) are scored by how
+    well a pulse at that period lines up with the autocorrelation (its mean
+    over the first 8 multiples of the period: a beat repeats at every
+    multiple, a 4:3 or 2:1 cousin only at every third or second) times a
+    log-normal preference centred on 120 BPM (one octave wide); one wins
+    over the peak's own tempo only by TEMPO_SWITCH. Confidence is the
+    pick's lead over the best other (0: a tie or less); alternatives are
+    the others scoring at least half as much. On 206 synthetic grooves the
+    peak alone was right 119 times, this 140, never wrong where the peak
+    was right; picks under TEMPO_UNSURE were wrong half the time, right
+    ones fell under it 4 times in 73 (tests/tempo_bench.py).
 
     Lags come in frames (11.6 ms at 44.1 kHz, 3.9 BPM apart at 140), so the
     beat lag is refined below a frame: a parabola through the peak at one
@@ -168,7 +199,30 @@ def estimate_tempo(mono: np.ndarray, rate: int) -> float | None:
     # A flat onset envelope (drones, pads, test tones) has no beat to find
     if ac[0] <= 0 or ac[best] / ac[0] < 0.2:
         return None
-    period = peak_lag(ac, int(best))
+    first = peak_lag(ac, int(best))
+    norm = ac / ac[0]
+
+    def pulse(period: float) -> float:
+        hits = []
+        for k in range(1, 9):
+            lag = int(round(k * period))
+            if lag + 2 >= len(ac) // 2:
+                break
+            hits.append(float(norm[max(1, lag - 1):lag + 2].max()))
+        return float(np.mean(hits)) if hits else 0.0
+
+    scored = []
+    for relation in TEMPO_RELATIONS:
+        tempo = 60 * fps / first * relation
+        if 60 <= tempo <= 200:
+            prior = float(np.exp(-0.5 * np.log2(tempo / 120.0) ** 2))
+            scored.append((max(pulse(first / relation), 0.0) * prior, relation))
+    scored.sort(reverse=True)
+    own = next(score for score, r in scored if r == 1.0)
+    if own * TEMPO_SWITCH >= scored[0][0]:
+        scored = [(own, 1.0)] + [x for x in scored if x[1] != 1.0]
+    top, relation = scored[0]
+    period = first / relation
     beats = 2
     while beats <= 32:
         guess = int(round(beats * period))
@@ -179,7 +233,15 @@ def estimate_tempo(mono: np.ndarray, rate: int) -> float | None:
             break
         period = peak_lag(ac, k) / beats
         beats *= 2
-    return round(float(60 * fps / period), 2)
+    tempo = round(float(60 * fps / period), 2)
+    runner = scored[1][0] if len(scored) > 1 else 0.0
+    return {"bpm": tempo,
+            "confidence": round(max(0.0, (top - runner) / top), 2) if top > 0 else 0.0,
+            "alternatives": [round(tempo * r / relation, 1) for score, r in scored[1:]
+                             if top > 0 and score >= 0.5 * top],
+            # each other tempo: (BPM, its ratio to the pick, its score / the pick's)
+            "rivals": [(round(tempo * r / relation, 1), r / relation,
+                        score / top if top > 0 else 0.0) for score, r in scored[1:]]}
 
 
 def peak_lag(ac: np.ndarray, k: int) -> float:
@@ -214,13 +276,29 @@ def estimate_key(mono: np.ndarray, rate: int) -> dict | None:
         np.add.at(chroma, pcs, mag)
     if chroma.sum() == 0:
         return None
-    best = None
-    for tonic in range(12):
-        for mode, profile in (("major", _MAJOR_PROFILE), ("minor", _MINOR_PROFILE)):
-            r = float(np.corrcoef(chroma, np.roll(profile, tonic))[0, 1])
-            if best is None or r > best[0]:
-                best = (r, tonic, mode)
-    return {"key": f"{_PITCH_CLASSES[best[1]]} {best[2]}", "confidence": round(best[0], 2)}
+    ranked = sorted(((float(np.corrcoef(chroma, np.roll(profile, tonic))[0, 1]), tonic, mode)
+                     for tonic in range(12)
+                     for mode, profile in (("major", _MAJOR_PROFILE), ("minor", _MINOR_PROFILE))),
+                    reverse=True)
+    best, second = ranked[0], ranked[1]
+    found = {"key": f"{_PITCH_CLASSES[best[1]]} {best[2]}", "confidence": round(best[0], 2)}
+    # A correlation under KEY_WEAK, or a runner-up within 0.02, is a guess
+    # (a C major triad alone: 0.792, E minor 0.785; a C major scale 0.95
+    # against 0.68; noise 0.26)
+    if best[0] < KEY_WEAK or best[0] - second[0] < 0.02:
+        found["weak"] = True
+        found["or"] = f"{_PITCH_CLASSES[second[1]]} {second[2]}"
+    return found
+
+
+KEY_WEAK = 0.5
+# A tempo whose lead over the runner-up is under this is reported as uncertain
+TEMPO_UNSURE = 0.1
+# A 4:3 or 3:4 tempo scoring this share of the pick's is named in the
+# observations (the remake song: 102 BPM, 136 at 0.78). On the 103 grooves
+# of tests/tempo_bench.py and its grid it named one for 7 of 73 right picks
+# (no click track or four on the floor) and 7 of 30 wrong ones.
+TEMPO_RIVAL = 0.75
 
 
 # A band one semitone wide: a 12-per-octave constant-Q filter spans
@@ -333,10 +411,33 @@ def analyze(path: str | Path, max_seconds: float | None = 600.0) -> dict:
         "band_energy_percent": bands,
         "spectral_centroid_hz": centroid,
         "stereo": stereo,
-        "tempo_estimate_bpm": estimate_tempo(mono, rate),
+        "tempo_estimate_bpm": None,
         "key_estimate": estimate_key(mono, rate),
     }
+    tempo = tempo_estimate(mono, rate)
+    if tempo:
+        result["tempo_estimate_bpm"] = tempo["bpm"]
+        result["tempo_confidence"] = tempo["confidence"]
+        if tempo["alternatives"]:
+            result["tempo_alternatives_bpm"] = tempo["alternatives"]
     result["observations"] = observations(result)
+    if tempo and tempo["confidence"] < TEMPO_UNSURE and tempo["alternatives"]:
+        result["observations"].append(
+            f"Tempo uncertain: {tempo['bpm']:g} BPM, or "
+            + " or ".join(f"{a:g}" for a in tempo["alternatives"][:2]) + ".")
+    elif tempo:
+        close = [(bpm, ratio) for bpm, ratio, share in tempo["rivals"]
+                 if share >= TEMPO_RIVAL and any(abs(ratio - r) < 0.01 for r in (4 / 3, 0.75))]
+        if close:
+            bpm, ratio = close[0]
+            result["observations"].append(
+                f"Tempo {tempo['bpm']:g} BPM; could be {bpm:g} "
+                f"({'4:3' if ratio > 1 else '3:4'}): check by ear.")
+    key = result["key_estimate"]
+    if key and key.get("weak") and result["integrated_lufs"] > -60:
+        result["observations"].append(
+            f"Key estimate weak ({key['key']}, confidence {key['confidence']}; or "
+            f"{key['or']}): treat it as a guess.")
     return result
 
 

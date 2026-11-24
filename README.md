@@ -48,10 +48,10 @@ while testing against Live 12.3.
 | **Scenes & clips** | `manage_scene`, `set_clip_properties` (loop, markers, warp, gain, pitch, launch), `manage_clip` (duplicate, crop, quantize, Arrangement clips) |
 | **Notes** | `read_clip_notes`, `edit_clip_notes` (probability, velocity deviation, release velocity, edit by note id), `transform_clip_notes` (transpose, snap to scale, quantize, humanize, reverse, invert, legato, …) |
 | **MIDI Tools** | `apply_midi_tool` does what Live 12's MIDI Transformations do — strum, ornament (flam, grace notes), chop, connect, time warp, velocity shaper, recombine, span, arpeggiate — in place, keeping note ids |
-| **Song structure** | `build_arrangement` lays Session clips out as sections (scene minus some tracks, or clips per track), repeats loops, cuts MIDI exactly and names a locator at each section |
+| **Song structure** | `build_arrangement` lays Session clips out as sections (scene minus some tracks, or clips per track), repeats loops, cuts clips at a section's end (envelopes kept), silences tracks left out of a section and names a locator at each section |
 | **Automation** | `write_clip_automation` draws envelopes for any device or mixer parameter, from points or shapes; `write_arrangement_automation` does it over a stretch of the Arrangement on MIDI tracks, at once; `record_automation` records track automation on any track (audio, returns, the main track) by playing the stretch while Live records |
 | **Transitions** | `design_transition` builds what leads into a section: a riser, a reversed crash swelling into the downbeat, a drum fill (snare roll, toms, build), a breath of silence before the drop, a high-pass sweep |
-| **Devices & racks** | `set_device_parameter_by_name` accepts what Live displays (`"800 Hz"`, `"-6 dB"`, `"25L"`, `"Lowpass"`), `manage_device`, `rack_control` (macros, variations), `get_drum_pads` |
+| **Devices & racks** | `set_device_parameter_by_name` accepts what Live displays (`"800 Hz"`, `"-6 dB"`, `"25L"`, `"Lowpass"`), finds devices inside racks by name and reaches a Drum Rack pad's chain mixer (`pad`), `manage_device`, `rack_control` (macros, variations), `get_drum_pads` |
 | **Song & transport** | `set_song_properties` (time signature, swing, loop, Live 12 key/scale, quantization), `transport` (undo/redo, capture MIDI, cues), `select_in_live` |
 | **Generators** | `music_theory`, `generate_chord_progression`, `generate_drum_pattern` (maps your Drum Rack pads by name), `generate_bassline`, `generate_arpeggio`, `generate_melody`, `generate_euclidean` (Euclidean rhythms per pad) — they follow the set's time signature and, unless told otherwise, its Key & Scale (Live 12) |
 | **Turkish makam & usul** | `turkish_makam` gives 24 makams in the Arel-Ezgi-Uzdilek system (steps in commas, karar, güçlü) and writes an `.ascl` tuning that plays their true comma pitches in Live 12; every generator takes a makam as its scale (`scale="hicaz"`); `generate_usul` writes usuls (sofyan, türk aksağı, yürük semai, devr-i hindi, düyek, aksak, aksak semai, curcuna, …) on a drum or darbuka kit |
@@ -70,11 +70,11 @@ while testing against Live 12.3.
 | **Mix diagnosis** | `mix_doctor` records every track and the master in one pass and reports masking (which parts fight in which band, how often, what to do), stray low end, phase, overs and the master against a streaming target; `capture_stems` returns the stem files; `compare_to_reference` compares tonal balance, loudness, dynamics and width with a reference track and returns EQ Eight settings that move the mix towards it |
 | **Real-time analyzer** | `install_analyzer` puts the AbletonMCP Analyzer, a Max for Live device this server generates, on a track or the master; `read_analyzer` then reports per track, while the set plays and without recording, octave-band levels, loudness (within ~0.1 LU of an offline BS.1770 measurement in our test), stereo correlation and width, peak and RMS. Needs Max for Live (Suite, Standard with the add-on, or the Trial) |
 | **Live companion** | An optional Extensions SDK add-on for Live 12.4.5+ Suite (`extension/`): "Share … with AbletonMCP" in Live's right-click menus tells `get_live_selection` which bars, clips or tracks you mean; `confirm_in_live` asks yes/no in a dialog inside Live; `render_track_audio` renders an audio track without playing the set. Not yet run inside Live (it is checked against the SDK's types and a simulated host) |
-| **Machine learning** | `separate_stems` splits a mix into drums, bass, vocals and other with Demucs, optionally onto new tracks where the source clip was; `audio_to_midi` turns a melody, bass line or chords into a MIDI clip with Spotify's Basic Pitch (presets for melodies, bass lines and chords, velocities from each note's level, notes placed through the clip's warp and start marker, pitch bends in cents on request); `find_similar_sounds` finds samples by description ("dusty vinyl kick") or by example with CLAP; `generate_audio` makes a sound or a loop from a text prompt with MusicGen small and puts it on an audio track, a Drum Rack pad or a Simpler, with the set's tempo and key in the prompt (MusicGen's weights are CC-BY-NC 4.0: non-commercial use). Each runs in its own environment that uv sets up the first time (Demucs ~0.5 GB, Basic Pitch ~150 MB, CLAP ~1.2 GB, MusicGen ~2.5 GB) and leaves the server's memory when done. On an M-series Mac: a 20-second mix separates in ~9 s, a phrase transcribes in ~4 s, a search over indexed sounds takes ~4 s, an 8-second loop is generated in ~19 s |
+| **Machine learning** | `separate_stems` splits a mix into drums, bass, vocals and other with Demucs, optionally onto new tracks where the source clip was; `audio_to_midi` turns a melody, bass line or chords into a MIDI clip with Spotify's Basic Pitch (presets for melodies, bass lines and chords, velocities from each note's level, notes placed through the clip's warp and start marker, pitch bends in cents on request); `find_similar_sounds` finds samples by description ("dusty vinyl kick") or by example with CLAP; `generate_audio` makes a sound or a loop from a text prompt with MusicGen small and puts it on an audio track, a Drum Rack pad or a Simpler, with the set's tempo and key in the prompt (MusicGen's weights are CC-BY-NC 4.0: non-commercial use). Jobs run one at a time, below Live's priority, each in its own environment that uv sets up the first time (Demucs ~0.5 GB, Basic Pitch ~150 MB, CLAP ~1.2 GB, MusicGen ~2.5 GB) and leaves the server's memory when done. On an M-series Mac: a 20-second mix separates in ~9 s, a phrase transcribes in ~4 s, a search over indexed sounds takes ~4 s, an 8-second loop is generated in ~19 s |
 | **Reference songs** (full profile) | "Make a beat like this song": `dissect_reference` takes a song apart with [reference-dissector](https://github.com/CanArslanDev/reference-dissector) as a job (stems, tempo grid, sections, drum hits matched to your own samples, the 808, melodic notes), `reference_job` follows it with progress and summarizes what it found, `build_from_blueprint` builds the result in an empty set and reads back what Live holds, `index_sound_library` indexes your samples once. See [Reference songs](#reference-songs-full-profile) |
 | **Live events** | `watch_live`, `get_live_events`, `unwatch_live`; resources `ableton://session/overview` and `ableton://events`, pushed to clients that subscribe (both MCP protocol versions) |
 | **Panels** | In clients that support MCP Apps (Claude Desktop, claude.ai), 22 tools show an interactive panel with their result: mixer and Session grid with scene launch, level meters, the mix doctor's masking heat map, the reference curve with a one-click EQ, snapshot A/B buttons, a piano roll of generated clips, a Drum Rack pad grid with sample swapping, and a makam keyboard. Other clients get the same results as text |
-| **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log |
+| **Diagnostics** | `doctor` (also `ableton-mcp-doctor` in a terminal): versions, stale script copies, connection, open dialogs, CPU, errors in Live's log, Live's audio output device |
 | **Original tools** | browser loading, drum kits, audio import, Arrangement duplication, locators; the rest are covered by the tools above (see Tool profiles) |
 
 77 tools in the default profile (109 with `ABLETON_MCP_PROFILE=full`), plus
@@ -88,9 +88,10 @@ workflow prompts: `mix_check`, `beat_from_scratch`, `follow_the_harmony`,
 (ITU-R BS.1770 LUFS, verified against the reference tone), true peak, loudness
 range, crest factor, clipping, DC offset, energy per band (sub → air), spectral
 centroid, stereo correlation and width (including below 150 Hz), and tempo and
-key estimates (the tempo to within 0.01 BPM on click tracks, when it picks the
-right octave) — plus plain-language observations such as *"Heavy low-mids
-(250–500 Hz); a source of muddiness"*.
+key estimates (the tempo to within 0.01 BPM on click tracks; with a confidence
+and the double, half or 3:4 tempos it could also be, and a flag on a weak key)
+— plus plain-language observations such as *"Heavy low-mids (250–500 Hz); a
+source of muddiness"*.
 
 ### Tool profiles and safety
 
@@ -316,7 +317,13 @@ new tracks, clips, notes), so a call that does both can take two Cmd+Z.
   loud.
 - Live has no export/render API. `render_and_analyze`, `capture_stems` and
   `mix_doctor` record in real time on temporary tracks (deleted afterwards; the
-  audio files stay in the project), so they take as long as the section plays.
+  audio files stay in the project's `Samples/Recorded`, or under Live
+  Recordings for an unsaved set), so they take as long as the section plays.
+  Other tracks are disarmed meanwhile. Kept tracks go with
+  `manage_track(action="delete_recording_tracks")`.
+- Live's API cannot save the set. Save it yourself (Cmd+S with Live in front;
+  on macOS, File › Save Live Set), then check the `.als` file's modification
+  time: a keystroke sent while another app is in front is lost silently.
 - Arrangement clip creation and `move_device` need Live 12; `add_device` and
   `apply_device_chain` need Live 12.3; the extended note API needs Live 11.
 - Live's API cannot map parameters to rack macros, group tracks, bounce,
@@ -330,7 +337,8 @@ new tracks, clips, notes), so a call that does both can take two Cmd+Z.
 
 Start with `uv run ableton-mcp-doctor` in a terminal, or ask the assistant to
 run `doctor`: it checks versions, installed copies of the script, the
-connection, open dialogs and Live's log, and says how to fix what it finds.
+connection, open dialogs, Live's log and audio device, and says how to fix
+what it finds.
 
 | Symptom | Fix |
 |---|---|
@@ -340,6 +348,7 @@ connection, open dialogs and Live's log, and says how to fix what it finds.
 | *"Connection reset by peer"* as soon as a server connects | The Remote Script serves at most 8 clients, and every MCP server (each assistant session with this server) holds one. Close the sessions you no longer use, or restart Live. |
 | *"Authentication required"* | The MCP server is older than the Remote Script (2.0 wants a session token). Update the server, or point your client at this version. |
 | *"Invalid session token"* | Live restarted and wrote a new token; the server reads it again on the next call. If the server runs as another user or in a container, set `ABLETON_MCP_TOKEN`. |
+| A render says *"Live recorded no audio"* | Live's audio output device is "No Device" (its audio engine is off): choose one in Live's Settings › Audio. `doctor` reads it from Live's log. |
 | Live's log | `~/Library/Preferences/Ableton/Live <version>/Log.txt` — lines tagged `(AbletonMCP)` |
 
 ## Development

@@ -436,32 +436,38 @@ def create_clip(ctx: Context, track_index: int, clip_index: int, length: float =
         return f"Error creating clip: {str(e)}"
 
 @legacy_tool("core")
-def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str) -> str:
+def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str,
+                      warping: bool | None = None, bars: float | None = None) -> str:
     """
-    Create a new audio clip in an audio track's clip slot by importing a file.
+    Create a new audio clip in an audio track's clip slot by importing a file
+    (Live 12.0.5+). path: absolute path to an audio file; the slot must be empty.
 
-    Requires Ableton Live 12.0.5 or newer — the underlying
-    ClipSlot.create_audio_clip Live API was introduced in 12.0.5 and is not
-    available in earlier 12.0.x releases.
-
-    Parameters:
-    - track_index: The index of the audio track to create the clip in
-    - clip_index: The index of the clip slot to create the clip in
-    - path: Absolute path to a supported audio file (e.g. a .wav). The target
-      track must be an audio track and the clip slot must be empty.
+    Live may warp it at a wrong tempo: the result gives its length in beats
+    and Live's tempo reading, with a warning when they look wrong.
+    warping=false plays the file as recorded; bars warps it to that length.
     """
     try:
+        from .extended_tools import check_fit, fit_audio_clip
+
+        check_fit(warping, bars)  # before the clip is made
         ableton = get_ableton_connection()
         result = ableton.send_command("create_audio_clip", {
             "track_index": track_index,
             "clip_index": clip_index,
             "path": path
         })
-        # Live moves a new clip's start to the file's first transient: back to the file's start
-        from .extended_tools import from_its_start
-        ableton.send_command("batch", {"commands": from_its_start(
-            f"live_set tracks {int(track_index)} clip_slots {int(clip_index)} clip"), "stop_on_error": False})
-        return f"Created audio clip '{result.get('name', 'clip')}' at track {track_index}, slot {clip_index} (length {result.get('length', '?')} beats)"
+        # Live moves a new clip's start to the file's first transient and may
+        # warp it at a wrong tempo: the start goes back, the length is checked
+        made = (f"Created audio clip '{result.get('name', 'clip')}' at track {track_index}, "
+                f"slot {clip_index}")
+        try:
+            report = fit_audio_clip(
+                f"live_set tracks {int(track_index)} clip_slots {int(clip_index)} clip",
+                warping, bars)
+        except Exception as e:  # the clip is there: say so, and what failed
+            logger.error(f"Checking the new audio clip failed: {str(e)}")
+            return f"{made}, but setting it up failed (its start, warping or length): {str(e)}"
+        return f"{made}: " + json.dumps(report, separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error creating audio clip: {str(e)}")
         return f"Error creating audio clip: {str(e)}"
@@ -595,6 +601,15 @@ def set_tempo(ctx: Context, tempo: float) -> str:
         return f"Error setting tempo: {str(e)}"
 
 
+def _arms_put_back(ableton):
+    """Live 12.4.16 arms a MIDI track that had no device when one lands on it
+    and drops the other tracks' arms: put the arms back
+    (extended_tools.arms_put_back; these tools select the track themselves)."""
+    from .extended_tools import arms_put_back
+    return arms_put_back(select=False, run=lambda commands: ableton.send_command(
+        "batch", {"commands": commands, "stop_on_error": False}))
+
+
 @legacy_tool("full")
 def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
     """
@@ -606,10 +621,11 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
     """
     try:
         ableton = get_ableton_connection()
-        result = ableton.send_command("load_browser_item", {
-            "track_index": track_index,
-            "item_uri": uri
-        })
+        with _arms_put_back(ableton):
+            result = ableton.send_command("load_browser_item", {
+                "track_index": track_index,
+                "item_uri": uri
+            })
         
         # Check if the instrument was loaded successfully
         if result.get("loaded", False):
@@ -835,42 +851,46 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
     """
     try:
         ableton = get_ableton_connection()
-        
-        # Step 1: Load the drum rack
-        result = ableton.send_command("load_browser_item", {
-            "track_index": track_index,
-            "item_uri": rack_uri
-        })
-        
-        if not result.get("loaded", False):
-            return f"Failed to load drum rack with URI '{rack_uri}'"
-        
-        # Step 2: Get the drum kit items at the specified path
-        kit_result = ableton.send_command("get_browser_items_at_path", {
-            "path": kit_path
-        })
-        
-        if "error" in kit_result:
-            return f"Loaded drum rack but failed to find drum kit: {kit_result.get('error')}"
-        
-        # Step 3: Find a loadable drum kit
-        kit_items = kit_result.get("items", [])
-        loadable_kits = [item for item in kit_items if item.get("is_loadable", False)]
-        
-        if not loadable_kits:
-            return f"Loaded drum rack but no loadable drum kits found at '{kit_path}'"
-        
-        # Step 4: Load the first loadable kit
-        kit_uri = loadable_kits[0].get("uri")
-        ableton.send_command("load_browser_item", {
-            "track_index": track_index,
-            "item_uri": kit_uri
-        })
-        
-        return f"Loaded drum rack and kit '{loadable_kits[0].get('name')}' on track {track_index}"
+        with _arms_put_back(ableton):
+            return _load_drum_kit(ableton, track_index, rack_uri, kit_path)
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+
+def _load_drum_kit(ableton, track_index: int, rack_uri: str, kit_path: str) -> str:
+    # Step 1: Load the drum rack
+    result = ableton.send_command("load_browser_item", {
+        "track_index": track_index,
+        "item_uri": rack_uri
+    })
+
+    if not result.get("loaded", False):
+        return f"Failed to load drum rack with URI '{rack_uri}'"
+
+    # Step 2: Get the drum kit items at the specified path
+    kit_result = ableton.send_command("get_browser_items_at_path", {
+        "path": kit_path
+    })
+
+    if "error" in kit_result:
+        return f"Loaded drum rack but failed to find drum kit: {kit_result.get('error')}"
+
+    # Step 3: Find a loadable drum kit
+    kit_items = kit_result.get("items", [])
+    loadable_kits = [item for item in kit_items if item.get("is_loadable", False)]
+
+    if not loadable_kits:
+        return f"Loaded drum rack but no loadable drum kits found at '{kit_path}'"
+
+    # Step 4: Load the first loadable kit
+    kit_uri = loadable_kits[0].get("uri")
+    ableton.send_command("load_browser_item", {
+        "track_index": track_index,
+        "item_uri": kit_uri
+    })
+
+    return f"Loaded drum rack and kit '{loadable_kits[0].get('name')}' on track {track_index}"
 
 # ── Arrangement view tools ────────────────────────────────────────────────────
 
@@ -929,27 +949,18 @@ def duplicate_to_arrangement(
     track_index: int,
     clip_index: int,
     destination_time: float,
+    length: float | None = None,
 ) -> str:
     """Copy a Session clip (track_index, clip_index) into the Arrangement on the
-    same track, destination_time beats from the start. build_arrangement lays out
-    whole sections in one call.
+    same track, destination_time beats from the start; length (beats) sizes
+    the copy. Returns where it landed. build_arrangement lays out whole
+    sections in one call.
     """
     try:
-        ableton = get_ableton_connection()
-        result = ableton.send_command(
-            "duplicate_session_clip_to_arrangement",
-            {
-                "track_index": track_index,
-                "clip_index": clip_index,
-                "destination_time": destination_time
-            }
-        )
-        clip_name = result.get("clip_name", "clip")
-        track_name = result.get("track_name", f"track {track_index}")
-        return (
-            f"Duplicated '{clip_name}' from Session slot {clip_index} "
-            f"on '{track_name}' to arrangement at beat {destination_time}"
-        )
+        from .extended_tools import duplicate_session_clip
+
+        return json.dumps(duplicate_session_clip(track_index, clip_index, destination_time,
+                                                 length), separators=(",", ":"))
     except Exception as e:
         logger.error(f"Error duplicating clip to arrangement: {str(e)}")
         return f"Error duplicating clip to arrangement: {str(e)}"

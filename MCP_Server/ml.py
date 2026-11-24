@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 import tempfile
+import weakref
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,9 +105,38 @@ def child_environment() -> dict[str, str]:
     return env
 
 
+# One job at a time per server: four find_similar_sounds calls at once never
+# finished and starved Live until its connection timed out. Calls queue on
+# a lock (one per event loop) and say what they wait for.
+_JOB_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = \
+    weakref.WeakKeyDictionary()
+_RUNNING: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, str]" = weakref.WeakKeyDictionary()
+
+
 async def run(task: str, job: dict, report: ProgressCallback | None = None,
-              timeout: float = 3600.0) -> dict:
-    """Run one job and return its result; raise with the worker's message on failure."""
+              timeout: float = 3600.0,
+              prepare: Callable[[dict], None] | None = None) -> dict:
+    """Run one job and return its result; raise with the worker's message on
+    failure. Jobs run one at a time: a call waits for the one running.
+    prepare(job) runs once this job's turn has come (to pick a folder no
+    queued job has taken)."""
+    loop = asyncio.get_running_loop()
+    lock = _JOB_LOCKS.setdefault(loop, asyncio.Lock())
+    if lock.locked() and report is not None:
+        await report(0.0, f"Waiting for the {_RUNNING.get(loop, 'other')} job to finish "
+                          "(machine-learning jobs run one at a time)")
+    async with lock:
+        _RUNNING[loop] = task
+        try:
+            if prepare is not None:
+                prepare(job)
+            return await _run_one(task, job, report, timeout)
+        finally:
+            _RUNNING.pop(loop, None)
+
+
+async def _run_one(task: str, job: dict, report: ProgressCallback | None,
+                   timeout: float) -> dict:
     process = await asyncio.create_subprocess_exec(
         *command(task), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, env=child_environment(), limit=LINE_LIMIT)
@@ -155,6 +185,59 @@ async def run(task: str, job: dict, report: ProgressCallback | None = None,
             process.kill()
             await process.wait()
         await logs
+
+
+# ── Stem folders (Demucs) ────────────────────────────────────────────────────
+
+# Which source a folder's stems came from, written beside them
+STEMS_MARK = ".ableton-mcp-stems.json"
+STEM_NAMES = {"drums", "bass", "other", "vocals", "guitar", "piano"}
+
+
+def stems_from(folder: Path) -> tuple[list[str], str | None]:
+    """The stem files a folder holds and the source they came from (None
+    when unknown)."""
+    if not folder.is_dir():
+        return [], None
+    names = sorted(p.name for p in folder.glob("*.wav")
+                   if p.stem in STEM_NAMES or p.stem.startswith("no_"))
+    try:
+        source = json.loads((folder / STEMS_MARK).read_text(encoding="utf-8")).get("source")
+    except (OSError, ValueError, AttributeError):
+        source = None
+    return names, source
+
+
+def stem_folder(out_dir: str | None, name: str, source: str, overwrite: bool = False) -> Path:
+    """Where to write a source's stems. Two sources never share a folder
+    unasked (Demucs names the files after the stems, so a second source
+    overwrote the first): an out_dir holding stems of another source, or
+    of an unknown one (no STEMS_MARK), is refused unless overwrite; the
+    default ~/Music/Ableton MCP/Stems/<name> becomes "<name> 2", …"""
+    if out_dir:
+        folder = Path(out_dir).expanduser()
+        names, holds = stems_from(folder)
+        if names and holds != source and not overwrite:
+            whose = (f"of {holds}" if holds else
+                     "whose source is not recorded (made before this check, or by hand)")
+            raise FileExistsError(
+                f"{folder} already holds stems ({', '.join(names)}) {whose}; give another "
+                "out_dir, or overwrite=true to replace them.")
+        return folder
+    base = Path.home() / "Music" / "Ableton MCP" / "Stems"
+    folder, k = base / name, 2
+    while True:
+        names, holds = stems_from(folder)
+        if not names or holds == source:
+            return folder
+        folder, k = base / f"{name} {k}", k + 1
+
+
+def mark_stems(folder: Path, source: str) -> None:
+    try:
+        (folder / STEMS_MARK).write_text(json.dumps({"source": source}), encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not note the stems' source in %s: %s", folder, e)
 
 
 # ── Audio generation (MusicGen) ──────────────────────────────────────────────
@@ -419,3 +502,40 @@ class SoundIndex:
         order = np.argsort(-scores)[:top]
         return [{"file": Path(candidates[i][0]).name, "path": candidates[i][0],
                  "score": round(float(scores[i]), 3)} for i in order]
+
+
+# What a good match scores (cosine), measured on 1,500 Core Library one-shots
+# (2026-11-23): text queries for sounds the folder holds topped at 0.40-0.77
+# ("closed hi-hat" 0.40, "808 bass" 0.77), for sounds it lacks (a sustained
+# lead, a pad, strings) at 0.23-0.31; a sound's nearest others at 0.75-0.95,
+# the median sound 0.2-0.35 away. Text and example together: in between.
+WEAK_SCORE = {"text": 0.35, "like": 0.6, "both": 0.45}
+
+
+def sound_seconds(path: str) -> float | None:
+    try:
+        import soundfile as sf
+        info = sf.info(path)
+        return info.frames / float(info.samplerate)
+    except Exception:
+        return None
+
+
+def keep_results(ranked: list[dict], top: int, min_score: float = 0.0,
+                 min_seconds: float | None = None,
+                 max_seconds: float | None = None) -> list[dict]:
+    """The first `top` of ranked results scoring min_score or more and, with
+    min/max_seconds, lasting that long (sustained sounds against one-shots;
+    a file whose length cannot be read is left out then)."""
+    kept = []
+    for row in ranked:
+        if row["score"] < min_score or len(kept) >= top:
+            break
+        if min_seconds is not None or max_seconds is not None:
+            seconds = sound_seconds(row["path"])
+            if seconds is None or (min_seconds is not None and seconds < min_seconds) \
+                    or (max_seconds is not None and seconds > max_seconds):
+                continue
+            row = dict(row, seconds=round(seconds, 2))
+        kept.append(row)
+    return kept

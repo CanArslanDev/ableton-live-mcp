@@ -22,7 +22,7 @@ that script selected as a Control Surface.
 
 `doctor()` checks the server and Remote Script versions, every installed copy
 of the script, the connection and its latency, dialogs open in Live, CPU load,
-and AbletonMCP errors in Live's log. Each failed check comes with its fix; do
+AbletonMCP errors in Live's log and Live's audio output device. Each failed check comes with its fix; do
 what it says rather than guessing.
 
 | Symptom | Cause and fix |
@@ -32,6 +32,7 @@ what it says rather than guessing.
 | "older than this server" / outdated script | `install_remote_script()`, then restart Live. If the version does not change, an old `AbletonMCP` folder inside the Live application (…/Contents/App-Resources/MIDI Remote Scripts/) shadows the User Library copy; `doctor()` finds it. Live updates have restored one there. |
 | Authentication required | The server is older than the Remote Script, which wants the session token since 2.0. Update the server. |
 | Invalid session token | Live restarted and wrote a new token (~/.ableton-mcp/live-session.json); the next call reads it again. Across users or containers, set `ABLETON_MCP_TOKEN`. |
+| A render says "Live recorded no audio" | Live's audio output device is "No Device", so its audio engine is off; the user chooses one in Live's Settings › Audio (`doctor()` reads it from Live's log). |
 | Tools hang while a dialog is open | Live waits for the user to close it; `doctor()` names the dialog. |
 | Claude Desktop: no response within 2 minutes (macOS) | A pending "uv wants to access files in your Documents folder" prompt; allow it and restart the client. |
 

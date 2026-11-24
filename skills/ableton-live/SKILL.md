@@ -20,9 +20,11 @@ audible at once, and each tool call is one step in Live's undo history.
   `memory(action="remember", text="Kick at -6 dB", key="kick")` for this set
   (saved inside it), `scope="user"` for every set. A key replaces that key's
   old note.
-- Tracks: index, exact name, `master` or `return A`. Devices: index or name.
-  Session clips: `clip_index` (the scene row). Arrangement clips:
-  `arrangement_clip_index`.
+- Tracks: index, exact name, `master` or `return A`. Devices: index or name
+  (a name also finds a device inside a rack). A Drum Rack pad's chain:
+  `set_device_parameter_by_name(track=..., device="mixer", pad="kick",
+  parameter="volume", display_value="-4 dB")`. Session clips: `clip_index`
+  (the scene row). Arrangement clips: `arrangement_clip_index`.
 - Anything without a dedicated tool: read the Live Object Model with
   `lom_get_object(path="live_set tracks 0 devices 0")` and change it with
   `lom_set_property(...)` or `lom_call_method(...)`. Several edits in one
@@ -58,7 +60,22 @@ audible at once, and each tool call is one step in Live's undo history.
 - `mix_doctor()` records every track at once and finds masking and level
   problems (see the mix-and-master skill).
 - These play the set in real time, so tell the user before starting a long
-  section, and keep sections short (8–16 bars) while iterating.
+  section, and keep sections short (8–16 bars) while iterating. Check
+  `render.mode`/`played` says what you meant to hear. Other tracks are
+  disarmed for the take and put back. "Live recorded no audio" means Live's
+  audio output device is off (`doctor()`); don't retry until it's set.
+- The recordings stay in the project's Samples/Recorded (paths in the
+  result); `manage_track(action="delete_recording_tracks")` removes tracks
+  kept with `keep_track=True`.
+- A tempo with low `tempo_confidence` may be one of
+  `tempo_alternatives_bpm`; a `weak` key is a guess.
+
+## Saving
+
+Live's API cannot save the set. Ask the user to save (Cmd+S with Live in
+front; on macOS, File › Save Live Set). A keystroke or menu click sent
+while another app is in front does nothing, silently: after saving, check
+that the .als file's modification time changed.
 
 ## "This part", "the selection"
 
@@ -84,3 +101,9 @@ finds sets by file, track or plug-in name. These never touch the open set.
 
 Connection refused, timeouts or "older than this server" errors: run
 `doctor()` and follow its fixes; the ableton-setup skill has the details.
+
+A call that was interrupted, rejected or timed out may still have reached
+Live: read the track's devices (`get_session_overview()`) before retrying,
+or the retry adds a second device. Results with `ok: false` list what
+failed under `errors`; `renamed` says which parameter a setting went to,
+`notes` (`setting_notes` in `build_tracks`) where a value landed instead.

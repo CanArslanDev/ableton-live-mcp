@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from MCP_Server import extended_tools, journal
+from MCP_Server import extended_tools, fake_live, journal
 from MCP_Server import server as live_server
 from MCP_Server import transitions
 from MCP_Server.simulator import Simulator, free_port
@@ -58,9 +58,11 @@ def played(track_state, start, end):
 
 def test_automation_lands_without_touching_the_notes(sim):
     before = played(sim.state()["tracks"][1], 0, 16)
+    sim.song.current_song_time = 2.0
     result = call("write_arrangement_automation", track="Bass", device="Operator",
                   parameter="Filter Freq", start_bar=2, bars=2, shape="ramp_up")
     assert result["parameter"] == "Filter Freq" and result["notes"] == 8
+    assert sim.song.current_song_time == 2.0  # Live moved it to the copy; put back
     bass = sim.state()["tracks"][1]
     spans = [(c["start_time"], c["end_time"], c["name"]) for c in bass["arrangement_clips"]]
     assert spans == [(0, 4, "Bassline"), (4, 12, "Bassline"), (12, 16, "Bassline")]
@@ -93,11 +95,36 @@ def test_transitions_into_bar_five(sim):
 
     cymbal = call("design_transition", kind="reverse_cymbal", at_bar=5)
     track = next(t for t in sim.state()["tracks"] if t["name"] == "Reverse Cymbal")
-    assert track["devices"][0]["reversed"] and track["devices"][0]["sample"] == "Crash 505.wav"
+    # the plain crash, not the one already reversed that the browser lists first,
+    # reversed by Simpler into the project's Processed/Reverse copy
+    assert track["devices"][0]["reversed"] and track["devices"][0]["sample"] == "Crash 505 R.wav"
     clip = track["arrangement_clips"][0]
     swell = 2.76 * 2  # seconds at 120 BPM, in beats
     assert clip["end_time"] == 16 and clip["start_time"] == pytest.approx(16 - swell, abs=0.01)
     assert clip["notes"][0][2] == pytest.approx(swell, abs=0.01) and cymbal["notes"] == 1
+    # Simpler.reverse() toggles: a second call must not play it forwards again
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    track = next(t for t in sim.state()["tracks"] if t["name"] == "Reverse Cymbal")
+    assert track["devices"][0]["reversed"] and again["sample"] == "Crash 505 R.wav"
+    assert len(track["devices"]) == 1
+
+    # a "Reverse Cymbal" track whose Simpler holds something else gets a crash
+    track = next(t for t in sim.song.tracks if t.name == "Reverse Cymbal")
+    track.devices[:] = [fake_live.FakeSimpler("Kick", fake_live.FakeSample("/s/Kick 808 Long.wav"))]
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    assert again["sample"] == "Crash 505 R.wav" and len(track.devices) == 1
+    # a crash however it is spelled stays (and one named reversed is not reversed again)
+    track.devices[:] = [fake_live.FakeSimpler("C", fake_live.FakeSample("/s/ReverseCrash01.wav"))]
+    kept = track.devices[0]
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    assert again["sample"] == "ReverseCrash01.wav" and track.devices == [kept]
+    assert not kept.reversed
+    # Live's reversed copy of a crash not named so ("Cymbal 01") stays too
+    track.devices[:] = [fake_live.FakeSimpler(
+        "C", fake_live.FakeSample("/project/Samples/Processed/Reverse/Cymbal 01 R.wav"))]
+    kept = track.devices[0]
+    again = call("design_transition", kind="reverse_cymbal", at_bar=5)
+    assert again["sample"] == "Cymbal 01 R.wav" and track.devices == [kept]
 
     fill = call("design_transition", kind="drum_fill", at_bar=5, fill="snare_roll")
     assert fill["track"] == "Drums"
@@ -121,11 +148,22 @@ def test_transitions_into_bar_five(sim):
                                                                      "at_bar": 5}))
 
 
-def test_recorded_automation_on_the_main_track(sim):
+def test_recorded_automation_on_the_main_track(sim, monkeypatch):
     sim.song.tempo = 960.0  # sixteen beats a second: the pass takes about half a second
     sim.song.tracks[2].arm = True
+    # Push's auto-arm: an implicitly armed track records too (Live 12.4.16)
+    sim.song.tracks[1].implicit_arm = True
+    armed_while_recording = []
+    update = fake_live.FakeSong._update_recording
+
+    def spy(song):
+        if vars(song).get("record_mode") and vars(song).get("is_playing"):
+            armed_while_recording.extend(t.name for t in song.tracks if t.arm or t.implicit_arm)
+        update(song)
+    monkeypatch.setattr(fake_live.FakeSong, "_update_recording", spy)
     result = call("record_automation", track="master", parameter="volume", start_bar=2,
                   bars=1, shape="ramp_down", low=0.2, high=0.9)
+    assert armed_while_recording == [] and sim.song.tracks[1].implicit_arm is True
     assert result["points"] >= 3
     state = sim.state()
     lane = state["master"]["automation"]["mixer/Track Volume"]
@@ -142,3 +180,34 @@ def test_recorded_automation_on_the_main_track(sim):
     call("agent_changes", undo=1)
     state = sim.state()
     assert "automation" not in state["master"] and state["master"]["volume"]["value"] == 0.85
+
+
+def test_undo_brings_covered_clips_back_alive(sim):
+    """A gap laid over the whole bassline replaces it (the clip is gone);
+    agent_changes(undo=1) puts it back, readable as in Live."""
+    before = played(sim.state()["tracks"][1], 0, 16)
+    call("design_transition", kind="gap", at_bar=5, bars=4, tracks=["Bass"])
+    assert played(sim.state()["tracks"][1], 0, 16) == []
+    call("agent_changes", undo=1)
+    bass = sim.state()["tracks"][1]
+    assert [c["name"] for c in bass["arrangement_clips"]] == ["Bassline"]
+    assert played(bass, 0, 16) == before
+    assert sim.song.tracks[1].arrangement_clips[0].end_time == 16.0
+
+
+def test_recorded_automation_refuses_while_a_track_stays_armed(sim, monkeypatch):
+    """The arms are read back before anything plays: a track Live leaves
+    armed (here the disarm is skipped) stops the pass."""
+    sim.song.tempo = 960.0
+    sim.song.tracks[2].arm = True
+    plays = []
+    start = fake_live.FakeSong.start_playing
+    monkeypatch.setattr(fake_live.FakeSong, "start_playing",
+                        lambda song: (plays.append(1), start(song)))
+    monkeypatch.setattr(extended_tools, "disarm_ops", lambda armed, implicit, on=False: [])
+    with pytest.raises(Exception, match="Vox stayed armed"):
+        asyncio.run(live_server.mcp.call_tool("record_automation", {
+            "track": "master", "parameter": "volume", "start_bar": 2, "bars": 1,
+            "shape": "ramp_down"}))
+    assert plays == [] and not sim.song.is_playing and not sim.song.record_mode
+    assert "automation" not in sim.state()["master"]

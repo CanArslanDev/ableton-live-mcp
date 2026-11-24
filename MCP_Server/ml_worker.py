@@ -326,7 +326,13 @@ def echo(job: dict) -> dict:
     import time
 
     progress(0.5, "echo")
+    if job.get("niceness"):
+        job["niceness"] = niceness()
+    if job.get("clock"):
+        job["started"] = time.time()
     time.sleep(float(job.get("sleep", 0)))
+    if job.get("clock"):
+        job["ended"] = time.time()
     if job.get("fail"):
         raise ValueError(job["fail"])
     return job
@@ -336,8 +342,31 @@ TASKS = {"separate": separate, "transcribe": transcribe, "embed": embed, "genera
          "echo": echo}
 
 
+def niceness() -> int | None:
+    """This process's nice value. os.nice(0) is not used: macOS's nice()
+    can answer 0 whatever the value (BSD), as on GitHub's macOS runners."""
+    import os
+
+    try:
+        return os.getpriority(os.PRIO_PROCESS, 0)
+    except (AttributeError, OSError):  # Windows
+        return None
+
+
+def lower_priority() -> None:
+    """Below Live: a job that takes every core must not starve Live's
+    audio and its Remote Script (torch's threads inherit this)."""
+    import os
+
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, max(10, os.getpriority(os.PRIO_PROCESS, 0)))
+    except (AttributeError, OSError):  # Windows has neither
+        pass
+
+
 def main() -> int:
     task = sys.argv[1] if len(sys.argv) > 1 else ""
+    lower_priority()
     if task not in TASKS:
         emit(error=f"Unknown task {task!r}; known: {', '.join(TASKS)}")
         return 2

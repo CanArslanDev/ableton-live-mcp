@@ -26,7 +26,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/live_updates.py` | Pushes `ableton://events` / `ableton://session/overview` updates: `resources/subscribe` (2025-11-25) and `subscriptions/listen` (2026-07-28). Its long polls use a connection of their own (on the tools' one every command would queue behind them). |
 | `MCP_Server/ui/` | MCP Apps panels (`ui://` HTML resources) registered through the SDK's `Apps` extension. |
 | `MCP_Server/prompts.py` | MCP prompts (workflows) and the streaming loudness targets. |
-| `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`. |
+| `MCP_Server/doctor.py` | Setup diagnostics behind the `doctor` tool and `ableton-mcp-doctor`; Live's audio device from its Log.txt (`audio_devices`). |
 | `MCP_Server/midi_files.py` | Standard MIDI File read/write (mido) for clip import/export. |
 | `MCP_Server/companion.py` | Client for the Extensions SDK add-on: finds its session file, sends one command. |
 | `extension/` | AbletonMCP Companion, the Extensions SDK add-on (TypeScript): share selection, confirm dialog, pre-FX render. |
@@ -48,7 +48,7 @@ Forked from `ahujasid/ableton-mcp`, whose remote is `upstream`.
 | `MCP_Server/mix_analysis.py` | Masking between stems, stem findings, reference comparison with EQ Eight settings. |
 | `MCP_Server/remote_script_install.py` | `ableton-mcp-install-script`; holds `EXPECTED_REMOTE_SCRIPT_VERSION`. |
 | `MCP_Server/script_handshake.py` | Version/capability handshake with the script. |
-| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, `replace_sample`, Live's version: 12.4.16). Tests and the simulator use it. |
+| `MCP_Server/fake_live.py` | In-memory fake of the LOM (objects carry `_live_ptr`, listeners, Live 11 note API, enums, an undo history by Live's rules, the recipes' devices, Drum Rack chains, Instrument Racks and chain mixers, `replace_sample`, Simpler's reverse, clip lengths, warp markers and unwarped clips as Live sizes them, Live's version: 12.4.16). Tests and the simulator use it. |
 | `MCP_Server/transitions.py` | Pure Arrangement logic: unrolling split/looped clips, fills, risers, gaps, automation curves. Tools build on it with `rewrite_range` (extended_tools). |
 | `MCP_Server/simulator.py` | `ableton-mcp-simulator`: the bundled Remote Script over `fake_live`, served like Live (port + session file); writes the set as JSON and an eval case's verdicts. |
 | `evals/` | `claude plugin eval` suite: 33 cases against the simulator, graded on `checks.json` (see `evals/README.md`). |
@@ -152,7 +152,11 @@ uv run python -m MCP_Server.blueprint FILE.json  # a blueprint's problems (schem
   (`…/Contents/App-Resources/MIDI Remote Scripts/`), which shadows the User
   Library copy.
 - Quitting Live with unsaved changes shows "Changes will be lost. Proceed?";
-  its buttons ignore Accessibility clicks, Return confirms.
+  its buttons ignore Accessibility clicks, Return confirms. Live 12.4.16
+  (2026-11-23) asks "Save changes to "Untitled" before closing?" instead
+  (Don't Save, Cancel, Save): Return picks Save (the Trial's Save As
+  panel, whose Cancel takes a click), an Accessibility click on Don't
+  Save does nothing, Cmd+D quits without saving.
 
 Measured on Live 12.3.8:
 
@@ -209,7 +213,83 @@ Measured on Live 12.3.8:
   "Master Output" → "Output", EQ Eight "N Resonance A" → "N Q A", and names in
   Reverb, Delay, Auto Filter, Echo, Chorus-Ensemble and Roar. Settings go
   through `resolve_parameter_names`, which maps either version's name onto the
-  device (`PARAMETER_RENAMES`); recipes keep the 12.3 names.
+  device (`PARAMETER_RENAMES`); recipes keep the 12.3 names. Not for every
+  device alike: Limiter's 12.3 "Gain" was its input gain, and 12.4.16
+  (2026-11-23) has "Input Gain" and "Output" (Device On, Input Gain, Ceiling,
+  Release, Auto, Link, M/S Link, Lookahead, Routing, Mode, Maximize On,
+  Threshold, Output), so `DEVICE_PARAMETER_RENAMES` maps Limiter "Gain" →
+  "Input Gain" and keeps the general "Gain" → "Output" (Utility) off it.
+  Glue Compressor has no "Makeup" ("Output" is right); Compressor has both.
+- **Racks and the browser** (12.4.16, 2026-11-23): a Core Library kit like
+  "BNYX Boot Kit" is an Instrument Rack (`InstrumentGroupDevice`) whose one
+  chain holds the Drum Rack and a Saturator; `Chain.devices` and
+  `Chain.mixer_device` (ChainMixerDevice: "Chain Volume", "Chain Panorama",
+  sends "Chain Send 0", "Speaker On") are there for rack and Drum Rack pad
+  chains alike. Selecting a pad of that nested Drum Rack and
+  `browser.load_item(sample)` fills it. A track still named as Live named it
+  ("1-MIDI") takes the name of an instrument that lands on it, by the browser
+  or `insert_device` ("1-BNYX Boot Kit", "1-Drift", visible in the same
+  batch), of an instrument that replaces it ("1-Operator"), and again when its
+  Simpler reverses ("2-Crash 707 R"); on a regular track an effect (Reverb)
+  leaves it, and deleting the instrument gives "1-MIDI" back. A return track
+  is renamed by effects too: `add_device("return A", "Utility")` made
+  "A-Reverb" "A-Reverb | Utility" (deleting it restored it); the fake does not
+  model returns. Tools that insert or load pin the track by id first
+  (`pin_track`, `TrackId`). `SimplerDevice.reverse()` toggles; the reversed
+  sample is a copy, `<project>/Samples/Processed/Reverse/<name> R.<ext>`,
+  readable at once as `sample.file_path`, and reversing again gives the
+  original path back. When a device lands on a MIDI track with no device, by
+  `insert_device` (Reverb, Drum Rack, Drift alike) or the browser, Live arms
+  it (`arm`, not `implicit_arm`), disarms every other track (exclusive arm)
+  and selects it; later devices, or an instrument loaded onto a track that has
+  one, change none of these. The arms read back changed in the same batch; the
+  selection only from the next command on (deferred, like the playhead), so
+  the selection is set back in a later command whatever was read. Live also
+  selects (after the command) a track any device is inserted on (Reverb onto
+  "1-Drift", onto an empty audio track, Utility onto a return), a new track
+  (`create_midi_track`, `create_audio_track`: the next command reads it
+  selected), and the track of a deleted device when another device stays on it
+  (none when the chain is left empty; deletes inside racks unmeasured). An
+  instrument onto a MIDI track that holds only a MIDI effect (Arpeggiator)
+  does not arm it. `insert_devices` reads whether the target is an empty MIDI
+  track and the selected one and skips the put-back when nothing can change;
+  `keeping_arms` wraps `build_tracks` and `design_transition`;
+  `manage_device(delete)` always sets the selection back. `arm` set through
+  the LOM is not exclusive (2-MIDI and 3-Audio both stayed armed), and
+  `insert_device` refuses a second instrument ("Device chains cannot have more
+  than one instrument each"). `put_back_arms` restores arms and the selection
+  after `inserted_device_ids`, `load_items` and the legacy load tools.
+- **A pinned selection** (12.4.16, 2026-11-23): after Live selected a new
+  track itself (`create_midi_track`), a Session clip copied onto it with
+  `duplicate_clip_to_arrangement` and then the playhead set
+  (`current_song_time`, as `keeping_playhead` does) pin that track and
+  the copy's span; a copy onto a track selected through the LOM, or one
+  Reverb insert's selection, pinned nothing. With the playhead outside
+  the span, a copy overlapping the span (pinned 16..32: copies at 14, 16,
+  20, 31 jumped, at 0, 12, 32, 64 not) or a playhead set into it, end
+  included (pinned 0..16: 64 → 0, 40 → 15.9, 40 → 16 jumped; 40 → 20,
+  0 → 8, 8 → 0 not) selects the pinned track, seen from the next command
+  on (a read in the same batch still shows the old one). Where the
+  playhead starts counts as inside on [start, end] when it was set there
+  (pinned 16..32, set to 32: copies at 20 and 14 and sets 32 → 24 did not
+  jump) but on [start, end) when a copy moved it there (pinned 0..16, a
+  copy at 16, then 16 → 0 jumped; a copy at 32 on 16..32, then 32 → 24
+  jumped). A copy that only moves the playhead does not jump (a copy at
+  64 from 0, then the set 64 → 0 did). Then `selected_track` set back to
+  the track selected before reads back unchanged, again and again;
+  setting another track first (even the pinned one) and then that one
+  takes, in one batch. The pin outlives that and fired clips; deleting
+  the pinned track, or its clip, ends it (a track created and deleted
+  once ended it too, which of the two is unknown). Firing a Session clip
+  (a probe's, 2026-11-23) leaves `back_to_arranger` True after the
+  transport stops; none of `duplicate_to_arrangement`,
+  `build_arrangement`, `write_arrangement_automation`,
+  `design_transition` (riser, gap, reverse cymbal), a generator with
+  `arrangement_time` or `render_and_analyze`, stopped or playing, did.
+  `playhead_put_back` therefore sets the playhead back, reads the selection in
+  the next command and, when it moved, sets the selected track and then the
+  user's (`select_again`); `put_back_arms` reads back the same way.
+  `FakeSongView` models this (jumps at `end_undo_step`).
 - **Sidechain** (12.4): Compressor has `input_routing_type` (its sidechain
   source, e.g. `available_input_routing_types 'Kick'`); Gate has none, so its
   sidechain cannot be set from a script.
@@ -328,6 +408,15 @@ Measured on Live 12.3.8:
   pitch the onset head read a median 0.29 at the true onset and peaked at
   0.37, 81 ms later; 0.3 % of the 336 notes reached 0.6 and 7 % 0.5, and
   onset thresholds from 0.2 to 0.6 all gave F1 ≤ 0.17 on those stems.
+- CLAP scores (cosine) on 1,500 Core Library one-shots (2026-11-23): text
+  queries for sounds the folder holds topped at 0.40–0.77 ("808 bass"
+  0.77, "closed hi-hat" 0.40), for sounds it lacks ("sustained synth
+  lead", "warm pad", "long string ensemble") at 0.23–0.31, all drums; a
+  sound's nearest others at 0.75–0.95. `ml.WEAK_SCORE` warns below 0.35
+  (text) and 0.6 (example). Embedding 10 texts took 10.9 s, mostly start-up.
+- `ml.run` runs one job at a time per server (a lock per event loop; a
+  queued call reports what it waits for) and the worker lowers its own
+  priority (`os.nice(10)`).
 - Tests mock `ml.run` (and test the protocol with the worker's `echo` task);
   `ABLETON_MCP_ML_TESTS=1` adds two runs with the real Basic Pitch model (an
   A4 and its bends; a driven 808 line the default preset must find).
@@ -479,6 +568,231 @@ reference-dissector's `live-build`, which builds a plan through
 - The Remote Script served 4 clients; the build's connection was not
   refused.
 
+Measured on 2026-11-23 (Live 12.4.16 Trial, empty set, click tracks made
+at 48 kHz) for the Arrangement and audio clip tools:
+
+- **Copies into the Arrangement** (`duplicate_clip_to_arrangement`) are as
+  long as the clip's `length`, which is `loop_end - loop_start` looped or
+  not: an unlooped Session clip with end_marker 16 and loop_end 64 was
+  copied 64 beats long. With the loop off, start_marker follows
+  loop_start (set alone it stayed) and end_marker is independent (turning
+  the loop off copies loop_end into it). loop_end set to 6, the copy made
+  and loop_end put back, all in one batch, gave a 6-beat copy keeping that
+  loop (`sized_copy`). An Arrangement clip works as the source (its span).
+  A copy covering a clip replaces it; one laid over part of an audio clip
+  splits it like a MIDI one (later parts' start_marker 17, 32).
+  `Track.delete_clip(clip)` deletes an Arrangement clip. `cut_ranges`,
+  `build_arrangement` and the gap transition build on these.
+- **An unlooped Arrangement clip ends at its loop_end** (16 → 10 ended it 6
+  beats earlier; an unwarped one's loop_end is in seconds, 40 → 4 made 80
+  beats 8); a looped one keeps its span (loop_end changes only the loop),
+  and turning its loop off keeps the span (loop_end becomes its end). The
+  span changes after the command: a copy of a clip trimmed in the same
+  batch took its old length (`trimmed_copies` uses three commands).
+- **The playhead follows new Arrangement clips**: while stopped,
+  `duplicate_clip_to_arrangement`, `create_midi_clip` and
+  `Track.create_audio_clip` move `current_song_time` to the new clip's
+  start (deleting a clip leaves it). `playhead_put_back` /
+  `keeping_playhead` put it back.
+- **New audio clips are warped at a guessed tempo**: looped, with three
+  warp markers (`beat_time`, `sample_time` in seconds): the file's start,
+  its end, and a shadow marker 1/32 beat later that `move_warp_marker`
+  refuses ("The shadow marker can't be moved."). Click tracks of 8 s and
+  19.2 s made at 120 and 100 BPM came in right (16, 32 beats), a 40 s one
+  at 120 BPM as 96 BPM (64 beats), and a 32 s one (8 s of clicks, then
+  silence) right. `move_warp_marker(64, 16)` moved the end marker to beat
+  80 (the file at 120 BPM) without touching the loop or markers; setting
+  end_marker and loop_end to 80 then gave an 80-beat clip.
+  `remove_warp_marker(beat_time)` works; `add_warp_marker` wants a
+  WarpMarker object (a dict is refused), so the script cannot add one.
+- **Warping off** turns the loop off and puts loop times in seconds
+  (loop_end 40). A Session clip keeps the length it had (64 beats, from
+  the guess; loop_end 40 → 39 → 40 left it 64), so its copies last 64 beats
+  (32 s of the 40 s file); an Arrangement clip ends at the file's length
+  at the set's tempo (80 beats), read back from the next command on.
+  Warped straight to 80 beats first, then unwarped in the same batch, the
+  Session clip was 80 beats and so was its copy (`fit_audio_clip`).
+  Warping turned back on left only the start and shadow markers (the
+  guessed tempo kept, end_marker 102.4), so nothing can move the file's
+  end: such a clip cannot be fitted (`fit_audio_clip` says so).
+- **Audio tracks take their first clip's name**: a track still named as
+  Live named it ("4-Audio") became "4-click16_120" when an audio clip
+  landed on it (Session or Arrangement), kept that while a clip was there
+  and got "4-Audio" back when the last went; a name set by the user stays.
+  Setting the name to "" gives Live's naming back. Address such tracks by
+  index or id.
+
+Measured on 2026-11-23 (Live 12.4.16 Trial, empty unsaved set, 44.1 kHz
+output) for the recording tools:
+
+- **Implicit arm records.** `Track.implicit_arm` (Push's auto-arm of the
+  selected track) stayed False on every track here, selected or not, with
+  or without an instrument (no Push attached); it can be set through the
+  LOM, leaves no undo step, and a MIDI track with it set recorded a MIDI
+  clip during an Arrangement render like an armed one. Selecting another
+  track did not clear it. `record_section` and `record_automation` turn
+  arm and implicit arm off for the take (`REC_ARMS`, read back before
+  playing) and back on after the transport stopped, in a later command.
+- **Recording files** follow the audio device's rate: at 44.1 kHz here
+  (94,720 frames for 4.30 beats at 120 BPM), 48 kHz on the earlier
+  device. An unsaved set records into `~/Music/Ableton/Live
+  Recordings/<date time> Temp Project/Samples/Recorded/` (a saved one into
+  its project's `Samples/Recorded`), named "<track> 0001 [<date time>].wav".
+  The Arrangement clip's `file_path` reads empty while recording; the file
+  was complete (size and frames final) 30 ms after `stop_playing`, its
+  frames matching the clip's span, which runs past the asked end by the
+  time the stop takes (4 beats asked, 4.30 recorded). A Session take
+  (`fire(length)`) also pre-creates the next take's file ("… 0002", deleted
+  with the track), and an armed audio track re-armed after a Session take
+  got an empty (0-byte) take file that went when it was disarmed; no clip.
+- **A scene render left the scene's clips playing** on the stopped
+  transport (`playing_slot_index` 0, `back_to_arranger` True);
+  `stop_all_clips(False)` stopped them and `back_to_arranger` set to False
+  read back from the next command. A render leaves the selection on a
+  neighbour of its deleted track; `record_section` sets it back.
+- **Input channels**: setting a new track's `input_routing_type` to a
+  track or return sets its channel to "Post Mixer" with it. In the batch
+  that set three tracks' inputs, the later tracks still listed Ext. In's
+  channels (1/2, 1, 2), so setting "Post Mixer" there failed (logged by
+  the script) though the channel already was; the next command read Post
+  Mixer on all three. `record_section` reads it then (`post_mixer`).
+- **A scene with a tempo** (scene 1 at 160 BPM, `tempo_enabled`) changed
+  the set's tempo for good when a render fired it; its 4 beats lasted
+  1.5 s. `record_section` puts the tempo back and measures takes by the
+  clip's beats.
+- **Live without an audio device** (the user's sessions of 2026-11-22/23):
+  Log.txt has "Audio In Out: Output Device: No Device", and its renders
+  were 92-byte WAVs: a JUNK chunk, 24-bit stereo at 44.1 kHz, 2 frames.
+  Live writes an "Audio In Out:" block at start and on each change of
+  device, several in a row while switching (a transient "No Device" before
+  the device): the last "Output Device" line is the current one
+  (`doctor.audio_devices`).
+
+Measured on 2026-11-23 (Live 12.4.16 Trial, empty unsaved set) for Remote
+Script 2.2.0:
+
+- **Parameter displays** (`str_for_value` at 0, ¼, ½, ¾ and 1 of the range
+  of Drum Buss, Compressor, EQ Eight, Utility, Reverb, Glue Compressor,
+  Auto Filter, Saturator, Delay and a track's mixer): dB ("-6.00 dB",
+  "-inf dB" at the bottom of faders, sends, Trim, Threshold), Hz switching
+  to kHz ("500 Hz" … "20.0 kHz"), ms switching to s ("459 ms", "1.36 s"),
+  "%" (also "-100 %" … "100 %" and "0.0 %" … "400 %"), pan "50L" / "C" /
+  "50R" (Utility Balance too), ratio "4.00 : 1" up to "inf : 1",
+  Compressor's Expansion Ratio "1 : 1.25", "st" (Auto Filter Pitch), "°"
+  (LFO Phase), note values "8", "5/16", "1/64", "1 / 16", "17  / 16", and
+  numbers without a unit: Drum Buss Transients "-1.00" … "1.00" (range
+  −1..1), EQ Q "0.10" … "18.0", Reverb's "0.50 " (with a trailing space),
+  Glue Compressor's ".01" … "30" and Release ending in "A". Quantized
+  ones list `value_items` ("Off"/"On", "Peak"/"RMS"/"Expand", "0 ms"/"1
+  ms"/"10 ms"). Most parameters keep one unit family across their range,
+  and `display_unit` (dB, Hz, ms, %, pan, ratio, st, °, note, morph,
+  none) taken at five points tells which units a target may carry; a bare
+  number is always read in display units. Not all: Glue Compressor's
+  Release ends in "A", Roar's Blend is a split ("100 / 0", "75 / 25" …
+  "0 / 100", read as its first number), Roar's FB Note shows note names
+  (12..84, "C-1" … "C5", read as MIDI notes with C3 = 60), and the Filter
+  Morph of Simpler, Operator and Wavetable restarts its number in each
+  section ("0 lp/bp" … "75 lp/bp", "0 bp/hp" … "75 no/lp", "100 no/lp"),
+  so it is read as section × 100 + number (bisecting on the number alone
+  set "25 lp/bp" to "25 no/lp", in 2.1.0 too). Script 2.1.0 clamped
+  "40 %" on Transients to 1.00, "100 Hz" on Drum Buss Damping Freq to 500
+  Hz, "-inf dB" on Compressor Output to −36 dB, and read "1/16" as 1/64;
+  2.2.0 refuses the first three (unit or range) and sets 1/16.
+- **Values Live keeps and shows** (sweep of 629 continuous parameters of
+  16 effects and 4 instruments, 7 displays each, 4,403 sets): Live stores
+  a float32, so a value found right at the edge of a display ("12 dB" on
+  Limiter's Input Gain) can be kept a hair below it and read back one
+  step off ("11 dB"); `param_set_display` then moves it into the display
+  it chose. Values a hair below zero show "-0.0 %", and Operator's
+  Freq<Vel shows "-50" at −50 exactly but "-50.0" beside it, so a value
+  that reads as asked is looked for next to the one found (rounded, then
+  nudged). A fader with "-inf dB" at its bottom has a lowest number above
+  it (Compressor Threshold −69.7 dB; a track's volume shows −69.565 dB at
+  0.001 and −inf at 0.0001, a send −69.695 dB at 0.005 and −inf at
+  0.003): a finite target below that sets −inf, as Live's faders do, and
+  the result says so (`note`); 2.1.0 landed it on the lowest number.
+  Server tools send such levels (`set_track_mixer(sends_db={"A": -80})`,
+  `build_tracks` volume_db), so none may be refused. The value set is a
+  rounded one or the middle of the chosen display ("C" pan 0.0, "25L"
+  −0.5), and every check runs before the one write (a refusal writes
+  nothing, so the journal's undo count stays right). A target past an end
+  by at most one display step there (`_end_step`: the distance to the
+  next display inward as read, or one unit of the end's own last digit
+  when it is a plain number and that is larger: "100 ms" beside "99.9
+  ms") sets the end with a `note` ("0 ms", "0.00 ms" on Attack, lowest
+  0.01 ms), whatever its own precision. Stepped controls take half their
+  last digit ("3.4" on an octave whose top is "+3 st"), and an end that is
+  not a plain number takes nothing past it (Ti Rate "1/256", "7" past "4
+  D"; "1:2.6" and "1:2.01" on Expansion Ratio, top "1 : 2.00"); "6
+  kHz" on a 5.50 kHz top, "2 s" on 1.50 s and "0" on a 0.20 bottom are
+  refused. Halfway between two displays goes to the larger
+  number, with a note ("1" on Glue Release: ".8" and "1.2" → 1.2). Tools
+  pass the notes on (`notes`, `setting_notes`, the summaries' steps). The
+  crossfader shows "50A" … "0" … "50B" (A as negative, like L). Live
+  does not always keep what is written as a float32 would: Shifter's
+  LFO Amt St shows "0.38 st" from
+  exactly 0.25, and 0.25 is kept as 0.24999998 ("0.37 st"), so a rounded
+  value at a display's edge is not taken and a read-back that differs is
+  stepped inside. A third sweep (890
+  parameters, 17 points, the display and four Python-formatted variants
+  each: 43,632 sets), left 101 flags, none a wrong set: 42 bare numbers on
+  note-name parameters (refused, out of the MIDI-note range), 56 targets
+  rounded past a range end by more than one display step (refused: "0 ms"
+  on a 0.10 ms bottom, "2 s" on a 1.50 s top), nearest values on
+  note-value displays ("2.400" → "4 T", i.e. 2.67; "0.400" → "6/16") and
+  Glue Release's tie ("1" → 1.2).
+- **More display forms** (a second sweep: 883 continuous parameters of 26
+  effects and 6 instruments, 11 displays each, 9,713 sets): Resonators'
+  I Note writes sharps as "♯" ("C♯3", read as "#"; "♭" as "b"); Hybrid
+  Reverb's Ti Rate (0..29, stepped) shows note values with triplets and
+  dots ("1/128 T" … "1/4 D", "1 T", "1", "1 D", "2 D", "4 D", read as
+  the note value × 2/3 or × 1.5); its Vintage (0..4, not quantized) shows
+  only names (Off, Subtle, Old, Older, Extreme), set by name. Compressor's
+  Ratio ("4.00 : 1") and Expansion Ratio ("1 : 1.25") are told apart, so
+  "1:4" on Ratio is refused. Before these, "C3" on I Note set E4 and
+  reported success. `param_set_display` now refuses any result whose
+  display is not the target (within its last digit) and does not have
+  the target between it and the display one step away (`_reads_near`):
+  a display it misreads can no longer set something else silently. With
+  script 2.2.0 as installed on 2026-11-23, both sweeps (4,403 sets over
+  629 parameters, 9,713 over 883) set every display read back exactly as
+  asked. Displays outside those sweeps (other devices, plug-ins, Max
+  devices) are untested.
+- **Glue Compressor's Attack, Release and Ratio are stepped, not
+  quantized**: `is_quantized` False, ranges 0..6, 0..6, 0..2, each step
+  shown from its value up (Attack ".01" ".1" ".3" "1" "3" "10" "30",
+  Release ".1" ".2" ".4" ".6" ".8" "1.2" "A", Ratio "2" "4" "10"); a
+  value of 2.5 reads back 2.0 (Live floors it). With Release ending in
+  "A" (Auto), script 2.1.0 refused every number ("not numeric");
+  `_numeric_span` now bisects over the steps that show numbers and sets
+  the others ("A") by name. `fake_live` models these (`_stepped`).
+- **Browser listings are not lazy.** `BrowserItem.children` builds the
+  whole vector: ~0.3 s for a folder of 100,000 samples (~3 µs an item),
+  and `iter_children` (a `BrowserItemIterator`) costs as much to create.
+  Reading the items afterwards is cheap: script 2.1.0 walked 120,000
+  items in 0.86 s in all. `hasattr` reads the property, so `_lom_resolve`
+  lists a folder twice (`… children 0` took 0.6 s there). The 100,000
+  files (empty WAVs) showed up after ~2 minutes; files added later to an
+  indexed folder did not show within 5 minutes, until it was renamed.
+  `browser.samples` lists the User Library's samples as well. Walks
+  therefore bound the time between slices: `BROWSER_WALK_SHARE` (0.5)
+  gives a slice no more time than Live had since the last one, so a
+  client that asks again at once (server 2.4.3: 120 ms slices) gets short
+  slices, and `rest_ms` tells a client how long to wait for a whole one
+  (this server: 60 ms slices; its time limits leave the waits out). The
+  share is per walk: the script keeps up to four, and walks run side by
+  side (several sessions searching) can take more of the thread together.
+  A walk of 208,705 items then took 48 % of the main thread over 2.2 s,
+  with other clients' commands at 8 ms median and 336 ms at most (one
+  listing); with 2.1.0 another client waited 396 ms median, 710 ms at
+  most, during a 120,000-item walk.
+- **Ids alone:** `{"$ref": 4965354872}` (a bare id, as a number or
+  digits) is read as `"id 4965354872"`; no root name is made of digits.
+- **Server 2.4.3 with script 2.2.0** (the plugin's server, expecting
+  2.1.0): handshake, capabilities, `get_session_overview`,
+  `browser_search`, `run_batch` with `param_set_display` and the LOM tools
+  work; its `doctor` reports the script as outdated (two warnings).
+
 Not verified in Live (check each in a scratch set before claiming it):
 
 - The start put back on stems by `separate_stems(to_tracks=True)` (the
@@ -497,7 +811,11 @@ Not verified in Live (check each in a scratch set before claiming it):
   minus `start_marker` (beats) as the note's beat in the new clip; on an
   unwarped clip `start_marker` in seconds; `Clip.sample_rate`, else the
   file's rate.
-- A 44.1 kHz audio device: every recording ran at 48 kHz.
+- `fit_audio_clip` on a clip Live warped with inner markers (the remake
+  sessions saw 17 on a padded file): it removes them with
+  `remove_warp_marker` before moving the last; only three-marker clips
+  were measured. That clip envelopes play in a shortened copy rests on
+  the copy keeping them (Arrangement envelopes cannot be read back).
 
 ## Live Set files (.als), as read from Live 12.4's own sets
 
@@ -513,9 +831,15 @@ Not verified in Live (check each in a scratch set before claiming it):
 - A clip plays `Loop/LoopStart..LoopEnd` whether the loop is on or off (with
   it off they are the start and end markers); arrangement clips sit at
   `CurrentStart..CurrentEnd`. Drum pad note = 128 − `ReceivingNote`.
-- Sample paths: `RelativePathType` 1 = project folder, 5 = a Live Pack
-  (`LivePackName`, e.g. the Core Library in the app bundle), 6 = Library,
-  7 = Live's Builtin folder; `Path` is absolute on the machine that saved it.
+- Sample paths (`FileRef`): `RelativePathType` 3 = relative to the Live
+  Project (the folder holding "Ableton Project Info"): every project sample
+  in the user's five Live 12.4.16 sets, "Samples/Imported/…"; 5 = a Live
+  Pack (`LivePackName`, e.g. "Core Library" in the app bundle); 7 = Live's
+  Builtin folder (IRs, MPE Control); 1 = relative to the set's own folder
+  with ".." steps (seen on presets' refs, from the machine that made them);
+  6 = Library (not seen there); 0 = none. `Path` is absolute on the
+  machine that saved it: a moved project ("Dreyko Lead Project" → "Dreyko
+  Lead", 2026-11-23) keeps the old one, so type 3 tries the project first.
 - No writer on purpose: it would be the way around the Trial's disabled
   saving, and a damaged set is worse than none.
 
@@ -569,14 +893,21 @@ Not verified in Live (check each in a scratch set before claiming it):
   with `device_path()`, clips with `clip_path()`; quote names via `selector()`.
   A LOM path takes every number for an index, so text made only of digits
   that an item is named ("808") goes through `named()`, which looks the name
-  up first (one round trip); an integer is always an index.
+  up first (one round trip); an integer is always an index. Devices by name
+  go through `find_device`: the track's own devices, then its racks' chains
+  level by level (`nested_devices`, a batched read per level). Digit-only
+  text (`digits_device`) is a top-level name, else, if that index exists
+  and a nested device has the name, an error; else the one nested device
+  of that name; else the index. A path ("live_set …", "id N …") must
+  be on the given track (`device_on_track`).
 - A new audio clip's start: Live moved it to the file's first transient
   (21 ms to 3.6 s in, 2026-10-11) where warping went off. In Live 12.4.16
   (2026-11-16) a new clip starts at 0 while warped, also once its warp
   analysis is done (the .asd written, ~12 s for a 150 s file); warping
   turned off after that analysis moved the start (0 to 0.53), turned off
   with the start reset in the same batch it stayed at 0 after the analysis.
-  Every path that creates one puts it back (`from_its_start`: loop_start,
+  Every path that creates one puts it back (`from_its_start`, inside
+  `fit_audio_clip`: loop_start,
   then start_marker, after warping); the fake moves it at once
   (`FIRST_TRANSIENT`), a stricter Live, so a path that forgets is caught.
 - Tools that wait (recording, long-polling) are `async` and use `asend()` so

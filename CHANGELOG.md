@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Remote Script 2.2.0: reinstall it (`ableton-mcp-install-script`) and restart
+Live. Checked in Live 12.4.16: the script loads, and the plugin's server
+2.4.3 (which expects 2.1.0) still works with it.
+
+**Note for anyone also running an older server:** its `doctor` (2.4.3 and
+earlier) calls script 2.2.0 "Outdated copy" and suggests
+`install_remote_script`. Don't follow it: that installs the older 2.1.0
+and undoes the fixes below. Install from this version instead.
+
 ### Fixed
 
 - **A stopped `build_from_blueprint` no longer doubles a period.** Live's
@@ -9,6 +18,432 @@
   build's "build_tracks stopped: … It left … in the set" put a second
   after it (seen in Live 12.4.16, 2026-11-18). The fake's unknown-device
   error now reads as Live's does.
+- **`browser_load` and `build_drum_kit` no longer load onto the wrong
+  track** (this and the fixes below were met while remaking songs in Live
+  12.4.16). When selecting the target track failed, Live's browser still
+  loaded the item onto whatever track was selected (a preset replaced a
+  Drums track's Drum Rack). The track (and its Drum Rack) is now found
+  before anything loads (and before the browser is searched), an item
+  loads only once its track reads back as selected and its pad's selection
+  was accepted, and the result says what the track holds afterwards
+  (`track`, `devices`, `pad_name`; `build_drum_kit`'s `track` too; a pad
+  still empty is an error, a track whose devices did not change a
+  `warning`). A track Live renames as it loads ("1-MIDI" becomes "1-BNYX
+  Boot Kit") is followed by id, where reading it back by its old name used
+  to fail after the load. The checks cost round trips: about 10 for one
+  item instead of about 4, and 2 more per further pad (a few ms each).
+- **Sounds named explicitly load that sound.** `sounds={"crash": "Impact
+  Layered"}` in `build_drum_kit` (and an item query in `browser_load`,
+  `browser_preview`) took the browser's first hit, "Impact Layered
+  Reversed". The exact name (case and extension aside) now wins, then names
+  that are not reversed or loops unless asked for, then the closest and
+  shortest. The walk ends at the exact name, else at 25 hits with every
+  word in the name and one in its folders, or 3 s after the first hit with
+  every word in the name, and after 20 s in any case; a walk that did not
+  finish and found nothing says so in the error ("searched N items in S s
+  without finishing"), as `build_drum_kit` does under
+  `searches_unfinished`.
+- **`design_transition(kind="reverse_cymbal")` reverses once.**
+  `Simpler.reverse()` toggles, so a second call played the crash forwards
+  again. Live keeps the reversed copy in `Samples/Processed/Reverse`, and a
+  sample there (or named reversed) is left as it is; the crash it picks is
+  a plain one from Drum Hits › Cymbal, not one already reversed. A Simpler
+  on that track holding something other than a crash (by its file name) is
+  replaced by one; one holding Live's reversed copy is kept, whatever its
+  name.
+- **Arms and the selection are put back.** When a device lands on a MIDI
+  track that has none, through `insert_device` or the browser, Live
+  12.4.16 arms that track (`arm`, not `implicit_arm`), takes the arm from
+  every other track (exclusive arm, Live's default) and selects it. So
+  `add_device`, `apply_device_chain`, `build_drum_kit`, `browser_load`,
+  `build_tracks`, `design_transition` and the legacy
+  `load_instrument_or_effect` and `load_drum_kit` left the new track armed,
+  disarmed the user's armed track and moved the selection. They now read
+  every track's arm and the selection before, and afterwards disarm tracks
+  Live armed, re-arm the ones it disarmed (arms set by a script are not
+  exclusive) and reselect the user's track (Live moves the selection only
+  after the command, so it is always set back; the legacy tools keep
+  their selection), in one batch that leaves no undo step. Live also
+  selects a track a device is inserted on, a new track, and the track of a
+  deleted device when another device stays on it: `build_tracks` and
+  `design_transition` put the selection back at the end, and
+  `manage_device(action="delete")` after any delete. An effect onto the
+  selected track that already has devices needs no put-back (inserting
+  still adds one read before the insert, against 2.4.3), and a failed
+  put-back never hides the error of the insert or load it followed.
+- **Tools keep hold of a track Live renames.** A track still named as Live
+  named it ("1-MIDI") takes the name of an instrument that lands on it
+  ("1-Drift"), by `insert_device` or the browser. `build_drum_kit` then
+  failed after inserting its Drum Rack ("No item named '1-MIDI'"), leaving
+  an empty rack; `add_device` could not disarm the track. Tools that insert
+  or load (`add_device`, `apply_device_chain`, `build_drum_kit`,
+  `browser_load`, `generate_audio`, `install_analyzer`) now address the
+  track by its id and report its current name as `track`.
+- **Limiter "Gain" sets its Input Gain**, not its Output. Live 12.3's
+  Limiter "Gain" is 12.4's "Input Gain"; the general rename "Gain" →
+  "Output" (right for Utility) is no longer applied to it. Renames can now
+  belong to one device (`DEVICE_PARAMETER_RENAMES`).
+- **A Drum Rack inside an Instrument Rack is found.** `get_drum_pads` said
+  "No Drum Rack" for kits like "BNYX Boot Kit"; it,
+  `browser_load(drum_pad=…)`, `build_drum_kit`, drum fills and darbuka
+  mapping now look inside racks' chains (the track's own devices first).
+  `get_drum_pads` names the `rack` when it is nested.
+- **Devices inside racks are found by name** in
+  `set_device_parameter_by_name`, `manage_device`, `rack_control` and the
+  other tools that take a device: the track's own devices first, then
+  rack chains level by level. A name that several nested devices share is
+  an error listing their paths, and a LOM
+  path on that track is accepted as the device ("live_set …" or "id N …";
+  one on another track is refused; a device named like one wins when found
+  at the same or a shallower rack level than the path's device), as
+  are names made only of digits ("808"; else the index, and an error when
+  both an index and a nested device's name fit). `manage_device`
+  deletes a device given by path, id or name, also inside a rack (through
+  its chain).
+- **Failed settings are reported at the top.** `add_device` and
+  `apply_device_chain` return `ok: false` and `errors` (setting → Live's
+  message) when a setting fails, e.g. an EQ Eight filter type Live does not
+  have; before, `add_device` looked successful with the failure inside
+  `settings`. `settings` is now a count ("1 of 2 applied"). `build_tracks`
+  returns a top-level `ok` too.
+- **`run_batch` checks every step before running any**: a step without a
+  `type`, with `params` that are not an object, or a `lom_get`/`lom_set`/
+  `lom_call`/`param_set_display`/`observe` step without `params.path` is
+  refused, naming the step (it ran and answered "Empty path").
+- **`build_arrangement` silences what does not play in a section.** Old
+  Arrangement clips on tracks left out of a section kept playing there
+  (old drums in a rebuilt intro). Clips inside a section's bars on such
+  tracks are deleted, and clips across its edges are cut there first by
+  laying a short copy over them and deleting it (a copy laid over a clip
+  splits it, MIDI and audio alike, in Live 12.4.16). A track with Session
+  clips is cleared wherever it doesn't play; one without (Arrangement-only
+  material such as recorded vocals) only in the sections that name it.
+  Group tracks are skipped; a track that could not be cleared is an error
+  ("Drums: not cleared: …").
+- **`build_arrangement` replaces the old locators**: locators inside the
+  built bars that are not at a section start are deleted.
+- **A clip longer than what is left of a section lands at that length.**
+  Live makes a copy as long as the clip's loop (`loop_end - loop_start`),
+  so loop_end is moved for the copy and put back. An audio clip used to be
+  placed whole (a 16-bar file ran 48 beats past a 4-bar outro), and the
+  rest of a MIDI section was rebuilt from notes only, losing its clip
+  envelopes; both are now copies of the Session clip, envelopes and all.
+  An unwarped audio clip keeps the length Live's warp tempo guess gave it
+  whatever its loop, so its copy is trimmed in the Arrangement instead
+  (each scratch copy past everything on the track, at a place of its own,
+  and deleted whatever fails; one left behind is an error).
+  `build_arrangement`'s errors name the section and track.
+- **`import_midi_file` no longer adds a bar for a release tail**: a last
+  note ending less than 1/4 beat past a bar line made a 9-bar clip of an
+  8-bar file (a note starting on that bar line still keeps the bar).
+- **New audio clips are checked against the file.** Live 12.4.16 warps a
+  new clip at the tempo it guesses (a 40 s click track made at 120 BPM
+  came in as 96 BPM, 64 beats instead of 80), and an unwarped Session clip
+  keeps that guess as its length, so its copies were cut short. The legacy
+  `create_audio_clip`, `build_tracks`' `audio_clips`, `generate_audio` and
+  `separate_stems(to_tracks=True)` (stems of an unwarped source; a warped
+  source's stems are left as Live makes them) report the length in beats,
+  Live's first reading of the file's tempo (`live_guess_bpm`), the tempo
+  its warp markers give it now (`warp_bpm`, warped clips) and the warp
+  markers. A `warning` comes when the length is not
+  what was asked, or when the file lasts whole bars at the set's tempo (as
+  one rendered from a song does) and Live made it another length; a loop
+  made at another tempo is left to Live.
+- **Tools that make Arrangement clips put the playhead back.** Live
+  12.4.16 moves the stopped playhead to every clip that
+  `duplicate_clip_to_arrangement`, `create_midi_clip` or
+  `create_audio_clip` makes in the Arrangement, so `build_arrangement`
+  left it at the last section and `place_locators` restored it there. It
+  goes back after `build_arrangement`, `duplicate_to_arrangement`,
+  `build_tracks`, `build_from_blueprint`, `design_transition`,
+  `write_arrangement_automation`, the generators, `import_midi_file`,
+  `import_from_live_set`, `audio_to_midi` and `manage_clip` with an
+  Arrangement time, and `generate_audio` / `separate_stems` placing audio
+  in the Arrangement.
+
+- **Only the recording tracks record.** `render_and_analyze`,
+  `capture_stems`, `mix_doctor` and `compare_to_reference` stopped the
+  transport and put arms back in one batch, arms first, so re-armed tracks
+  recorded and split their clips (Crank). The transport now stops and
+  record mode goes off first; arms come back in a later command. Tracks
+  with `implicit_arm` (Push's auto-arm, which records in Live 12.4.16) are
+  disarmed for the take too, every arm is read back before anything plays
+  (a track that stays armed stops the render), and the result names the
+  tracks it disarmed (`disarmed_for_take`). `record_automation` turns
+  implicit arms off as well, by track id, and reads the arms back before
+  it plays.
+- **The selection comes back after a recording**; Live had moved it to a
+  neighbour of the deleted temporary track. A scene render stops the clips
+  it launched and puts Back to Arrangement back (Live 12.4.16 left them
+  playing on the stopped transport, overriding the Arrangement).
+- **An empty recording is an error that names Live's audio device.** With
+  "No Device" as Live's output, Live wrote 92-byte WAVs (2 frames) and the
+  render analysed them or said "no audio file was found" (Nerdeysen). A
+  recording must now hold the section: almost no frames is an error that
+  quotes Live's Log.txt about the output device; a take Live cut short
+  (its clip under the section's beats), playback stopping before the end
+  and a take that never reaches it (formerly a silent return at the
+  deadline; it waits as long as a slower scene tempo and 8 bars of the
+  meter need) are errors
+  too. The clip's beats, not the set's tempo, measure
+  a take, so a scene with its own tempo or tempo automation renders.
+  Files are read once their size has held for a second.
+- **Analyses cover the section only**: Live records on until the stop
+  reaches it, so the recording's tail is left out (by the clip's span),
+  and at most 600 s are read (the length reported is the real one). A
+  kept track is disarmed also when the setup stops early.
+- **A scene's tempo no longer stays.** A scene with a tempo of its own
+  changed the set's for good; the set's tempo is put back
+  (`tempo_put_back`). The metronome comes back also when a render stops
+  before playing, and a render whose arms cannot be read back does not
+  record.
+- **No more "Post Mixer" errors in Live's log.** Setting the input
+  channel in the batch that set the inputs failed on all but the first
+  new track (Live still listed Ext. In's channels); Live had set Post
+  Mixer with the input anyway. The channel is now read in a later command
+  and set only where it is not Post Mixer.
+- **`separate_stems` no longer overwrites another file's stems.** An
+  `out_dir` holding stems of another (or an unrecorded) source is refused
+  unless `overwrite=true`; the default folder moves on to "<name> 2" for a
+  second file of the same name, chosen when the job's turn comes (two
+  queued calls cannot pick the same one).
+- **`read_live_set` finds the samples of a moved project.** Live 12.4
+  saves project samples as `RelativePathType` 3, relative to the project;
+  they were looked up only at their old absolute path and reported missing.
+- **Tempo estimates weigh double, half and 3:4 tempos** (a 136 BPM song
+  read as 102): the peak's relations are scored by how well a pulse at
+  that period fits, with a preference around 120 BPM, and replace the
+  peak's tempo only by a clear margin. On 206 synthetic grooves: 140 right
+  against the peak's 119, none lost; the remake song's pattern still reads
+  102, with 136 among the alternatives.
+- **Machine-learning jobs run one at a time**, below Live's priority:
+  four `find_similar_sounds` at once never finished and starved Live
+  until its connection timed out. A queued call says what it waits for.
+
+- **Display values in the wrong unit or out of range are refused**
+  (Remote Script 2.2.0). `param_set_display` (behind setting parameters
+  by text, `"value": "-6 dB"`) clamped them: "40 %" on Drum Buss
+  Transients, which shows -1.00 to 1.00, set 1.00. A unit the parameter
+  does not show is now an error naming what it shows and its range ("'40
+  %' does not fit Transients: it shows plain numbers (no unit), from -1.00
+  to 1.00"), and so is a value past either end ("'5 s' is outside the
+  range of Release, 1.00 ms to 3.00 s"); a value past an end by at most
+  one display step there (to the next display inward) sets the end and
+  says so (`note`:
+  "Attack's lowest is 0.01 ms: set to 0.01 ms" for "0 ms"), however the
+  target is written; a stepped control takes half its last digit, and
+  an end that is not a plain number nothing past it (Hybrid Reverb's Ti
+  Rate "1/128 T", "4 D"; Expansion Ratio "1 : 2.00"). Hz and kHz, ms
+  and s, dB, %, pan ("25L", "C"), ratios ("4:1"), "-inf dB", plain
+  numbers and choice names work as before, and
+  so do other spellings of a unit the parameter shows ("1.5 sec", "300
+  msec", "-6 dBFS", "-1 dBTP", "12 semitones", "11 cents"). Note values
+  ("1/16") and Compressor's expansion ("1:1.5") are now read right; script
+  2.1.0 set them to 1/64 and 1:1.00. A minus typed with a space ("- 6
+  dB", read as +6 dB) or as "−" or "–" is a minus, and "1/0" is
+  refused instead of read as 1.
+- **`set_track_mixer` fails when a part fails.** A refused change came back
+  as a success with `"ok": false` in its text; the call is now an error
+  that names what failed and what was applied.
+- **Tools pass on what was set instead.** A setting that landed on −inf,
+  on the end of the range or on the upper of two displays carries a
+  `note`; `add_device` and `apply_device_chain` list them under `notes`
+  (setting → note), `build_tracks` under each track's `setting_notes`,
+  `set_track_mixer` and the batch summaries on the step, and
+  `set_device_parameter_by_name` and `run_batch` return them as Live's
+  script gave them.
+- **Glue Compressor's Release takes numbers** (Remote Script 2.2.0).
+  It shows ".1" to "1.2", then "A" (Auto), and every number was refused
+  ("Parameter display … is not numeric"); "A" now sets Auto, and a
+  target that is neither says what the parameter shows.
+- **Display values land on the display asked for** (Remote Script 2.2.0).
+  Checked by setting 7 displays of each of 629 parameters in Live 12.4.16
+  (4,403 sets): "12 dB" on Limiter's Input Gain read back "11 dB" (Live
+  keeps a float32, a hair below the edge found), "0.0 %" read "-0.0 %",
+  Operator's Freq<Vel "-50" read "-50.0", "25 lp/bp" on a Filter Morph
+  set "25 no/lp" (its number restarts in each section). Each now reads
+  back as asked. Roar's FB Note takes note names ("F#3"), its Blend
+  splits ("75 / 25"). A level below the lowest a fader shows above −inf
+  ("-80 dB" on a send, "-70 dB" on Compressor's Threshold, lowest −69.7
+  dB) sets −inf, as Live's faders do, and the result says so (`note`);
+  it landed on the lowest number. The crossfader's "25B" sets B (it set
+  A). A value halfway between two displays goes to the larger ("1" on
+  Glue Compressor's Release, between ".8" and "1.2", sets 1.2), with a
+  note. The value set sits in the middle of its display ("C" pan is
+  0.0, not −0.01), and a refused value writes nothing.
+  Resonators' note names with "♯" ("C3" set E4 and reported success),
+  Hybrid Reverb's Ti Rate ("1/32 T", "1 D") and Vintage (Off … Extreme)
+  are read, and "1:4" on Compressor's Ratio is refused (it set 4:1). A
+  result whose display is not what was asked, nor the nearest the
+  parameter shows, is now refused instead of reported as set. A second
+  check set 11 displays of each of 883 parameters (26 effects, 6
+  instruments; 9,713 sets): every one read back as asked.
+- **`{"$ref": <id>}` reaches the object** (Remote Script 2.2.0). An id
+  from an earlier result passed as a bare number ("Unknown root") or as
+  digits now works like `{"$id": N}` and `"id N"`; the error for an
+  unknown root names those forms, and `lom_call_method` mentions `$id`.
+- **Browser searches leave Live half its main thread** (Remote Script
+  2.2.0). Each slice of a walk ran 120 ms, and the next was asked for at
+  once: with a large User Library, `browser_search` and loads by name
+  kept Live unresponsive for minutes. The script now gives a slice no
+  more time than Live had since the last one, and says how long to rest
+  (`rest_ms`); the server asks for 60 ms slices and waits that long. Its
+  time limits (20 s, 3 s after a strong hit) leave those waits out, so a
+  search covers as much ground as before and can take up to twice as
+  long before it reports an unfinished walk. A folder is read item by
+  item instead of copied into a list first.
+  Measured in Live 12.4.16 with a test folder of 100,000 samples in the
+  User Library: with script 2.1.0 a walk of it ran slices of 308 and 413
+  ms and another client's commands waited 396 ms (median, 710 at most);
+  with 2.2.0 a walk of every category (208,705 items, 2.2 s) took 48 % of
+  the main thread and other commands answered in 8 ms (median; 78 ms at
+  the 90th percentile). Listing one folder is still one call in Live
+  (~3 µs an item: 0.33 s for those 100,000), the longest wait left.
+- **Transitions and Arrangement copies leave the selection alone.**
+  `design_transition` onto a "Riser" or "Reverse Cymbal" track that
+  already existed left that track selected (Live 12.4.16, 3 runs of 3),
+  and with such a track around `duplicate_to_arrangement` at 64 and 32
+  left it selected too. Live pins a new track once a clip was copied onto
+  it and the playhead set: a later copy over that clip's span, or the
+  playhead set back into it from outside, selects it again (seen from the
+  next command), and setting the selection back to the track before is
+  ignored until another track is set (deleting that track or its clip ends
+  it). Tools that put the playhead back (`duplicate_to_arrangement`,
+  `build_arrangement`, `write_arrangement_automation`, transitions, clips
+  made in the Arrangement) now also read the selection in the command
+  after and, when it moved, set the selected track and then the user's;
+  the arm put-back retries the same way. Such a tool now costs one
+  selection read more, and one batch more when the selection moved.
+- **`browser_load(item="808")` searches for "808".** Any item made of
+  digits was taken for an id from `browser_search` and failed with
+  "Unknown id 808"; digits that are no browser item's id are now a name
+  (also in `browser_preview` and for samples given to `build_drum_kit`).
+- **`create_locator` as the first call no longer reports the script
+  missing** (`loaded=None`): a capability check made before any
+  connection now connects and asks the script first, and when Live cannot
+  be reached it says so instead of asking for a reinstall.
+
+### Added
+
+- **`set_device_parameter_by_name(pad=…)`** reaches a Drum Rack pad's
+  chain: `device="mixer"` its volume, pan or sends, otherwise the device on
+  that pad (by index or name); an empty pad is an error that says so, and
+  so is a send the Drum Rack has no return chain for (pad sends go to the
+  rack's own returns).
+- **Settings say which parameter they set**: `renamed` in `add_device` and
+  `apply_device_chain`, `asked` and `parameter` in
+  `set_device_parameter_by_name`, when a name was mapped to another.
+- **`build_arrangement` options and reports**: `clear_others=False`
+  keeps every track as it is, `clear_locators=False` the old locators;
+  `cleared` gives per track the clips `removed` and `trimmed`, `kept` the
+  Arrangement-only clips left in sections that don't name their track,
+  `locators_deleted` the locators that went.
+- **`duplicate_to_arrangement(length=…)`** sizes the copy, and the result
+  says where it landed (`start_time`, `end_time`), warning when that is
+  not what was asked, when an unlooped clip's end_marker is before its
+  loop_end (Live copies to loop_end), and when an unwarped clip's length
+  is Live's warp guess rather than what it plays. A `length` of 0 or less
+  is refused.
+- **`import_midi_file(length_bars=…)`** sets the clip's length; notes are
+  cut at its end (`notes_after_the_end` counts those left out).
+- **`create_audio_clip(warping=…, bars=…)`**: `warping=false` plays the
+  file as recorded (it is first warped to its length at the set's tempo,
+  so copies last as long as it plays); `bars` warps the file straight to
+  that length, with a warning when that changes its speed. `bars` with
+  `warping=false` is refused before the clip is made; a clip Live left
+  unwarped is left as it is and the result says so under `notes` (warping
+  it again would drop its end marker). `build_tracks` audio clips take
+  `bars` with `"warping": true`, and file such notes under `notes`.
+- **`design_transition(kind="gap")` cuts audio tracks too** (named in
+  `tracks`; MIDI tracks still get an empty "Gap" clip) and returns each
+  track's clips around the gap (`clips`: `arrangement_clip_index`, start,
+  end), so they need not be read again.
+
+- **`manage_track(action="delete_recording_tracks")`** deletes the
+  "MCP Rec …" tracks `render_and_analyze(keep_track=True)` left; their
+  files stay in Samples/Recorded. It deletes by track id and is refused
+  while one of them is armed or in a take (a render running in this or
+  another session). `render_and_analyze` returns the recording's path
+  (`file`, with `render.played` saying what played), `mix_doctor` its
+  `files`.
+- **Tempo and key confidence**: `analyze_audio_file` and the renders add
+  `tempo_confidence` and `tempo_alternatives_bpm`; `key_estimate` gets
+  `weak` and `or` (the runner-up) when the key is a guess. `observations`
+  note a weak key, an uncertain tempo (confidence under 0.1) and a 4:3 or
+  3:4 tempo scoring 0.75 of the pick's or more ("Tempo 102 BPM; could be
+  136 (4:3): check by ear."; on the benchmark it named one for 7 of 73
+  right picks, none of them click tracks or four on the floor).
+- **`find_similar_sounds(min_score=…, min_seconds=…, max_seconds=…)`**
+  filters weak matches and sustained sounds from one-shots, and the
+  result warns when the best match is weak.
+- **`doctor` checks Live's audio output device** in its Log.txt and warns
+  on "No Device".
+
+### Docs
+
+- CLAUDE.md: parameter displays across Live 12.4.16's devices, the
+  browser's listing costs, and its quit dialog (Cmd+D is Don't Save).
+- The ableton-live skill: read the track's devices before retrying an
+  interrupted call (it may have reached Live), and what `ok`, `errors` and
+  `renamed` mean; pad chain mixers and devices in racks. The mix-and-master
+  skill: check `errors` after `add_device`. CLAUDE.md: Limiter's 12.4
+  parameters, racks and chain mixers, track names following the
+  instrument, and Simpler's reverse, as measured in Live 12.4.16.
+- `run_batch`: a playhead moved in a batch takes effect after it
+  (`set_or_delete_cue` in the same batch toggles at the old position).
+  CLAUDE.md: how Live 12.4.16 sizes copies into the Arrangement, warps and
+  unwarps new audio clips, trims and deletes Arrangement clips, moves the
+  playhead, and names audio tracks after their first clip.
+
+- README Limitations and the ableton-live skill: Live's API cannot save
+  the set; ask the user to save (on macOS, File › Save Live Set with Live
+  in front; a keystroke sent while another app is in front is lost) and
+  check the .als modification time. Recordings stay in the project's
+  Samples/Recorded. CLAUDE.md: implicit arm, recording files, Live's
+  audio device in Log.txt, RelativePathType values in Live 12.4 sets, and
+  CLAP scores, as measured on 2026-11-23.
+
+### Tests
+
+- The ML jobs' priority is set and read with `os.setpriority` /
+  `os.getpriority`: `os.nice(0)` answered 0 on GitHub's macOS runners
+  (BSD's nice()), failing the priority test there.
+- The script's display units, unit and range refusals, bare ids in
+  `$ref`, a walk's share of the main thread and folders read by index
+  (all failed on script 2.1.0), other spellings of units ("1.5 sec" is
+  1.5 s), and the server resting between slices without counting the
+  rests against its time limits.
+- `fake_live`: Live 12.4.16's Limiter parameters, Instrument Racks
+  (`FakeRack`) and chain mixers, Simpler's reverse as a copy in
+  `Processed/Reverse`, tracks named after what loads onto them, the
+  browser loading onto a Drum Rack inside a rack, an "FX Hit" folder that
+  lists "Impact Layered Reversed" first and a "Crash Reverse Swell" listed
+  before "Crash 505". Tests for each fix above.
+- `fake_live`: a clip's length is its loop (copies take it), unlooped
+  Arrangement clips end at loop_end, warping off turns the loop off and
+  keeps times in seconds (an unwarped Session clip keeping its length),
+  warp markers with Live's shadow marker, `move_warp_marker`,
+  `remove_warp_marker`, the tempo Live reads a file at (`FILE_TEMPOS`, WAV
+  length read from the file), `Track.delete_clip`, copies replacing the
+  clips they cover (a covered or deleted clip can no longer be read or
+  changed, until undo brings it back), and the playhead following new
+  Arrangement clips.
+- `tests/test_render.py` answers recording like Live 12.4.16 (arm and
+  implicit arm, the selection, tracks recording while Live plays with
+  record mode on) and checks each recording fix above; a moved project
+  for `read_live_set`; a tempo benchmark (`tests/tempo_bench.py`: click
+  tracks, house, trap, drill, boom bap, half-time, drum and bass,
+  reggaeton, waltzes, the remake song's pattern) that must never lose a
+  tempo the peak alone got right; two ML jobs at once; stems of two
+  sources in one folder.
+  `fake_live` tracks have `implicit_arm`.
+- `fake_live` pins a selection as measured in Live 12.4.16
+  (`FakeSongView`): a new track, a clip copied onto it and the playhead
+  set; from outside its span, a copy over it or a playhead set into it
+  selects it after the command, and a set back to the track before is
+  ignored; deleting the track or its clip ends it. Tests for the three fixes
+  above and capability checks before any connection, with and without
+  Live.
 
 ## 2.4.3 — 2026-11-16
 

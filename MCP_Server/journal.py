@@ -55,9 +55,10 @@ READ_ONLY_METHODS = frozenset([
 # Properties and methods whose changes Live keeps out of the undo history
 # (measured on 12.4: transport, playhead, selection, loop, metronome, arm,
 # solo, the record, punch, overdub and automation-arm buttons, back to
-# arrangement; the other view state by the same rule)
+# arrangement; implicit_arm on 12.4.16; the other view state by the same rule)
 NO_UNDO_PROPERTIES = frozenset([
-    "is_playing", "current_song_time", "start_time", "loop", "metronome", "arm", "solo", "record_mode",
+    "is_playing", "current_song_time", "start_time", "loop", "metronome", "arm", "implicit_arm",
+    "solo", "record_mode",
     "punch_in", "punch_out", "session_automation_record", "arrangement_overdub",
     "session_record", "back_to_arranger",
     "selected_track", "selected_scene", "selected_parameter", "selected_chain",
