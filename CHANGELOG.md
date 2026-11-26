@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.5.1 — 2026-11-26
 
 Server only; the Remote Script is unchanged. Each fix comes from a problem
 met while remaking a song in Live 12.4.16 (Geriye Kalan, 2026-11-26), and
