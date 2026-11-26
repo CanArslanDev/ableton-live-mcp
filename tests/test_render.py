@@ -615,3 +615,28 @@ def test_the_launch_wait_follows_the_meter(tmp_path, monkeypatch):
                    song={"loop": False, "current_song_time": 0.0, "start_time": 0.0,
                          "signature_numerator": 7})
     assert _render(live, scene=0, length_beats=1)["render"]["mode"] == "session"
+
+
+def test_a_cancelled_render_still_cleans_up(wav):
+    """Geriye Kalan: the user stopped a render mid-take and its "MCP Rec …"
+    track stayed in the set. The SDK cancels a request through an anyio
+    cancel scope, where every await in a cleanup raises again, so cleanups
+    run shielded: the track goes, the transport stops, arms come back."""
+    import anyio
+
+    live = RecLive({"master": wav}, stuck=True)
+    mcp = MCPServer("t")
+    extended_tools.register(mcp, lambda: live)
+    live._length = 4.0
+
+    async def main():
+        with anyio.move_on_after(0.6):
+            await mcp.call_tool("render_and_analyze", {"length_beats": 4})
+        raise AssertionError("the render should still be waiting for its take")
+
+    with pytest.raises(AssertionError, match="still be waiting"):
+        asyncio.run(main())
+    assert live.deleted == [RENDER_ID]
+    assert live.song["is_playing"] is False and live.song["record_mode"] is False
+    assert live.song["metronome"] is True and live.song["loop"] is True
+    assert live.tracks[0]["arm"] is True

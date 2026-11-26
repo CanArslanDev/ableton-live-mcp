@@ -156,7 +156,8 @@ def tempo_estimate(mono: np.ndarray, rate: int) -> dict | None:
     envelope's autocorrelation, None for steady material.
 
     The strongest peak between 70 and 180 BPM proposes a tempo; it and its
-    relations (TEMPO_RELATIONS, kept within 60-200 BPM) are scored by how
+    relations (TEMPO_RELATIONS, kept within 60-200 BPM; the peak's own
+    tempo always, which its refinement can take a little past 200) are scored by how
     well a pulse at that period lines up with the autocorrelation (its mean
     over the first 8 multiples of the period: a beat repeats at every
     multiple, a 4:3 or 2:1 cousin only at every third or second) times a
@@ -214,7 +215,11 @@ def tempo_estimate(mono: np.ndarray, rate: int) -> dict | None:
     scored = []
     for relation in TEMPO_RELATIONS:
         tempo = 60 * fps / first * relation
-        if 60 <= tempo <= 200:
+        # The peak's own tempo always competes: refined uphill from a lag at
+        # the window's edge it can land past 200 BPM (a broad peak at 25.6
+        # frames, 202 BPM at 44.1 kHz), which left nothing for next() below
+        # and failed render_and_analyze with StopIteration (Geriye Kalan)
+        if relation == 1.0 or 60 <= tempo <= 200:
             prior = float(np.exp(-0.5 * np.log2(tempo / 120.0) ** 2))
             scored.append((max(pulse(first / relation), 0.0) * prior, relation))
     scored.sort(reverse=True)

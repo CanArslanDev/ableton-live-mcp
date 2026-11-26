@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased
+
+Server only; the Remote Script is unchanged. Each fix comes from a problem
+met while remaking a song in Live 12.4.16 (Geriye Kalan, 2026-11-26), and
+each was checked there in a new set.
+
+### Fixed
+
+- **A cancelled render no longer leaves its "MCP Rec …" track behind.**
+  The SDK cancels a request through an anyio cancel scope, where every
+  await in a `finally` raises again, so the cleanup never ran: the
+  temporary track stayed in the set (it would have played the section
+  twice in a later render). Cleanups in `render_and_analyze` /
+  `capture_stems` / `mix_doctor` (`record_section`), `record_automation`,
+  `measure_levels`, `read_analyzer` and the playhead put-back now run
+  shielded (`shielded()`). In Live, a render cancelled 4 s into a take
+  left "MCP Rec master" before and nothing after; transport, record mode,
+  metronome and arms came back.
+- **`render_and_analyze` no longer fails with StopIteration** in the tempo
+  estimate. The strongest lag in the 70–180 BPM window could sit on the
+  slope of a broad peak; refined uphill it read past 200 BPM, the peak's
+  own tempo was never scored, and `next()` had nothing to return. The
+  peak's own tempo now always competes.
+- **Browser ids from before another set was opened load again.** Live
+  restarts the Remote Script when a set is opened, and the ids from
+  `browser_search` go with it (`browser_load(<old id>)` said "Nothing in
+  the browser matches '5465530768'"). The server remembers the name and
+  uri of the items it listed and finds them again (also when the old
+  id's address now holds another item); an id it never listed, whose
+  digits name nothing either, says the id is gone instead of "Nothing in
+  the browser matches".
+- **Settings on an EQ Eight band that is off switch the band on.** Live
+  12.4.16 inserts EQ Eight with bands 5–8 off, so a low-pass set on band 8
+  was never heard while `add_device` said `ok` (twice, in two songs).
+  `add_device`, `apply_device_chain`, `build_tracks` and
+  `set_device_parameter_by_name` turn on the band whose type, frequency,
+  gain or Q they set (in the same command, so one undo step) and say so
+  (`switched_on`); a switch given with the settings is left as given. The
+  fake's EQ Eight now starts with bands 1–4 on, as Live's does.
+- **Loading a preset over a rack preset is no longer reported as "the
+  track's devices did not change".** Live loads a rack preset over a rack
+  in place: the device keeps its id (Basic Mellow Pad → Mellow Tine Keys
+  kept 14488792248), only its name changes. `browser_load` now compares
+  ids and names; the same preset loaded again says so (`note`: Live
+  reloaded it, so its settings are the preset's again), and the
+  warning is kept for a load that changed nothing ("Live loaded
+  nothing: …").
+- **A parameter name the device lacks gets the likely ones.** Utility's
+  "Width" is "Stereo Width": `add_device` reports `did_you_mean`, and
+  `set_device_parameter_by_name` says "did you mean 'Stereo Width'?"
+  instead of a list of names. A name in another case ("stereo width") is
+  taken as the device's own, as before.
+
 ## 2.5.0 — 2026-11-24
 
 Remote Script 2.2.0: reinstall it (`ableton-mcp-install-script`) and restart

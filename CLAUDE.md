@@ -793,6 +793,26 @@ Script 2.2.0:
   `browser_search`, `run_batch` with `param_set_display` and the LOM tools
   work; its `doctor` reports the script as outdated (two warnings).
 
+Measured on 2026-11-26 (Live 12.4.16 Trial, new sets made with File >
+New) for the fixes after the Geriye Kalan remake:
+
+- **Opening a set restarts the Remote Script.** The server's connection
+  read "Remote end closed" and reconnected, and a browser id from
+  `browser_search` in the old set read "Unknown id" in the new one.
+  `BROWSER_SEEN` keeps the name and uri of the items the server listed,
+  and `browser_item_id` finds such an id again by them.
+- **A rack preset loads over a rack in place**: Basic Mellow Pad → Mellow
+  Tine Keys and back kept the Instrument Rack's id, and the devices inside
+  kept theirs too, only the names changed; the same preset loaded again
+  changed nothing readable. `load_items` compares ids with names.
+- **EQ Eight is inserted with bands 1–4 on and 5–8 off** (side A; side B
+  read 1 off, 2 off, 3–6 on, 7–8 off). "N Filter On A" is quantized
+  (Off, On). Settings on a band that is off turn it on (`band_switches`).
+- **A cancelled tool call** (the SDK's anyio cancel scope) raised again at
+  every await in a `finally`: a render cancelled 4 s into its take left
+  "MCP Rec master" in the set. `shielded()` around the cleanup removed it
+  and gave back transport, record mode, metronome and arms.
+
 Not verified in Live (check each in a scratch set before claiming it):
 
 - The start put back on stems by `separate_stems(to_tracks=True)` (the

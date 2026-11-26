@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import difflib
 import functools
 import json
 import logging
@@ -25,8 +26,9 @@ import shlex
 import tempfile
 import time
 from pathlib import Path
-from typing import Annotated, Any, Callable, Literal
+from typing import Annotated, Any, Callable, Iterable, Literal
 
+import anyio
 from mcp.server.elicitation import AcceptedElicitation, ElicitationResult
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.resolve import Elicit, Resolve
@@ -121,6 +123,15 @@ def send(command: str, params: dict | None = None, timeout: float | None = None)
 async def asend(command: str, params: dict | None = None,
                 timeout: float | None = None) -> Any:
     return await asyncio.to_thread(send, command, params, timeout)
+
+
+def shielded() -> anyio.CancelScope:
+    """Wrap the cleanup in an async tool's `finally` (stop the transport,
+    delete temporary tracks, give arms back) so a cancelled call still runs
+    it to the end. The SDK cancels a request through an anyio cancel scope,
+    where every later await raises again: unshielded, a render the user
+    stopped left its "MCP Rec …" track in the set (Geriye Kalan, 2026-11-26)."""
+    return anyio.CancelScope(shield=True)
 
 
 async def report_progress(ctx: Context | None, done: float, total: float | None,
@@ -811,10 +822,11 @@ async def keeping_the_playhead(step: Any) -> Any:
     try:
         return await step
     finally:
-        try:
-            await asyncio.to_thread(put_back_playhead, before)
-        except Exception as e:  # never in place of the step's own result or error
-            logger.warning("Could not put the playhead and the selection back: %s", e)
+        with shielded():
+            try:
+                await asyncio.to_thread(put_back_playhead, before)
+            except Exception as e:  # never in place of the step's own result or error
+                logger.warning("Could not put the playhead and the selection back: %s", e)
 
 
 # The playhead and the selected track, read in one batch (playhead_put_back)
@@ -964,16 +976,100 @@ def resolve_parameter_names(device: str, names: list[str]) -> dict[str, str]:
     from Live 12.3 ("Output Gain") also works on 12.4 ("Output") and back."""
     present = {p.get("name") for p in send("lom_get", {
         "path": f"{device} parameters", "properties": ["name"], "ids": False})["items"]}
+    return names_on(device, names, present)
+
+
+def names_on(device: str, names: list[str], present: set) -> dict[str, str]:
+    """resolve_parameter_names over parameter names already read."""
     mapping, class_name = {}, None
     for name in names:
         if name in present or isinstance(name, int) or str(name).isdigit():
             mapping[name] = name
             continue
+        # Live's script matches a name in any case ("stereo width"); the
+        # device's own spelling is what band switches and reports go by
+        by_case = {str(p).lower(): p for p in present if isinstance(p, str)}
+        if str(name).lower() in by_case:
+            mapping[name] = by_case[str(name).lower()]
+            continue
         if class_name is None:
             class_name = str(lom_get(device, ["class_name"]).get("class_name"))
-        mapping[name] = next((alias for alias in parameter_aliases(name, class_name)
-                              if alias in present), name)
+        mapping[name] = next((by_case[alias.lower()] for alias in
+                              parameter_aliases(name, class_name)
+                              if alias.lower() in by_case), name)
     return mapping
+
+
+def close_names(name: str, present: Iterable[str]) -> list[str]:
+    """Parameter names a missing one probably meant: those holding it as
+    whole words ("Width" -> "Stereo Width" on Utility), then near spellings."""
+    present = [p for p in present if isinstance(p, str)]
+    words = str(name).lower().split()
+    holding = [p for p in present
+               if words and all(w in p.lower().split() for w in words)]
+    near = difflib.get_close_matches(str(name), present, n=3, cutoff=0.6)
+    return list(dict.fromkeys(holding + near))[:4]
+
+
+# An EQ Eight band's own settings, and the switch that makes them heard
+EQ_BAND_SETTING = re.compile(r"(\d) (?:Filter Type|Frequency|Gain|Q|Resonance) ([AB])")
+
+
+def band_switches(names: Iterable[str], values: dict[str, Any]) -> list[str]:
+    """The EQ Eight band switches ("8 Filter On A") to turn on because a
+    band's type, frequency, gain or Q is set while it is off. Live 12.4.16
+    starts bands 5-8 off (1-4 on, side A): set alone, a low-pass on band 8
+    did nothing, twice (Chill, Geriye Kalan). A switch set among the same
+    settings is left as given. values: the device's parameters by name."""
+    asked = [str(n) for n in names]
+    switches = []
+    for name in asked:
+        band = EQ_BAND_SETTING.fullmatch(name)
+        if band:
+            switch = f"{band.group(1)} Filter On {band.group(2)}"
+            if switch not in asked and values.get(switch) == 0.0 and switch not in switches:
+                switches.append(switch)
+    return switches
+
+
+def prepared_settings(device: str, settings: dict[str, Any]) -> tuple[list[dict], dict, dict]:
+    """(batch steps, setting -> parameter name, report extras) for settings
+    on one device, read in one round trip: names mapped across Live
+    versions, EQ Eight bands switched on (`switched_on`), and likely names
+    for ones the device lacks (`did_you_mean`). The settings' own steps come
+    first, in order (setting_report counts on that)."""
+    params = send("lom_get", {"path": f"{device} parameters", "properties": ["name", "value"],
+                              "ids": False})["items"]
+    values = {p.get("name"): p.get("value") for p in params}
+    names = names_on(device, list(settings), set(values))
+    ops = setting_ops(device, settings, names)
+    extras: dict[str, Any] = {}
+    switches = band_switches(names.values(), values)
+    if switches:
+        ops += [op_set(f"{device} parameters {selector(w)}", "value", 1.0) for w in switches]
+        extras["switched_on"] = switches
+    missing = {asked: close_names(actual, values) for asked, actual in names.items()
+               if actual not in values and not str(actual).isdigit()}
+    missing = {asked: found for asked, found in missing.items() if found}
+    if missing:
+        extras["did_you_mean"] = missing
+    return ops, names, extras
+
+
+def switch_failures(report: dict, applied: dict, first: int, switches: list[str]) -> None:
+    """Move band switches whose step (from index `first` on, in order) failed
+    from report["switched_on"] to report["errors"]."""
+    failed = {}
+    for k, switch in enumerate(switches):
+        steps = applied["steps"]
+        step = steps[first + k] if first + k < len(steps) else None
+        if isinstance(step, dict) and "error" in step:
+            failed[switch] = step["error"]
+    if failed:
+        report.setdefault("errors", {}).update(failed)
+        report["switched_on"] = [w for w in switches if w not in failed]
+        if not report["switched_on"]:
+            del report["switched_on"]
 
 
 def renamed(names: dict[str, str]) -> dict[str, str]:
@@ -1158,6 +1254,13 @@ ANALYSIS_MAX_S = 600.0
 # Ids of the temporary tracks of takes running in this server
 # (delete_recording_tracks leaves them alone)
 RECORDING: set[int] = set()
+
+# Browser items this server listed: id -> (name, uri, category). Live drops
+# the ids when another set is opened (Live 12.4.16, 2026-11-26: an id from
+# browser_search in one set read "Unknown id" after File > New), so an id
+# seen before is found again by its name and uri.
+BROWSER_SEEN: dict[int, tuple[str, str, str]] = {}
+BROWSER_SEEN_MAX = 4096
 
 
 def rows_of(step: dict) -> list[dict]:
@@ -3928,10 +4031,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         device_id = ids[0]
         result: dict[str, Any] = {"ok": True, "device": device, "track": name, "id": device_id}
         if settings:
-            names = resolve_parameter_names(f"id {device_id}", list(settings))
-            applied = batch_summary(batch(
-                setting_ops(f"id {device_id}", settings, names), stop_on_error=False))
-            result.update(setting_report(list(settings), names, applied))
+            ops, names, extras = prepared_settings(f"id {device_id}", settings)
+            applied = batch_summary(batch(ops, stop_on_error=False))
+            result.update(setting_report(list(settings), names, applied), **extras)
+            switch_failures(result, applied, len(settings), extras.get("switched_on", []))
         return to_json(result)
 
     @tool
@@ -3957,12 +4060,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              "this one (usually the kick or drums)")
         source = track_name(sidechain_from) if sidechain_from is not None else None
         ids = inserted_device_ids(track_path(track), [[name] for name, _settings in spec["devices"]])
-        ops, asked, names = [], [], {}
+        ops, asked, names, switched = [], [], {}, []
         for (name, settings), device_id in zip(spec["devices"], ids):
-            mapping = resolve_parameter_names(f"id {device_id}", list(settings))
+            params = send("lom_get", {"path": f"id {device_id} parameters",
+                                      "properties": ["name", "value"], "ids": False})["items"]
+            values = {p.get("name"): p.get("value") for p in params}
+            mapping = names_on(f"id {device_id}", list(settings), set(values))
             ops += setting_ops(f"id {device_id}", settings, mapping)
             asked += [f"{name}: {s}" for s in settings]
             names.update({f"{name}: {k}": f"{name}: {v}" for k, v in mapping.items()})
+            switched += [(f"id {device_id}", f"{name}: {w}")
+                         for w in band_switches(mapping.values(), values)]
         if sidechain_from is not None:
             compressor = f"id {ids[0]}"
             ops.append(op_set(compressor, "input_routing_type", ref(
@@ -3970,10 +4078,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 f"{named(f'{compressor} available_input_routing_types', source)}")))
         if sidechain_from is not None:
             asked.append("sidechain")
+        # after the settings and the sidechain: setting_report counts steps in order
+        ops += [op_set(f"{device} parameters {selector(label.split(': ', 1)[1])}", "value", 1.0)
+                for device, label in switched]
         applied = batch_summary(batch(ops, stop_on_error=False))
+        report = setting_report(asked, names, applied)
+        if switched:
+            report["switched_on"] = [label for _device, label in switched]
+            switch_failures(report, applied, len(asked), report["switched_on"])
         return to_json(dict({"chain": chain, "description": spec["description"],
                              "devices": [name for name, _settings in spec["devices"]]},
-                            **setting_report(asked, names, applied)))
+                            **report))
 
     def find_sample(query: str, wait_s: float = 0.0) -> tuple[int, str]:
         """(id, path) of a browser sample: an exact file name when the query has
@@ -4247,7 +4362,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         sidechains.append((device_id, str(fx["sidechain_from"]), spec["name"]))
             for device, settings in chain:
                 if settings:
-                    ops += setting_ops(device, settings, resolve_parameter_names(device, list(settings)))
+                    steps, _names, extras = prepared_settings(device, settings)
+                    ops += steps
+                    if extras.get("switched_on"):
+                        row.setdefault("switched_on", []).extend(extras["switched_on"])
+                    if extras.get("did_you_mean"):
+                        row.setdefault("did_you_mean", {}).update(extras["did_you_mean"])
             if spec.get("volume_db") is not None:
                 ops.append(op_display(f"{tp} mixer_device volume", f"{float(spec['volume_db']):.1f} dB"))
             if spec.get("pan") is not None:
@@ -4674,8 +4794,19 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         else:
             chain = None
             dp = None if is_mixer(device) else device_path(track, device)
+        switch = None
         if dp is not None and isinstance(parameter, str) and not parameter.strip().isdigit():
-            parameter = resolve_parameter_names(dp, [parameter])[parameter]
+            params = send("lom_get", {"path": f"{dp} parameters", "properties": ["name", "value"],
+                                      "ids": False})["items"]
+            values = {p.get("name"): p.get("value") for p in params}
+            parameter = names_on(dp, [parameter], set(values))[parameter]
+            if parameter not in values:
+                likely = close_names(parameter, values)
+                if likely:
+                    raise ValueError(f"No parameter named {asked!r} on this device; did you "
+                                     f"mean {' or '.join(map(repr, likely))}?")
+            if value is not None or display_value is not None:
+                switch = next(iter(band_switches([parameter], values)), None)
         if dp is not None:
             pp = f"{dp} parameters {selector(parameter)}"
         else:
@@ -4685,7 +4816,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     lom_get(f"{rack} return_chains", ["name"])["items"]):
                 raise ValueError(f"This Drum Rack has no return chain {send_index.group(1)}: "
                                  "pad sends go to the rack's own returns, not the set's")
-        if display_value is not None:
+        if switch is not None:
+            # the band was off, so the setting would not be heard: switch it
+            # on in the same command (one undo step)
+            done = batch([op_display(pp, display_value) if display_value is not None
+                          else op_set(pp, "value", float(value)),
+                          op_set(f"{dp} parameters {selector(switch)}", "value", 1.0)])
+            first = done["results"][0]
+            if first.get("status") == "error":
+                raise RuntimeError(first.get("message") or "the setting failed")
+            result = dict(first.get("result") or {}, switched_on=switch)
+        elif display_value is not None:
             result = send("param_set_display", {"path": pp, "value": display_value})
         elif value is None:
             result = lom_get(pp, ["name", "value", "min", "max", "is_quantized", "value_items"])
@@ -4823,6 +4964,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             except AbletonCommandError as e:  # the walk ended on its own meanwhile
                 logger.debug("Browser walk %s already gone: %s", walk_id, e)
         ranked = sorted(found, key=lambda e: (enough is None or not enough(e), rank(e)))
+        for e in ranked[:max_results]:
+            BROWSER_SEEN.pop(e["$id"], None)
+            BROWSER_SEEN[e["$id"]] = (e["name"], e["uri"], category)
+        while len(BROWSER_SEEN) > BROWSER_SEEN_MAX:
+            BROWSER_SEEN.pop(next(iter(BROWSER_SEEN)))
         return {"query": query, "category": category, "complete": done, "searched": visited,
                 "seconds": round(time.monotonic() - started, 1), "matches": len(found),
                 "results": [{"id": e["$id"], "name": e["name"], "kind": e["kind"],
@@ -4833,16 +4979,31 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         """(id, name) for a browser_search id or a search query; digits that
         are no browser item's id ("808") are searched for as a name."""
         text = str(item).strip()
+        stale = False
         if isinstance(item, int) or re.fullmatch(r"\d+", text):
             try:
                 found = lom_get(f"id {int(text)}", ["name", "uri"])
             except AbletonCommandError as e:
                 if "Unknown id" not in str(e):
                     raise
-                found = {}
-            if isinstance(found.get("uri"), str):  # a browser item (others have no uri)
+                found, stale = {}, True
+            listed = BROWSER_SEEN.get(int(text))
+            if isinstance(found.get("uri"), str) and listed is not None \
+                    and found["uri"] != listed[1]:
+                # ids are object addresses: after the script restarted, the
+                # address of an item this server listed can hold another one
+                stale = True
+            elif isinstance(found.get("uri"), str):  # a browser item (others have no uri)
                 name = found.get("name")
                 return int(text), name if isinstance(name, str) else text
+            seen = listed if stale else None
+            if seen is not None:  # listed before another set was opened: look again
+                name, uri, where = seen
+                again = search_browser(name, where, max_results=25, time_limit=3.0,
+                                       patience=20.0, enough=lambda e: e["uri"] == uri)
+                same = [h for h in again["results"] if h["uri"] == uri]
+                if same:
+                    return same[0]["id"], same[0]["path"]
         # an exact name ends the walk; otherwise 25 strong hits or 3 s after
         # the first (a whole large User Library walked kept Live busy for
         # minutes); with nothing found yet it goes on for up to 20 s
@@ -4850,11 +5011,25 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                                 patience=20.0,
                                 enough=lambda e: same_name(str(item), e["name"]))
         hits = search["results"]
+        if not hits and stale:
+            raise ValueError(f"{text} is not a browser item's id any more, and no item is "
+                             f"named so: ids from browser_search last until another set is "
+                             "opened or Live restarts. Search again and use the new id "
+                             "(or pass the item's name).")
         if not hits:
             raise ValueError(f"Nothing in the browser ({category}) matches {item!r}"
                              + incomplete(search))
         best = by_name_match(str(item), hits)[0]
         return best["id"], best["path"]
+
+    def browser_item_name(item_id: int) -> str | None:
+        """A browser item's name as a device shows it: without its file's
+        extension ("Mellow Tine Keys.adg" loads as "Mellow Tine Keys")."""
+        try:
+            name = lom_get(f"id {item_id}", ["name"]).get("name")
+        except AbletonCommandError:
+            return None
+        return re.sub(r"\.(adg|adv|amxd)$", "", name, flags=re.I) if isinstance(name, str) else None
 
     def incomplete(search: dict) -> str:
         """Why a search found nothing, when its walk did not finish."""
@@ -4887,7 +5062,11 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             rack = drum_rack_path(track, tid)
             if rack is None:
                 raise ValueError("No Drum Rack on this track (nor inside its racks) for drum_pad")
-        before = [d["$id"] for d in lom_get(f"{tid} devices", ["name"])["items"]]
+        # Live loads a rack preset over a rack in place: the device keeps its
+        # id (and so do the devices inside), only its name changes (Live
+        # 12.4.16, 2026-11-26: Basic Mellow Pad -> Mellow Tine Keys kept id
+        # 14488792248), so a load is seen by ids and names together
+        before = [(d["$id"], d.get("name")) for d in lom_get(f"{tid} devices", ["name"])["items"]]
         steps: list[dict] = []
         # the user's selection, and arms Live changes as an item lands
         with arms_put_back():
@@ -4938,9 +5117,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     result["pads"][str(pad["note"])] = pad.get("name")
                 else:
                     s["error"] = "the pad is still empty"
-        if any("drum_pad" not in s and "error" not in s for s in steps) \
-                and [d["$id"] for d in devices] == before:
-            result["warning"] = "the track's devices did not change"
+        loaded = [s for s in steps if "drum_pad" not in s and "error" not in s]
+        if loaded and [(d["$id"], d.get("name")) for d in devices] == before:
+            names = {str(d.get("name")) for d in devices}
+            held = [n for s in loaded for n in [browser_item_name(s["item"])] if n in names]
+            if held:  # the same preset or device again: Live reloads it into the same device
+                result["note"] = (f"the track already held {', '.join(held)}; Live loaded "
+                                  "it again into the same device (its settings are the "
+                                  "preset's again)")
+            else:
+                result["warning"] = ("Live loaded nothing: the track's devices did not change "
+                                     "(same devices, same names)")
         result["ok"] = not any("error" in s for s in steps)
         result["steps"] = steps
         return result
@@ -4955,8 +5142,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         sounds | drums (kits and one-shots in Drum Hits) | instruments |
         audio_effects | midi_effects | max_for_live | plugins | clips |
         samples | user_library | packs | current_project.
-        Results carry an id for browser_load and browser_preview (valid until
-        Live restarts).
+        Results carry an id for browser_load and browser_preview (Live drops
+        ids when another set is opened; this server finds ones it listed again).
         """
         return to_json(search_browser(query, category, max(1, min(int(max_results), 200))))
 
@@ -4985,8 +5172,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                   "devices": result["devices"]}
         if note is not None:
             loaded["pad_name"] = result["pads"].get(str(note))
-        if result.get("warning"):
-            loaded["warning"] = result["warning"]
+        for key in ("warning", "note"):
+            if result.get(key):
+                loaded[key] = result[key]
         return to_json(loaded)
 
     @tool(read_only=True)
@@ -5716,16 +5904,17 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                             break
                     await asyncio.sleep(0.02)
             finally:
-                await set_song("record_mode", False)
-                await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
-                if reports:
-                    await asyncio.wait(reports, timeout=2)
-                await asend("batch", {"commands": [
-                    op_set("live_set", key, song[key]) for key in
-                    ("loop", "punch_in", "punch_out", "session_automation_record",
-                     "current_song_time")]
-                    + disarm_ops(armed, implicit, on=True),
-                    "stop_on_error": False})
+                with shielded():
+                    await set_song("record_mode", False)
+                    await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
+                    if reports:
+                        await asyncio.wait(reports, timeout=2)
+                    await asend("batch", {"commands": [
+                        op_set("live_set", key, song[key]) for key in
+                        ("loop", "punch_in", "punch_out", "session_automation_record",
+                         "current_song_time")]
+                        + disarm_ops(armed, implicit, on=True),
+                        "stop_on_error": False})
         journal.add_steps(steps)
         return to_json({"parameter": info["name"], "from_beat": s, "to_beat": e,
                         "points": written, "held": hold, "seconds": round(seconds, 1),
@@ -6277,11 +6466,12 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         temp: dict[str, int] = {}
         tempo_back = False
         try:
-            created = await asend("batch", {"commands": [
-                step for _source in sources for step in (
-                    op_call("live_set", "create_audio_track", -1),
-                    {"type": "lom_get", "params": {"path": new, "properties": ["name"]}})],
-                "stop_on_error": False})
+            with shielded():  # cancelled while Live makes them, they'd be left unnamed
+                created = await asend("batch", {"commands": [
+                    step for _source in sources for step in (
+                        op_call("live_set", "create_audio_track", -1),
+                        {"type": "lom_get", "params": {"path": new, "properties": ["name"]}})],
+                    "stop_on_error": False})
             steps = created.get("results", [])
             for k, (label, _input) in enumerate(sources):
                 got = steps[2 * k + 1] if len(steps) > 2 * k + 1 else {}
@@ -6372,52 +6562,54 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 await take(session, temp, slot, start, length_beats, slowest,
                            len(sources), ctx, launch_beats=8 * bar)
             finally:
-                # The transport stops and record mode goes off first; arms come
-                # back in a later command (Crank: arms restored in the same
-                # batch as the stop recorded on those tracks and split clips)
-                stop = [op_set(f"id {i}", "arm", False) for i in temp.values()]
-                if not session or not song["is_playing"]:
-                    stop.insert(0, op_call("live_set", "stop_playing"))
-                if not session:
-                    stop.insert(1, op_set("live_set", "record_mode", song["record_mode"]))
-                    stop += [op_set("live_set", "loop", song["loop"]),
-                             op_set("live_set", "start_time", float(song.get("start_time", 0.0)))]
-                if session and not song["is_playing"]:
-                    # Live 12.4.16 left the launched clips playing on a stopped
-                    # transport, overriding the Arrangement (Back to Arrangement lit)
-                    stop.append(op_call("live_set", "stop_all_clips", False))
-                    if isinstance(song.get("back_to_arranger"), bool):
-                        stop.append(op_set("live_set", "back_to_arranger",
-                                           song["back_to_arranger"]))
-                if not session or not song["is_playing"]:
-                    stop.append(op_set("live_set", "current_song_time",
-                                       float(song["current_song_time"])))
-                # A scene with a tempo of its own changes the set's
-                stop.append({"type": "lom_get", "params": {"path": "live_set",
-                                                           "properties": ["tempo"]}})
-                stopped = await asend("batch", {"commands": stop, "stop_on_error": False})
-                after = (stopped.get("results") or [{}])[-1].get("result") or {}
-                if scene_index is not None and isinstance(after.get("tempo"), (int, float)) \
-                        and abs(after["tempo"] - float(song["tempo"])) > 1e-6:
-                    tempo_back = True
+                with shielded():
+                    # The transport stops and record mode goes off first; arms come
+                    # back in a later command (Crank: arms restored in the same
+                    # batch as the stop recorded on those tracks and split clips)
+                    stop = [op_set(f"id {i}", "arm", False) for i in temp.values()]
+                    if not session or not song["is_playing"]:
+                        stop.insert(0, op_call("live_set", "stop_playing"))
+                    if not session:
+                        stop.insert(1, op_set("live_set", "record_mode", song["record_mode"]))
+                        stop += [op_set("live_set", "loop", song["loop"]),
+                                 op_set("live_set", "start_time", float(song.get("start_time", 0.0)))]
+                    if session and not song["is_playing"]:
+                        # Live 12.4.16 left the launched clips playing on a stopped
+                        # transport, overriding the Arrangement (Back to Arrangement lit)
+                        stop.append(op_call("live_set", "stop_all_clips", False))
+                        if isinstance(song.get("back_to_arranger"), bool):
+                            stop.append(op_set("live_set", "back_to_arranger",
+                                               song["back_to_arranger"]))
+                    if not session or not song["is_playing"]:
+                        stop.append(op_set("live_set", "current_song_time",
+                                           float(song["current_song_time"])))
+                    # A scene with a tempo of its own changes the set's
+                    stop.append({"type": "lom_get", "params": {"path": "live_set",
+                                                               "properties": ["tempo"]}})
+                    stopped = await asend("batch", {"commands": stop, "stop_on_error": False})
+                    after = (stopped.get("results") or [{}])[-1].get("result") or {}
+                    if scene_index is not None and isinstance(after.get("tempo"), (int, float)) \
+                            and abs(after["tempo"] - float(song["tempo"])) > 1e-6:
+                        tempo_back = True
             recorded = await recorded_files(temp, slot if session else None, length_beats)
         finally:
-            try:
-                if not keep_tracks:
-                    for track_id in temp.values():
-                        await delete_track_by_id(track_id)
-            finally:
-                RECORDING.difference_update(temp.values())
-                # Live selects each new track and a neighbour of a deleted one
-                # kept temporary tracks too: a setup that stopped early left them armed
-                back = [op_set(f"id {i}", "arm", False) for i in temp.values()
-                        if keep_tracks] + disarm_ops(armed, implicit, on=True)
-                back.append(op_set("live_set", "metronome", song["metronome"]))
-                if tempo_back:
-                    back.append(op_set("live_set", "tempo", float(song["tempo"])))
-                if selected is not None:
-                    back.append(op_set("live_set view", "selected_track", ref(f"id {selected}")))
-                await asend("batch", {"commands": back, "stop_on_error": False})
+            with shielded():
+                try:
+                    if not keep_tracks:
+                        for track_id in temp.values():
+                            await delete_track_by_id(track_id)
+                finally:
+                    RECORDING.difference_update(temp.values())
+                    # Live selects each new track and a neighbour of a deleted one
+                    # kept temporary tracks too: a setup that stopped early left them armed
+                    back = [op_set(f"id {i}", "arm", False) for i in temp.values()
+                            if keep_tracks] + disarm_ops(armed, implicit, on=True)
+                    back.append(op_set("live_set", "metronome", song["metronome"]))
+                    if tempo_back:
+                        back.append(op_set("live_set", "tempo", float(song["tempo"])))
+                    if selected is not None:
+                        back.append(op_set("live_set view", "selected_track", ref(f"id {selected}")))
+                    await asend("batch", {"commands": back, "stop_on_error": False})
         files = {label: path for label, (path, _s) in recorded.items()}
         played = {label: s for label, (_p, s) in recorded.items()}
         # Analyses read the section, at most ANALYSIS_MAX_S of it (as before)
@@ -6777,14 +6969,15 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 if time.monotonic() >= deadline and not polled.get("more"):
                     break
         finally:
-            ours = [oid for oid, meter in meters.items() if meter["ours"]]
-            cleanup = [{"type": "unobserve", "params": {"observer_id": oid}} for oid in ours]
-            if we_started:
-                cleanup += [op_call("live_set", "stop_playing"),
-                            op_set("live_set", "current_song_time",
-                                   float(song["current_song_time"]))]
-            if cleanup:
-                await asend("batch", {"commands": cleanup, "stop_on_error": False})
+            with shielded():
+                ours = [oid for oid, meter in meters.items() if meter["ours"]]
+                cleanup = [{"type": "unobserve", "params": {"observer_id": oid}} for oid in ours]
+                if we_started:
+                    cleanup += [op_call("live_set", "stop_playing"),
+                                op_set("live_set", "current_song_time",
+                                       float(song["current_song_time"]))]
+                if cleanup:
+                    await asend("batch", {"commands": cleanup, "stop_on_error": False})
         from .audio_analysis import level_report
 
         report = level_report(meters)
@@ -7060,8 +7253,9 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         try:
             await asyncio.sleep(seconds)
         finally:
-            if started_playing:
-                await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
+            with shielded():
+                if started_playing:
+                    await asend("lom_call", {"path": "live_set", "method": "stop_playing"})
         frames = listening.since(start)
         if not frames:
             raise RuntimeError("No analyzer sent anything: put one on a track with "

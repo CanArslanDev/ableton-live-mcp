@@ -632,7 +632,8 @@ def _eq_eight():
     params = []
     for band, kind, hz in ((1, 0, 0.05), (2, 2, 0.3), (3, 3, 0.45), (4, 3, 0.6),
                            (5, 3, 0.7), (6, 3, 0.8), (7, 5, 0.85), (8, 7, 0.95)):
-        params += [_switch("%d Filter On A" % band, band not in (1, 8)),
+        # bands 1-4 on, 5-8 off, as Live 12.4.16 inserts it (2026-11-26)
+        params += [_switch("%d Filter On A" % band, band <= 4),
                    _choice("%d Filter Type A" % band, EQ_FILTER_TYPES, kind),
                    _hz("%d Frequency A" % band, hz),
                    _db("%d Gain A" % band, 0.0, -15.0, 15.0),
@@ -1460,9 +1461,20 @@ class FakeBrowser(FakeObj):
             pad.name = stem
             self.loaded.append((track.name, pad.note, item.name))
         else:
+            preset = item.name.lower().endswith(".adg")
+            held = [d for d in track.devices if getattr(d, "_from_preset", False)]
+            if preset and held:
+                # Live loads a rack preset over a rack in place: same device
+                # (same id), new name (Live 12.4.16, 2026-11-26)
+                object.__setattr__(held[0], "name", stem)
+                self.loaded.append((track.name, None, item.name))
+                _named_after(track, stem)
+                return
             seconds = 2.76 if "crash" in item.name.lower() else 0.5
             _auto_arm(track)  # as insert_device does
-            track.devices.append(FakeSimpler(stem, FakeSample("/samples/" + item.name, seconds)))
+            device = FakeSimpler(stem, FakeSample("/samples/" + item.name, seconds))
+            object.__setattr__(device, "_from_preset", preset)
+            track.devices.append(device)
             self.loaded.append((track.name, None, item.name))
             _named_after(track, stem)
 

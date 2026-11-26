@@ -313,3 +313,19 @@ def test_a_close_four_to_three_tempo_is_named(tmp_path):
     for style, bpm in (("click", 128), ("click", 90), ("four on the floor", 120),
                        ("house", 124)):
         assert notes(style, bpm) == [], (style, bpm)
+
+
+def test_a_peak_refined_past_200_bpm_still_gives_a_tempo(monkeypatch):
+    """Geriye Kalan: render_and_analyze failed with StopIteration. The
+    strongest lag in the 70-180 BPM window (29 frames at 44.1 kHz) sat on
+    the slope of a broad peak at 25.6 frames; refined uphill it read 202
+    BPM, outside 60-200, so the peak's own tempo was never scored."""
+    lags = np.arange(4096, dtype=float)
+    shape = np.exp(-0.5 * ((lags - 25.6) / 3) ** 2) + 0.01 * np.exp(-lags / 300)
+    shape[0] = 2.0
+    monkeypatch.setattr(audio_analysis.np, "correlate", lambda a, b, mode: np.concatenate(
+        [np.zeros(len(a) - 1), shape[:len(a)]]))
+    signal = np.zeros(44100 * 10)
+    signal[::20000] = 1.0
+    found = audio_analysis.tempo_estimate(signal, 44100)
+    assert found is not None and 195 < found["bpm"] < 210
