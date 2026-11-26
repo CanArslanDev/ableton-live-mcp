@@ -1456,6 +1456,43 @@ def test_settings_on_an_eq_eight_band_that_is_off_switch_it_on(live_server, monk
     assert {p.name: p for p in bass.devices[-1].parameters}["5 Filter On A"].value == 1
 
 
+def test_gain_alone_leaves_an_eq_eight_cut_band_off(live_server):
+    """Band 8 starts off as a Low Pass 12dB, which ignores Gain: switched on
+    for a Gain alone it would cut the top instead. It stays off, and says so;
+    with a type that takes Gain (or the type set too) it is switched on."""
+    script, call = live_server
+    bass = script._song.tracks[1]
+    result = call("add_device", track="Bass", device="EQ Eight",
+                  settings={"8 Gain A": 3.0, "6 Gain A": -2.0})
+    eq = {p.name: p for p in bass.devices[-1].parameters}
+    assert result["switched_on"] == ["6 Filter On A"]   # band 6 is a Bell
+    assert list(result["left_off"]) == ["8 Filter On A"]
+    assert eq["8 Filter On A"].value == 0 and eq["8 Gain A"].value == 3.0
+    result = call("add_device", track="Bass", device="EQ Eight",
+                  settings={"8 Gain A": 3.0, "8 Filter Type A": "High Shelf"})
+    assert result["switched_on"] == ["8 Filter On A"] and "left_off" not in result
+    sent = call("set_device_parameter_by_name", track="Bass", device=len(bass.devices) - 2,
+                parameter="8 Gain A", value=1.0)
+    assert "switched_on" not in sent and list(sent["left_off"]) == ["8 Filter On A"]
+
+
+def test_a_band_switch_that_fails_is_not_reported_switched_on(live_server):
+    script, call = live_server
+    bass = script._song.tracks[1]
+    call("add_device", track="Bass", device="EQ Eight")
+    switch = {p.name: p for p in bass.devices[-1].parameters}["6 Filter On A"]
+
+    class Refusing(fake_live.FakeParam):
+        def __setattr__(self, name, value):
+            if name == "value":
+                raise RuntimeError("Parameter is disabled")
+            super().__setattr__(name, value)
+    switch.__class__ = Refusing
+    sent = call("set_device_parameter_by_name", track="Bass", device=len(bass.devices) - 1,
+                parameter="6 Frequency A", value=0.3)
+    assert "switched_on" not in sent and "disabled" in sent["errors"]["6 Filter On A"]
+
+
 def test_a_parameter_name_the_device_lacks_gets_likely_ones(live_server):
     """Geriye Kalan: Utility's "Width" is "Stereo Width"; the setting failed
     with a list of 40 names to read through."""
@@ -1876,6 +1913,23 @@ def test_build_tracks_drum_rack_and_audio_tracks(live_server, tmp_path):
     track = next(t for t in song.tracks if t.name == "REF drums")
     assert track.mute and ref["audio_clips"][0]["warping"] is False
     assert ref["audio_clips"][0]["start_marker"] == 0.0
+
+
+def test_build_tracks_passes_on_an_audio_clips_notes(live_server, monkeypatch):
+    """row["notes"] counts the MIDI notes written; an audio clip's notes
+    from fit_audio_clip (extending it) raised AttributeError on the int."""
+    from MCP_Server import extended_tools
+
+    _script, call = live_server
+    fit = extended_tools.fit_audio_clip
+    monkeypatch.setattr(extended_tools, "fit_audio_clip", lambda *a, **k: dict(
+        fit(*a, **k), notes=["Live had it unwarped already, so it was not fitted"]))
+    result = call("build_tracks", tracks=[{"name": "Loop", "kind": "audio", "audio_clips": [
+        {"file": "/samples/loop.wav", "start": 0.0}]}])
+    row = result["tracks"][0]
+    assert row["notes"] == 0
+    assert row["audio_clip_notes"] == ["audio clip loop.wav: Live had it unwarped already, "
+                                       "so it was not fitted"]
 
 
 def _wavs(folder, *names):
@@ -3254,8 +3308,14 @@ def test_a_browser_id_from_before_another_set_was_opened_still_loads(live_server
     script._browser_registry.clear()                    # File > New
     loaded = call("browser_load", track="Vox", item=old)
     assert loaded["devices"][-1] == "Warm Pad" and loaded["loaded"] == "Sounds/Pad/Warm Pad.adg"
+    # a listed id whose item is gone, with nothing of its name
+    extended_tools.BROWSER_SEEN[123456789] = ("No Such Pad", "query:Gone#No%20Such%20Pad",
+                                              "sounds")
     with pytest.raises(Exception, match="not a browser item's id any more"):
         call("browser_load", track="Vox", item=123456789)
+    # digits this server never listed are a name, not a lost id
+    with pytest.raises(Exception, match="Nothing in the browser .* matches '987654321'"):
+        call("browser_load", track="Vox", item="987654321")
     # ids are object addresses: after a restart, a listed id's address may
     # hold another item; its uri tells them apart
     glass = call("browser_search", query="glass pad", category="sounds")["results"][0]
@@ -3263,6 +3323,12 @@ def test_a_browser_id_from_before_another_set_was_opened_still_loads(live_server
     other = script._browser_registry.pop(glass["id"])
     script._browser_registry.clear()
     script._browser_registry[warm["id"]] = other        # warm's address, glass's item
+    loaded = call("browser_load", track="Vox", item=warm["id"])
+    assert loaded["devices"][-1] == "Warm Pad"
+    # or an object that is no browser item at all (it has no uri)
+    warm = call("browser_search", query="pad warm", category="sounds")["results"][0]
+    script._browser_registry.clear()
+    script._browser_registry[warm["id"]] = fake_live.FakeObj(name="Not an item")
     loaded = call("browser_load", track="Vox", item=warm["id"])
     assert loaded["devices"][-1] == "Warm Pad"
 

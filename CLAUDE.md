@@ -808,6 +808,12 @@ New) for the fixes after the Geriye Kalan remake:
 - **EQ Eight is inserted with bands 1–4 on and 5–8 off** (side A; side B
   read 1 off, 2 off, 3–6 on, 7–8 off). "N Filter On A" is quantized
   (Off, On). Settings on a band that is off turn it on (`band_switches`).
+  Its filter types (side A, bands 1–8) start as Low Shelf, Bell, Bell,
+  High Shelf, Bell, Bell, Bell, Low Pass 12dB; "N Filter Type A" lists
+  High Pass 48dB, High Pass 12dB, Low Shelf, Bell, Notch, High Shelf, Low
+  Pass 12dB, Low Pass 48dB (values 0–7). A Gain alone leaves a band off
+  when its type ignores Gain (band 8's low-pass), since turning it on
+  would add the cut.
 - **A cancelled tool call** (the SDK's anyio cancel scope) raised again at
   every await in a `finally`: a render cancelled 4 s into its take left
   "MCP Rec master" in the set. `shielded()` around the cleanup removed it
