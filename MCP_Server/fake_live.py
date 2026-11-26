@@ -630,9 +630,10 @@ EQ_FILTER_TYPES = ["High Pass 48dB", "High Pass 12dB", "Low Shelf", "Bell", "Not
 
 def _eq_eight():
     params = []
-    for band, kind, hz in ((1, 0, 0.05), (2, 2, 0.3), (3, 3, 0.45), (4, 3, 0.6),
-                           (5, 3, 0.7), (6, 3, 0.8), (7, 5, 0.85), (8, 7, 0.95)):
-        # bands 1-4 on, 5-8 off, as Live 12.4.16 inserts it (2026-11-26)
+    for band, kind, hz in ((1, 2, 0.05), (2, 3, 0.3), (3, 3, 0.45), (4, 5, 0.6),
+                           (5, 3, 0.7), (6, 3, 0.8), (7, 3, 0.85), (8, 6, 0.95)):
+        # bands 1-4 on, 5-8 off, as Live 12.4.16 inserts it (2026-11-26):
+        # Low Shelf, Bell, Bell, High Shelf, Bell, Bell, Bell, Low Pass 12dB
         params += [_switch("%d Filter On A" % band, band <= 4),
                    _choice("%d Filter Type A" % band, EQ_FILTER_TYPES, kind),
                    _hz("%d Frequency A" % band, hz),

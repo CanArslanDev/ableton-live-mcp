@@ -630,12 +630,11 @@ def test_a_cancelled_render_still_cleans_up(wav):
     live._length = 4.0
 
     async def main():
-        with anyio.move_on_after(0.6):
+        with anyio.move_on_after(0.6) as scope:
             await mcp.call_tool("render_and_analyze", {"length_beats": 4})
-        raise AssertionError("the render should still be waiting for its take")
+        return scope.cancelled_caught
 
-    with pytest.raises(AssertionError, match="still be waiting"):
-        asyncio.run(main())
+    assert asyncio.run(main()), "the render should still have been waiting for its take"
     assert live.deleted == [RENDER_ID]
     assert live.song["is_playing"] is False and live.song["record_mode"] is False
     assert live.song["metronome"] is True and live.song["loop"] is True

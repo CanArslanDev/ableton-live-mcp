@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+Server only; the Remote Script is unchanged. Follow-ups from 2.5.1's review.
+
+### Fixed
+
+- **`build_tracks` no longer raises AttributeError** when an audio clip's
+  fit leaves a note (for example a clip Live had unwarped already): the
+  note was added to `notes`, which counts the MIDI notes written. Such
+  notes now go to `audio_clip_notes`.
+- **An EQ Eight band switch that fails is no longer reported as switched
+  on** by `set_device_parameter_by_name`; it goes to `errors`, as in
+  `add_device` and `apply_device_chain`.
+- **A Gain no longer turns on an EQ Eight band whose filter type ignores
+  Gain** (a cut or the notch: band 8 starts as a Low Pass 12dB in Live
+  12.4.16), which added a cut nobody asked for, with or without a
+  frequency or Q alongside. The band stays off and `left_off` says why;
+  with a Bell or shelf, or the Filter Type set too, it is switched on as
+  before.
+- **Digits that are no browser id and no item's name** ("808" when nothing
+  is called so) get "Nothing in the browser matches" again, not "not a
+  browser item's id any more"; that message is kept for ids this server
+  listed. A listed id that now resolves to an object that is no browser
+  item is looked up again by name and uri too.
+- The fake EQ Eight starts with Live 12.4.16's filter types.
+
 ## 2.5.1 — 2026-11-26
 
 Server only; the Remote Script is unchanged. Each fix comes from a problem

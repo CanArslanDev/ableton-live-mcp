@@ -982,13 +982,13 @@ def resolve_parameter_names(device: str, names: list[str]) -> dict[str, str]:
 def names_on(device: str, names: list[str], present: set) -> dict[str, str]:
     """resolve_parameter_names over parameter names already read."""
     mapping, class_name = {}, None
+    # Live's script matches a name in any case ("stereo width"); the
+    # device's own spelling is what band switches and reports go by
+    by_case = {str(p).lower(): p for p in present if isinstance(p, str)}
     for name in names:
         if name in present or isinstance(name, int) or str(name).isdigit():
             mapping[name] = name
             continue
-        # Live's script matches a name in any case ("stereo width"); the
-        # device's own spelling is what band switches and reports go by
-        by_case = {str(p).lower(): p for p in present if isinstance(p, str)}
         if str(name).lower() in by_case:
             mapping[name] = by_case[str(name).lower()]
             continue
@@ -1015,27 +1015,49 @@ def close_names(name: str, present: Iterable[str]) -> list[str]:
 EQ_BAND_SETTING = re.compile(r"(\d) (?:Filter Type|Frequency|Gain|Q|Resonance) ([AB])")
 
 
-def band_switches(names: Iterable[str], values: dict[str, Any]) -> list[str]:
+# EQ Eight's filter types whose Gain is heard: Low Shelf, Bell, High Shelf
+# (the cuts and the notch ignore it)
+EQ_GAIN_TYPES = (2.0, 3.0, 5.0)
+
+
+def band_switches(names: Iterable[str], values: dict[str, Any],
+                  left_off: dict[str, str] | None = None) -> list[str]:
     """The EQ Eight band switches ("8 Filter On A") to turn on because a
     band's type, frequency, gain or Q is set while it is off. Live 12.4.16
     starts bands 5-8 off (1-4 on, side A): set alone, a low-pass on band 8
-    did nothing, twice (Chill, Geriye Kalan). A switch set among the same
-    settings is left as given. values: the device's parameters by name."""
+    did nothing, twice. A switch set among the same settings is left as
+    given. A band given a Gain but no Filter Type stays off when its type
+    ignores Gain (a cut or the notch: band 8 starts as a low-pass), as the
+    Gain asks for a boost or dip, and switched on it would add that cut
+    instead; such switches go to `left_off` with the reason. values: the
+    device's parameters by name."""
     asked = [str(n) for n in names]
     switches = []
     for name in asked:
         band = EQ_BAND_SETTING.fullmatch(name)
-        if band:
-            switch = f"{band.group(1)} Filter On {band.group(2)}"
-            if switch not in asked and values.get(switch) == 0.0 and switch not in switches:
-                switches.append(switch)
+        if not band:
+            continue
+        number, side = band.groups()
+        switch = f"{number} Filter On {side}"
+        if switch in asked or values.get(switch) != 0.0 or switch in switches:
+            continue
+        kind = values.get(f"{number} Filter Type {side}")
+        if f"{number} Gain {side}" in asked and f"{number} Filter Type {side}" not in asked \
+                and kind is not None and float(kind) not in EQ_GAIN_TYPES:
+            if left_off is not None:
+                left_off[switch] = (f"band {number} is off and its filter type ignores Gain "
+                                    "(a cut or the notch), so it was left off; set its Filter "
+                                    "Type (Bell, a shelf) to hear the Gain")
+            continue
+        switches.append(switch)
     return switches
 
 
 def prepared_settings(device: str, settings: dict[str, Any]) -> tuple[list[dict], dict, dict]:
     """(batch steps, setting -> parameter name, report extras) for settings
     on one device, read in one round trip: names mapped across Live
-    versions, EQ Eight bands switched on (`switched_on`), and likely names
+    versions, EQ Eight bands switched on (`switched_on`) or left off for a
+    Gain their type ignores (`left_off`), and likely names
     for ones the device lacks (`did_you_mean`). The settings' own steps come
     first, in order (setting_report counts on that)."""
     params = send("lom_get", {"path": f"{device} parameters", "properties": ["name", "value"],
@@ -1044,10 +1066,13 @@ def prepared_settings(device: str, settings: dict[str, Any]) -> tuple[list[dict]
     names = names_on(device, list(settings), set(values))
     ops = setting_ops(device, settings, names)
     extras: dict[str, Any] = {}
-    switches = band_switches(names.values(), values)
+    left_off: dict[str, str] = {}
+    switches = band_switches(names.values(), values, left_off)
     if switches:
         ops += [op_set(f"{device} parameters {selector(w)}", "value", 1.0) for w in switches]
         extras["switched_on"] = switches
+    if left_off:
+        extras["left_off"] = left_off
     missing = {asked: close_names(actual, values) for asked, actual in names.items()
                if actual not in values and not str(actual).isdigit()}
     missing = {asked: found for asked, found in missing.items() if found}
@@ -4060,7 +4085,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                              "this one (usually the kick or drums)")
         source = track_name(sidechain_from) if sidechain_from is not None else None
         ids = inserted_device_ids(track_path(track), [[name] for name, _settings in spec["devices"]])
-        ops, asked, names, switched = [], [], {}, []
+        ops, asked, names, switched, left_off = [], [], {}, [], {}
         for (name, settings), device_id in zip(spec["devices"], ids):
             params = send("lom_get", {"path": f"id {device_id} parameters",
                                       "properties": ["name", "value"], "ids": False})["items"]
@@ -4069,8 +4094,10 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             ops += setting_ops(f"id {device_id}", settings, mapping)
             asked += [f"{name}: {s}" for s in settings]
             names.update({f"{name}: {k}": f"{name}: {v}" for k, v in mapping.items()})
+            off: dict[str, str] = {}
             switched += [(f"id {device_id}", f"{name}: {w}")
-                         for w in band_switches(mapping.values(), values)]
+                         for w in band_switches(mapping.values(), values, off)]
+            left_off.update({f"{name}: {w}": why for w, why in off.items()})
         if sidechain_from is not None:
             compressor = f"id {ids[0]}"
             ops.append(op_set(compressor, "input_routing_type", ref(
@@ -4086,6 +4113,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         if switched:
             report["switched_on"] = [label for _device, label in switched]
             switch_failures(report, applied, len(asked), report["switched_on"])
+        if left_off:
+            report["left_off"] = left_off
         return to_json(dict({"chain": chain, "description": spec["description"],
                              "devices": [name for name, _settings in spec["devices"]]},
                             **report))
@@ -4368,6 +4397,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                         row.setdefault("switched_on", []).extend(extras["switched_on"])
                     if extras.get("did_you_mean"):
                         row.setdefault("did_you_mean", {}).update(extras["did_you_mean"])
+                    if extras.get("left_off"):
+                        row.setdefault("left_off", {}).update(extras["left_off"])
             if spec.get("volume_db") is not None:
                 ops.append(op_display(f"{tp} mixer_device volume", f"{float(spec['volume_db']):.1f} dB"))
             if spec.get("pan") is not None:
@@ -4401,7 +4432,8 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                 row["problems"] += [f"audio clip {Path(str(clip['file'])).name}: {error}"
                                     for error in fitted.get("errors", [])]
                 if fitted.get("notes"):
-                    row.setdefault("notes", []).extend(
+                    # row["notes"] counts the MIDI notes written
+                    row.setdefault("audio_clip_notes", []).extend(
                         f"audio clip {Path(str(clip['file'])).name}: {n}" for n in fitted["notes"])
                 if fitted.get("warning"):
                     row.setdefault("warnings", []).append(
@@ -4794,7 +4826,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
         else:
             chain = None
             dp = None if is_mixer(device) else device_path(track, device)
-        switch = None
+        switch, left_off = None, {}
         if dp is not None and isinstance(parameter, str) and not parameter.strip().isdigit():
             params = send("lom_get", {"path": f"{dp} parameters", "properties": ["name", "value"],
                                       "ids": False})["items"]
@@ -4806,7 +4838,7 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
                     raise ValueError(f"No parameter named {asked!r} on this device; did you "
                                      f"mean {' or '.join(map(repr, likely))}?")
             if value is not None or display_value is not None:
-                switch = next(iter(band_switches([parameter], values)), None)
+                switch = next(iter(band_switches([parameter], values, left_off)), None)
         if dp is not None:
             pp = f"{dp} parameters {selector(parameter)}"
         else:
@@ -4825,13 +4857,20 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             first = done["results"][0]
             if first.get("status") == "error":
                 raise RuntimeError(first.get("message") or "the setting failed")
-            result = dict(first.get("result") or {}, switched_on=switch)
+            turned = done["results"][1] if len(done["results"]) > 1 else {}
+            result = dict(first.get("result") or {})
+            if turned.get("status") == "error":
+                result["errors"] = {switch: turned.get("message") or "the switch failed"}
+            else:
+                result["switched_on"] = switch
         elif display_value is not None:
             result = send("param_set_display", {"path": pp, "value": display_value})
         elif value is None:
             result = lom_get(pp, ["name", "value", "min", "max", "is_quantized", "value_items"])
         else:
             result = send("lom_set", {"path": pp, "property": "value", "value": float(value)})
+        if left_off and isinstance(result, dict):
+            result = dict(result, left_off=left_off)
         if parameter != asked and isinstance(result, dict):
             result = dict(result, asked=asked, parameter=parameter)
         return to_json(result)
@@ -4986,19 +5025,20 @@ def register(mcp, get_connection: Callable[[], Any]) -> None:
             except AbletonCommandError as e:
                 if "Unknown id" not in str(e):
                     raise
-                found, stale = {}, True
+                found = {}
             listed = BROWSER_SEEN.get(int(text))
-            if isinstance(found.get("uri"), str) and listed is not None \
-                    and found["uri"] != listed[1]:
-                # ids are object addresses: after the script restarted, the
-                # address of an item this server listed can hold another one
-                stale = True
-            elif isinstance(found.get("uri"), str):  # a browser item (others have no uri)
+            uri = found.get("uri")
+            # a browser item (other objects have no uri), unless this server
+            # listed another item there: ids are object addresses, and after
+            # the script restarted one can hold another item or object
+            if isinstance(uri, str) and (listed is None or uri == listed[1]):
                 name = found.get("name")
                 return int(text), name if isinstance(name, str) else text
-            seen = listed if stale else None
-            if seen is not None:  # listed before another set was opened: look again
-                name, uri, where = seen
+            # an id this server listed, gone or now something else; digits it
+            # never listed ("808") are a name
+            stale = listed is not None
+            if stale:  # listed before another set was opened: look again
+                name, uri, where = listed
                 again = search_browser(name, where, max_results=25, time_limit=3.0,
                                        patience=20.0, enough=lambda e: e["uri"] == uri)
                 same = [h for h in again["results"] if h["uri"] == uri]
