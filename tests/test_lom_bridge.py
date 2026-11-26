@@ -1458,7 +1458,7 @@ def test_settings_on_an_eq_eight_band_that_is_off_switch_it_on(live_server, monk
 
 def test_gain_alone_leaves_an_eq_eight_cut_band_off(live_server):
     """Band 8 starts off as a Low Pass 12dB, which ignores Gain: switched on
-    for a Gain alone it would cut the top instead. It stays off, and says so;
+    for a Gain (with or without a frequency) it would cut the top instead. It stays off, and says so;
     with a type that takes Gain (or the type set too) it is switched on."""
     script, call = live_server
     bass = script._song.tracks[1]
@@ -1468,10 +1468,17 @@ def test_gain_alone_leaves_an_eq_eight_cut_band_off(live_server):
     assert result["switched_on"] == ["6 Filter On A"]   # band 6 is a Bell
     assert list(result["left_off"]) == ["8 Filter On A"]
     assert eq["8 Filter On A"].value == 0 and eq["8 Gain A"].value == 3.0
+    # a Gain with a frequency asks for a boost there too, not a low-pass
+    result = call("add_device", track="Bass", device="EQ Eight",
+                  settings={"8 Gain A": 3.0, "8 Frequency A": 0.9})
+    assert "switched_on" not in result and list(result["left_off"]) == ["8 Filter On A"]
+    # a frequency alone on band 8 is a low-pass: switched on
+    result = call("add_device", track="Bass", device="EQ Eight", settings={"8 Frequency A": 0.9})
+    assert result["switched_on"] == ["8 Filter On A"]
     result = call("add_device", track="Bass", device="EQ Eight",
                   settings={"8 Gain A": 3.0, "8 Filter Type A": "High Shelf"})
     assert result["switched_on"] == ["8 Filter On A"] and "left_off" not in result
-    sent = call("set_device_parameter_by_name", track="Bass", device=len(bass.devices) - 2,
+    sent = call("set_device_parameter_by_name", track="Bass", device=len(bass.devices) - 4,
                 parameter="8 Gain A", value=1.0)
     assert "switched_on" not in sent and list(sent["left_off"]) == ["8 Filter On A"]
 

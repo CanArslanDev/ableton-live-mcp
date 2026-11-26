@@ -1026,10 +1026,11 @@ def band_switches(names: Iterable[str], values: dict[str, Any],
     band's type, frequency, gain or Q is set while it is off. Live 12.4.16
     starts bands 5-8 off (1-4 on, side A): set alone, a low-pass on band 8
     did nothing, twice. A switch set among the same settings is left as
-    given. A band whose only setting is Gain stays off when its filter type
-    ignores Gain (a cut or the notch): switched on, it would add that cut;
-    such switches go to `left_off` with the reason. values: the device's
-    parameters by name."""
+    given. A band given a Gain but no Filter Type stays off when its type
+    ignores Gain (a cut or the notch: band 8 starts as a low-pass), as the
+    Gain asks for a boost or dip, and switched on it would add that cut
+    instead; such switches go to `left_off` with the reason. values: the
+    device's parameters by name."""
     asked = [str(n) for n in names]
     switches = []
     for name in asked:
@@ -1040,10 +1041,9 @@ def band_switches(names: Iterable[str], values: dict[str, Any],
         switch = f"{number} Filter On {side}"
         if switch in asked or values.get(switch) != 0.0 or switch in switches:
             continue
-        own = [n for n in asked if (m := EQ_BAND_SETTING.fullmatch(n)) and m.groups() == (number, side)]
         kind = values.get(f"{number} Filter Type {side}")
-        if all(n == f"{number} Gain {side}" for n in own) and kind is not None \
-                and float(kind) not in EQ_GAIN_TYPES:
+        if f"{number} Gain {side}" in asked and f"{number} Filter Type {side}" not in asked \
+                and kind is not None and float(kind) not in EQ_GAIN_TYPES:
             if left_off is not None:
                 left_off[switch] = (f"band {number} is off and its filter type ignores Gain "
                                     "(a cut or the notch), so it was left off; set its Filter "

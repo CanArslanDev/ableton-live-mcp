@@ -811,9 +811,9 @@ New) for the fixes after the Geriye Kalan remake:
   Its filter types (side A, bands 1–8) start as Low Shelf, Bell, Bell,
   High Shelf, Bell, Bell, Bell, Low Pass 12dB; "N Filter Type A" lists
   High Pass 48dB, High Pass 12dB, Low Shelf, Bell, Notch, High Shelf, Low
-  Pass 12dB, Low Pass 48dB (values 0–7). A Gain alone leaves a band off
-  when its type ignores Gain (band 8's low-pass), since turning it on
-  would add the cut.
+  Pass 12dB, Low Pass 48dB (values 0–7). A Gain without a Filter Type
+  leaves a band off when its type ignores Gain (band 8's low-pass), since
+  turning it on would add the cut.
 - **A cancelled tool call** (the SDK's anyio cancel scope) raised again at
   every await in a `finally`: a render cancelled 4 s into its take left
   "MCP Rec master" in the set. `shielded()` around the cleanup removed it
