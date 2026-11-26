@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from MCP_Server import fake_live
+from MCP_Server import extended_tools, fake_live
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1422,6 +1422,58 @@ def test_add_device_reports_failed_settings_at_the_top(live_server):
     assert result["ok"] is False and result["settings"] == "1 of 2 applied"
     assert list(result["errors"]) == ["1 Filter Type A"]
     assert "High Pass 48dB" in result["errors"]["1 Filter Type A"]   # Live's choices
+
+
+def test_settings_on_an_eq_eight_band_that_is_off_switch_it_on(live_server, monkeypatch):
+    """Chill and Geriye Kalan: a low-pass set on band 8 did nothing, because
+    Live 12.4.16 inserts EQ Eight with bands 5-8 off, and add_device said ok."""
+    script, call = live_server
+    bass = script._song.tracks[1]
+    result = call("add_device", track="Bass", device="EQ Eight",
+                  settings={"8 Filter Type A": "Low Pass 12dB", "8 Frequency A": 0.8,
+                            "2 Gain A": 3.0})
+    eq = bass.devices[-1]
+    switch = {p.name: p for p in eq.parameters}
+    assert result["ok"] and result["settings"] == "3 of 3 applied"
+    assert result["switched_on"] == ["8 Filter On A"]      # band 2 was on already
+    assert switch["8 Filter On A"].value == 1 and switch["8 Frequency A"].value == 0.8
+    # a switch set with the band is left as given
+    result = call("add_device", track="Bass", device="EQ Eight",
+                  settings={"7 Frequency A": 0.5, "7 Filter On A": "Off"})
+    assert "switched_on" not in result
+    assert {p.name: p for p in bass.devices[-1].parameters}["7 Filter On A"].value == 0
+    # one parameter at a time, the same (in the same command: one undo step)
+    sent = call("set_device_parameter_by_name", track="Bass", device=len(bass.devices) - 1,
+                parameter="6 Frequency A", value=0.3)
+    assert sent["switched_on"] == "6 Filter On A"
+    assert {p.name: p for p in bass.devices[-1].parameters}["6 Filter On A"].value == 1
+    # a recipe's EQ too
+    from MCP_Server import device_recipes
+    monkeypatch.setattr(device_recipes, "recipe", lambda name: {
+        "description": "x", "devices": [("EQ Eight", {"5 Gain A": -3.0})]})
+    chained = call("apply_device_chain", track="Bass", chain="anything")
+    assert chained["ok"] and chained["switched_on"] == ["EQ Eight: 5 Filter On A"]
+    assert {p.name: p for p in bass.devices[-1].parameters}["5 Filter On A"].value == 1
+
+
+def test_a_parameter_name_the_device_lacks_gets_likely_ones(live_server):
+    """Geriye Kalan: Utility's "Width" is "Stereo Width"; the setting failed
+    with a list of 40 names to read through."""
+    script, call = live_server
+    result = call("add_device", track="Bass", device="Utility", settings={"Width": "50 %"})
+    assert result["ok"] is False and result["did_you_mean"] == {"Width": ["Stereo Width"]}
+    with pytest.raises(Exception, match="did you mean 'Stereo Width'"):
+        call("set_device_parameter_by_name", track="Bass", device="Utility",
+             parameter="Width", display_value="50 %")
+    # a name in another case is the device's own, as Live's script takes it
+    result = call("add_device", track="Bass", device="Utility", settings={"stereo width": "50 %"})
+    assert result["ok"] and "did_you_mean" not in result
+    sent = call("set_device_parameter_by_name", track="Bass", device="Utility",
+                parameter="stereo width", display_value="60 %")
+    assert sent["new"] == "60 %"
+    result = call("add_device", track="Bass", device="EQ Eight", settings={"8 frequency a": 0.7})
+    assert result["ok"] and result["switched_on"] == ["8 Filter On A"]
+    assert "did_you_mean" not in result
 
 
 def test_apply_device_chain_reports_failed_settings_at_the_top(live_server, monkeypatch):
@@ -3164,7 +3216,18 @@ def test_browser_load_follows_a_track_live_renames(live_server):
     browser = script.application().browser
     object.__setattr__(browser, "load_item", lambda item: None)
     loaded = call("browser_load", track="Vox", item="pad warm")
-    assert loaded["warning"] == "the track's devices did not change"
+    assert loaded["warning"].startswith("Live loaded nothing")
+    # Live loads a preset over the same preset in place (same ids, same
+    # names, Live 12.4.16): that is said plainly, not as a failed load
+    loaded = call("browser_load", track="5-Warm Pad", item="pad warm")
+    assert "warning" not in loaded
+    assert loaded["note"].startswith("the track already held Warm Pad")
+    # and another rack preset over it keeps the device's id, with its name
+    object.__delattr__(browser, "load_item")
+    before = song.tracks[-1].devices[0]
+    loaded = call("browser_load", track="5-Warm Pad", item="Glass Pad")
+    assert song.tracks[-1].devices == [before] and before.name == "Glass Pad"
+    assert "warning" not in loaded and "note" not in loaded
 
 
 def test_a_name_made_of_digits_is_searched_for(live_server):
@@ -3178,6 +3241,30 @@ def test_a_name_made_of_digits_is_searched_for(live_server):
         call("browser_preview", item=str(track_id))
     found = call("browser_search", query="crash 505", category="drums")["results"][0]
     assert call("browser_preview", item=str(found["id"]))["previewing"] == "Crash 505.wav"
+
+
+def test_a_browser_id_from_before_another_set_was_opened_still_loads(live_server, monkeypatch):
+    """Geriye Kalan: Live 12.4.16 dropped the browser ids when another set was
+    opened, and browser_load(old id) said "Nothing in the browser matches
+    '5465530768'". An id this server listed is found again by name and uri;
+    one it never listed says the id is gone."""
+    script, call = live_server
+    monkeypatch.setattr(extended_tools, "BROWSER_SEEN", {})
+    old = call("browser_search", query="pad warm", category="sounds")["results"][0]["id"]
+    script._browser_registry.clear()                    # File > New
+    loaded = call("browser_load", track="Vox", item=old)
+    assert loaded["devices"][-1] == "Warm Pad" and loaded["loaded"] == "Sounds/Pad/Warm Pad.adg"
+    with pytest.raises(Exception, match="not a browser item's id any more"):
+        call("browser_load", track="Vox", item=123456789)
+    # ids are object addresses: after a restart, a listed id's address may
+    # hold another item; its uri tells them apart
+    glass = call("browser_search", query="glass pad", category="sounds")["results"][0]
+    warm = call("browser_search", query="pad warm", category="sounds")["results"][0]
+    other = script._browser_registry.pop(glass["id"])
+    script._browser_registry.clear()
+    script._browser_registry[warm["id"]] = other        # warm's address, glass's item
+    loaded = call("browser_load", track="Vox", item=warm["id"])
+    assert loaded["devices"][-1] == "Warm Pad"
 
 
 def test_an_exact_name_ends_the_browser_walk(monkeypatch):
