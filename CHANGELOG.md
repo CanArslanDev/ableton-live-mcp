@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.5.2 — 2026-11-26
 
 Server only; the Remote Script is unchanged. Follow-ups from 2.5.1's review.
 
